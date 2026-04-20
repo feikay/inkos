@@ -4,6 +4,7 @@ import { BaseAgent } from "./base.js";
 import type { BookConfig } from "../models/book.js";
 import { parseBookRules } from "../models/book-rules.js";
 import { ChapterIntentSchema, type ChapterConflict, type ChapterIntent } from "../models/input-governance.js";
+import type { StoredHook } from "../state/memory-db.js";
 import {
   parseChapterSummariesMarkdown,
   renderHookSnapshot,
@@ -12,6 +13,12 @@ import {
 } from "../utils/memory-retrieval.js";
 import { analyzeChapterCadence } from "../utils/chapter-cadence.js";
 import { buildPlannerHookAgenda } from "../utils/hook-agenda.js";
+import { buildChapterGoal } from "../utils/chapter-goal-builder.js";
+import {
+  summarizeArcMap,
+  summarizeGenreProfile,
+  summarizePowerSystem,
+} from "../utils/webnovel-inputs.js";
 
 export interface PlanChapterInput {
   readonly book: BookConfig;
@@ -25,6 +32,28 @@ export interface PlanChapterOutput {
   readonly intentMarkdown: string;
   readonly plannerInputs: ReadonlyArray<string>;
   readonly runtimePath: string;
+}
+
+interface OutlineSelection {
+  readonly node?: string;
+  readonly matchedAnchor: boolean;
+  readonly source: "exact" | "range" | "fallback-first" | "fallback-any" | "missing";
+}
+
+interface ContinuityAnchor {
+  readonly goal?: string;
+  readonly outlineNode?: string;
+  readonly summaryText?: string;
+  readonly firstSummaryText?: string;
+}
+
+interface PlannerHookThrottle {
+  readonly activeCount: number;
+  readonly cap: number;
+  readonly suggestedNewHookCap: number;
+  readonly shouldThrottle: boolean;
+  readonly recentOpenBias: boolean;
+  readonly pressuredHookIds: ReadonlyArray<string>;
 }
 
 export class PlannerAgent extends BaseAgent {
@@ -45,6 +74,11 @@ export class PlannerAgent extends BaseAgent {
       chapterSummaries: join(storyDir, "chapter_summaries.md"),
       bookRules: join(storyDir, "book_rules.md"),
       currentState: join(storyDir, "current_state.md"),
+      pendingHooks: join(storyDir, "pending_hooks.md"),
+      foreshadowRegistry: join(storyDir, "foreshadow_registry.json"),
+      genreProfile: join(storyDir, "genre_profile.yaml"),
+      arcMap: join(storyDir, "arc_map.yaml"),
+      powerSystem: join(storyDir, "power_system.yaml"),
     } as const;
 
     const [
@@ -55,6 +89,11 @@ export class PlannerAgent extends BaseAgent {
       chapterSummaries,
       bookRulesRaw,
       currentState,
+      pendingHooksRaw,
+      foreshadowRegistryRaw,
+      genreProfileRaw,
+      arcMapRaw,
+      powerSystemRaw,
     ] = await Promise.all([
       this.readFileOrDefault(sourcePaths.authorIntent),
       this.readFileOrDefault(sourcePaths.currentFocus),
@@ -63,16 +102,65 @@ export class PlannerAgent extends BaseAgent {
       this.readFileOrDefault(sourcePaths.chapterSummaries),
       this.readFileOrDefault(sourcePaths.bookRules),
       this.readFileOrDefault(sourcePaths.currentState),
+      this.readFileOrDefault(sourcePaths.pendingHooks),
+      this.readFileOrDefault(sourcePaths.foreshadowRegistry),
+      this.readFileOrDefault(sourcePaths.genreProfile),
+      this.readFileOrDefault(sourcePaths.arcMap),
+      this.readFileOrDefault(sourcePaths.powerSystem),
     ]);
+    const language = this.isChineseLanguage(input.book.language) ? "zh" : "en";
+    const genreProfile = summarizeGenreProfile(genreProfileRaw, language);
+    const arcMap = summarizeArcMap(arcMapRaw, input.chapterNumber, language);
+    const powerSystem = summarizePowerSystem(powerSystemRaw, language);
 
-    const outlineNode = this.findOutlineNode(volumeOutline, input.chapterNumber);
-    const matchedOutlineAnchor = this.hasMatchedOutlineAnchor(volumeOutline, input.chapterNumber);
-    const goal = this.deriveGoal(input.externalContext, currentFocus, authorIntent, outlineNode, input.chapterNumber);
+    const outlineSelection = this.resolveOutlineSelection(volumeOutline, input.chapterNumber);
+    const continuityAnchor = this.buildContinuityAnchor({
+      currentState,
+      currentFocus,
+      chapterSummaries,
+      chapterNumber: input.chapterNumber,
+    });
+    const outlineLooksStale = this.shouldDeprioritizeOutlineNode({
+      chapterNumber: input.chapterNumber,
+      outlineSelection,
+      continuityAnchor,
+    });
+    const outlineNode = outlineLooksStale
+      ? continuityAnchor.outlineNode
+      : outlineSelection.node;
+    const matchedOutlineAnchor = outlineLooksStale
+      ? false
+      : outlineSelection.matchedAnchor;
+    const goal = this.deriveGoal(
+      input.externalContext,
+      currentFocus,
+      authorIntent,
+      outlineLooksStale ? continuityAnchor.goal : undefined,
+      outlineNode,
+      arcMap.goalHint,
+      input.chapterNumber,
+    );
     const parsedRules = parseBookRules(bookRulesRaw);
-    const mustKeep = this.collectMustKeep(currentState, storyBible);
-    const mustAvoid = this.collectMustAvoid(currentFocus, parsedRules.rules.prohibitions);
-    const styleEmphasis = this.collectStyleEmphasis(authorIntent, currentFocus);
-    const conflicts = this.collectConflicts(input.externalContext, currentFocus, outlineNode, volumeOutline);
+    const mustKeep = this.unique([
+      ...this.collectMustKeep(currentState, storyBible),
+      ...powerSystem.mustKeep,
+    ]).slice(0, 6);
+    const mustAvoid = this.unique([
+      ...this.collectMustAvoid(currentFocus, parsedRules.rules.prohibitions),
+      ...genreProfile.mustAvoid,
+      ...powerSystem.mustAvoid,
+    ]).slice(0, 8);
+    const styleEmphasis = this.unique([
+      ...this.collectStyleEmphasis(authorIntent, currentFocus),
+      ...genreProfile.styleEmphasis,
+    ]).slice(0, 6);
+    const conflicts = this.collectConflicts(
+      input.externalContext,
+      currentFocus,
+      outlineNode,
+      volumeOutline,
+      outlineLooksStale,
+    );
     const planningAnchor = conflicts.length > 0 ? undefined : outlineNode;
     const memorySelection = await retrieveMemorySelection({
       bookDir: input.bookDir,
@@ -90,6 +178,28 @@ export class PlannerAgent extends BaseAgent {
       targetChapters: input.book.targetChapters,
       language: input.book.language ?? "zh",
     });
+    const hookThrottle = this.buildPlannerHookThrottle({
+      activeHooks: memorySelection.activeHooks,
+      chapterSummaries,
+      chapterNumber: input.chapterNumber,
+      hookAgenda,
+    });
+    const chapterGoal = buildChapterGoal({
+      language,
+      chapterNumber: input.chapterNumber,
+      goal,
+      outlineNode,
+      currentFocus,
+      currentState,
+      chapterSummaries,
+      pendingHooksRaw,
+      foreshadowRegistryRaw,
+      hookAgenda,
+      selectedHooks: memorySelection.activeHooks,
+      arcMap,
+      genreProfile,
+      powerSystem,
+    });
     const directives = this.buildStructuredDirectives({
       chapterNumber: input.chapterNumber,
       language: input.book.language,
@@ -97,7 +207,9 @@ export class PlannerAgent extends BaseAgent {
       outlineNode,
       matchedOutlineAnchor,
       chapterSummaries,
+      arcMapDirective: arcMap.arcDirective,
     });
+    const throttleConflicts = this.buildHookDebtThrottleConflicts(hookThrottle, chapterGoal.foreshadowToTouch);
 
     const intent = ChapterIntentSchema.parse({
       chapter: input.chapterNumber,
@@ -105,9 +217,13 @@ export class PlannerAgent extends BaseAgent {
       outlineNode,
       ...directives,
       mustKeep,
-      mustAvoid,
+      mustAvoid: this.unique([
+        ...mustAvoid,
+        ...this.buildHookDebtMustAvoid(hookThrottle, language),
+      ]).slice(0, 8),
       styleEmphasis,
-      conflicts,
+      conflicts: [...conflicts, ...throttleConflicts],
+      chapterGoal,
       hookAgenda,
     });
 
@@ -126,7 +242,6 @@ export class PlannerAgent extends BaseAgent {
       intentMarkdown,
       plannerInputs: [
         ...Object.values(sourcePaths),
-        join(storyDir, "pending_hooks.md"),
         ...(memorySelection.dbPath ? [memorySelection.dbPath] : []),
       ],
       runtimePath,
@@ -140,6 +255,7 @@ export class PlannerAgent extends BaseAgent {
     readonly outlineNode: string | undefined;
     readonly matchedOutlineAnchor: boolean;
     readonly chapterSummaries: string;
+    readonly arcMapDirective?: string;
   }): Pick<ChapterIntent, "sceneDirective" | "arcDirective" | "moodDirective" | "titleDirective"> {
     const recentSummaries = parseChapterSummariesMarkdown(input.chapterSummaries)
       .filter((summary) => summary.chapter < input.chapterNumber)
@@ -161,6 +277,7 @@ export class PlannerAgent extends BaseAgent {
         input.volumeOutline,
         input.outlineNode,
         input.matchedOutlineAnchor,
+        input.arcMapDirective,
       ),
       sceneDirective: this.buildSceneDirective(input.language, cadence),
       moodDirective: this.buildMoodDirective(input.language, cadence),
@@ -172,19 +289,25 @@ export class PlannerAgent extends BaseAgent {
     externalContext: string | undefined,
     currentFocus: string,
     authorIntent: string,
+    continuityGoal: string | undefined,
     outlineNode: string | undefined,
+    arcGoalHint: string | undefined,
     chapterNumber: number,
   ): string {
     const first = this.extractFirstDirective(externalContext);
     if (first) return first;
     const localOverride = this.extractLocalOverrideGoal(currentFocus);
     if (localOverride) return localOverride;
+    const continuity = this.extractFirstDirective(continuityGoal);
+    if (continuity) return continuity;
     const outline = this.extractFirstDirective(outlineNode);
     if (outline) return outline;
     const focus = this.extractFocusGoal(currentFocus);
     if (focus) return focus;
     const author = this.extractFirstDirective(authorIntent);
     if (author) return author;
+    const arcHint = this.extractFirstDirective(arcGoalHint);
+    if (arcHint) return arcHint;
     return `Advance chapter ${chapterNumber} with clear narrative focus.`;
   }
 
@@ -230,7 +353,16 @@ export class PlannerAgent extends BaseAgent {
     currentFocus: string,
     outlineNode: string | undefined,
     volumeOutline: string,
+    outlineLooksStale: boolean = false,
   ): ChapterConflict[] {
+    if (outlineLooksStale) {
+      return [
+        {
+          type: "outline_vs_recent_state",
+          resolution: "prefer latest state continuity anchor",
+        },
+      ];
+    }
     const outlineText = outlineNode ?? volumeOutline;
     if (!outlineText || outlineText === "(文件尚未创建)") return [];
     if (externalContext) {
@@ -336,14 +468,21 @@ export class PlannerAgent extends BaseAgent {
     volumeOutline: string,
     outlineNode: string | undefined,
     matchedOutlineAnchor: boolean,
+    arcMapDirective?: string,
   ): string | undefined {
     if (matchedOutlineAnchor || !outlineNode || volumeOutline === "(文件尚未创建)") {
-      return undefined;
+      return arcMapDirective;
     }
 
-    return this.isChineseLanguage(language)
+    const fallbackDirective = this.isChineseLanguage(language)
       ? "不要继续依赖卷纲的 fallback 指令，必须把本章推进到新的弧线节点或地点变化。"
       : "Do not keep leaning on the outline fallback. Force this chapter toward a fresh arc beat or location change.";
+    if (!arcMapDirective) {
+      return fallbackDirective;
+    }
+    return this.isChineseLanguage(language)
+      ? `${fallbackDirective} ${arcMapDirective}`
+      : `${fallbackDirective} ${arcMapDirective}`;
   }
 
   private buildSceneDirective(
@@ -463,7 +602,7 @@ export class PlannerAgent extends BaseAgent {
     return /[\u4e00-\u9fff]/.test(content);
   }
 
-  private findOutlineNode(volumeOutline: string, chapterNumber: number): string | undefined {
+  private resolveOutlineSelection(volumeOutline: string, chapterNumber: number): OutlineSelection {
     const lines = volumeOutline.split("\n").map((line) => line.trim()).filter(Boolean);
 
     for (let index = 0; index < lines.length; index += 1) {
@@ -473,12 +612,20 @@ export class PlannerAgent extends BaseAgent {
 
       const inlineContent = this.cleanOutlineContent(match[1]);
       if (inlineContent) {
-        return inlineContent;
+        return {
+          node: inlineContent,
+          matchedAnchor: true,
+          source: "exact",
+        };
       }
 
       const nextContent = this.findNextOutlineContent(lines, index + 1);
       if (nextContent) {
-        return nextContent;
+        return {
+          node: nextContent,
+          matchedAnchor: true,
+          source: "exact",
+        };
       }
     }
 
@@ -489,12 +636,20 @@ export class PlannerAgent extends BaseAgent {
 
       const inlineContent = this.cleanOutlineContent(match[3]);
       if (inlineContent) {
-        return inlineContent;
+        return {
+          node: inlineContent,
+          matchedAnchor: true,
+          source: "range",
+        };
       }
 
       const nextContent = this.findNextOutlineContent(lines, index + 1);
       if (nextContent) {
-        return nextContent;
+        return {
+          node: nextContent,
+          matchedAnchor: true,
+          source: "range",
+        };
       }
     }
 
@@ -506,7 +661,11 @@ export class PlannerAgent extends BaseAgent {
       if (exactMatch) {
         const inlineContent = this.cleanOutlineContent(exactMatch[1]);
         if (inlineContent) {
-          return inlineContent;
+          return {
+            node: inlineContent,
+            matchedAnchor: false,
+            source: "fallback-first",
+          };
         }
       }
 
@@ -514,19 +673,37 @@ export class PlannerAgent extends BaseAgent {
       if (rangeMatch) {
         const inlineContent = this.cleanOutlineContent(rangeMatch[3]);
         if (inlineContent) {
-          return inlineContent;
+          return {
+            node: inlineContent,
+            matchedAnchor: false,
+            source: "fallback-first",
+          };
         }
       }
 
       const nextContent = this.findNextOutlineContent(lines, index + 1);
       if (nextContent) {
-        return nextContent;
+        return {
+          node: nextContent,
+          matchedAnchor: false,
+          source: "fallback-first",
+        };
       }
 
       break;
     }
 
-    return this.extractFirstDirective(volumeOutline);
+    const fallback = this.extractFirstDirective(volumeOutline);
+    return fallback
+      ? {
+        node: fallback,
+        matchedAnchor: false,
+        source: "fallback-any",
+      }
+      : {
+        matchedAnchor: false,
+        source: "missing",
+      };
   }
 
   private cleanOutlineContent(content?: string): string | undefined {
@@ -560,12 +737,174 @@ export class PlannerAgent extends BaseAgent {
     return undefined;
   }
 
-  private hasMatchedOutlineAnchor(volumeOutline: string, chapterNumber: number): boolean {
-    const lines = volumeOutline.split("\n").map((line) => line.trim()).filter(Boolean);
-    return lines.some((line) =>
-      this.matchExactOutlineLine(line, chapterNumber) !== undefined
-      || this.matchRangeOutlineLine(line, chapterNumber) !== undefined,
-    );
+  private buildContinuityAnchor(input: {
+    readonly currentState: string;
+    readonly currentFocus: string;
+    readonly chapterSummaries: string;
+    readonly chapterNumber: number;
+  }): ContinuityAnchor {
+    const summaries = parseChapterSummariesMarkdown(input.chapterSummaries)
+      .filter((summary) => summary.chapter < input.chapterNumber)
+      .sort((left, right) => left.chapter - right.chapter);
+    const latestSummary = summaries.at(-1);
+    const firstSummary = summaries[0];
+    const stateGoal = this.extractCurrentStateField(input.currentState, ["Current Goal", "当前目标"]);
+    const stateConflict = this.extractCurrentStateField(input.currentState, ["Current Conflict", "当前冲突"]);
+    const stateLocation = this.extractCurrentStateField(input.currentState, ["Current Location", "当前位置"]);
+    const latestSummaryText = latestSummary
+      ? [latestSummary.events, latestSummary.stateChanges, latestSummary.hookActivity]
+        .filter(Boolean)
+        .join(" | ")
+      : undefined;
+    const recentOutlineNode = this.firstMeaningful([
+      latestSummaryText,
+      [stateGoal, stateConflict, stateLocation].filter(Boolean).join(" | "),
+      this.extractFocusGoal(input.currentFocus),
+    ]);
+
+    return {
+      goal: this.firstMeaningful([stateGoal, latestSummary?.events, stateConflict, this.extractFocusGoal(input.currentFocus)]),
+      outlineNode: recentOutlineNode,
+      summaryText: latestSummaryText,
+      firstSummaryText: firstSummary
+        ? [firstSummary.title, firstSummary.events, firstSummary.stateChanges, firstSummary.hookActivity]
+          .filter(Boolean)
+          .join(" | ")
+        : undefined,
+    };
+  }
+
+  private shouldDeprioritizeOutlineNode(input: {
+    readonly chapterNumber: number;
+    readonly outlineSelection: OutlineSelection;
+    readonly continuityAnchor: ContinuityAnchor;
+  }): boolean {
+    const outlineNode = input.outlineSelection.node;
+    if (!outlineNode) {
+      return false;
+    }
+
+    const recentAnchor = this.firstMeaningful([
+      input.continuityAnchor.goal,
+      input.continuityAnchor.outlineNode,
+      input.continuityAnchor.summaryText,
+    ]);
+    if (!recentAnchor) {
+      return false;
+    }
+
+    const overlapsRecent = this.hasKeywordOverlap(outlineNode, recentAnchor);
+    if (overlapsRecent) {
+      return false;
+    }
+
+    const overlapsOpening = input.continuityAnchor.firstSummaryText
+      ? this.hasKeywordOverlap(outlineNode, input.continuityAnchor.firstSummaryText)
+      : false;
+    if (input.chapterNumber >= 4 && overlapsOpening) {
+      return true;
+    }
+
+    return input.chapterNumber >= 3
+      && (input.outlineSelection.source === "fallback-first" || input.outlineSelection.source === "fallback-any");
+  }
+
+  private extractCurrentStateField(currentState: string, labels: ReadonlyArray<string>): string | undefined {
+    const rows = currentState
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("|") && !line.includes("---"))
+      .map((line) => line.split("|").slice(1, -1).map((cell) => cell.trim()));
+
+    for (const row of rows) {
+      const label = row[0] ?? "";
+      const value = row[1] ?? "";
+      if (!label || !value) continue;
+      if (labels.some((candidate) => candidate.toLowerCase() === label.toLowerCase())) {
+        return value;
+      }
+    }
+
+    return undefined;
+  }
+
+  private firstMeaningful(values: ReadonlyArray<string | undefined>): string | undefined {
+    return values.find((value) => Boolean(value && value.trim().length > 0));
+  }
+
+  private buildPlannerHookThrottle(input: {
+    readonly activeHooks: ReadonlyArray<StoredHook>;
+    readonly chapterSummaries: string;
+    readonly chapterNumber: number;
+    readonly hookAgenda: ChapterIntent["hookAgenda"];
+  }): PlannerHookThrottle {
+    const cap = 12;
+    const activeCount = input.activeHooks.filter((hook) => !/^(resolved|deferred)$/i.test(hook.status)).length;
+    const recentSummaries = parseChapterSummariesMarkdown(input.chapterSummaries)
+      .filter((summary) => summary.chapter < input.chapterNumber)
+      .sort((left, right) => left.chapter - right.chapter)
+      .slice(-2);
+    const recentNewSignals = recentSummaries.filter((summary) =>
+      /seeded|new hook|open(ed)? new|新开|埋下|开坑|新伏笔/u.test(summary.hookActivity),
+    ).length;
+    const recentResolveSignals = recentSummaries.filter((summary) =>
+      /resolve|resolved|payoff|paid off|回收|兑现|揭晓|解决/u.test(summary.hookActivity),
+    ).length;
+    const pressuredHookIds = this.unique([
+      ...input.hookAgenda.mustAdvance,
+      ...input.hookAgenda.eligibleResolve,
+      ...input.hookAgenda.staleDebt,
+    ]);
+    const recentOpenBias = recentNewSignals > recentResolveSignals;
+
+    return {
+      activeCount,
+      cap,
+      suggestedNewHookCap: activeCount > cap || recentOpenBias ? 1 : 2,
+      shouldThrottle: activeCount > cap || recentOpenBias || pressuredHookIds.length > 0,
+      recentOpenBias,
+      pressuredHookIds,
+    };
+  }
+
+  private buildHookDebtMustAvoid(
+    throttle: PlannerHookThrottle,
+    language: "zh" | "en",
+  ): string[] {
+    if (!throttle.shouldThrottle) {
+      return [];
+    }
+
+    return [
+      language === "en"
+        ? `Do not open more than ${throttle.suggestedNewHookCap} new hook family this chapter.`
+        : `本章不要再新开超过 ${throttle.suggestedNewHookCap} 个新伏笔家族。`,
+      throttle.recentOpenBias
+        ? language === "en"
+          ? "Recent chapters opened more hooks than they resolved. Favor old debt movement over fresh setup."
+          : "最近两章新开伏笔多于回收，优先推进旧债，不要继续堆新坑。"
+        : undefined,
+    ].filter((item): item is string => Boolean(item));
+  }
+
+  private buildHookDebtThrottleConflicts(
+    throttle: PlannerHookThrottle,
+    foreshadowToTouch: ReadonlyArray<string>,
+  ): ChapterConflict[] {
+    if (!throttle.shouldThrottle) {
+      return [];
+    }
+
+    if (foreshadowToTouch.length > 0) {
+      return [];
+    }
+
+    return [
+      {
+        type: "hook_debt_throttle",
+        resolution: "advance an existing hook before opening parallel debt",
+      },
+    ];
   }
 
   private matchExactOutlineLine(line: string, chapterNumber: number): RegExpMatchArray | undefined {
@@ -666,6 +1005,17 @@ export class PlannerAgent extends BaseAgent {
       intent.moodDirective ? `- mood: ${intent.moodDirective}` : undefined,
       intent.titleDirective ? `- title: ${intent.titleDirective}` : undefined,
     ].filter(Boolean).join("\n") || "- none";
+    const chapterGoal = intent.chapterGoal
+      ? [
+        `- mainConflict: ${intent.chapterGoal.mainConflict}`,
+        `- protagonistGoal: ${intent.chapterGoal.protagonistGoal}`,
+        `- activeCharacters: ${intent.chapterGoal.activeCharacters.join(", ") || "none"}`,
+        `- foreshadowToTouch: ${intent.chapterGoal.foreshadowToTouch.join(", ") || "none"}`,
+        `- payoffToDeliver: ${intent.chapterGoal.payoffToDeliver}`,
+        `- endingHookType: ${intent.chapterGoal.endingHookType}`,
+        `- nextChapterPull: ${intent.chapterGoal.nextChapterPull}`,
+      ].join("\n")
+      : "- none";
     const hookAgenda = [
       "### Must Advance",
       intent.hookAgenda.mustAdvance.length > 0
@@ -710,6 +1060,9 @@ export class PlannerAgent extends BaseAgent {
       "",
       "## Structured Directives",
       directives,
+      "",
+      "## Chapter Goal",
+      chapterGoal,
       "",
       "## Hook Agenda",
       hookAgenda,

@@ -22,15 +22,20 @@ export class StateManager {
       : "# Current Focus\n\n## Active Focus\n\n(Describe what the next 1-3 chapters should prioritize.)\n";
   }
 
-  async ensureControlDocuments(bookId: string, authorIntent?: string): Promise<void> {
+  async ensureControlDocuments(
+    bookId: string,
+    authorIntent?: string,
+    webnovelTemplate?: "xuanhuan",
+  ): Promise<void> {
     const language = await this.resolveControlDocumentLanguage(bookId);
-    await this.ensureControlDocumentsAt(this.bookDir(bookId), language, authorIntent);
+    await this.ensureControlDocumentsAt(this.bookDir(bookId), language, authorIntent, webnovelTemplate);
   }
 
   async ensureControlDocumentsAt(
     bookDir: string,
     language: "zh" | "en",
     authorIntent?: string,
+    webnovelTemplate?: "xuanhuan",
   ): Promise<void> {
     const storyDir = join(bookDir, "story");
     const runtimeDir = join(storyDir, "runtime");
@@ -49,6 +54,13 @@ export class StateManager {
       join(storyDir, "current_focus.md"),
       StateManager.defaultCurrentFocus(language),
     );
+
+    if (webnovelTemplate) {
+      await this.writeIfMissing(
+        join(storyDir, "foreshadow_registry.json"),
+        "[]\n",
+      );
+    }
   }
 
   async loadControlDocuments(bookId: string): Promise<{
@@ -284,7 +296,7 @@ export class StateManager {
     await mkdir(snapshotDir, { recursive: true });
 
     const files = [
-      "current_state.md", "particle_ledger.md", "pending_hooks.md",
+      "current_state.md", "particle_ledger.md", "pending_hooks.md", "foreshadow_registry.json",
       "chapter_summaries.md", "subplot_board.md", "emotional_arcs.md", "character_matrix.md",
     ];
     await Promise.all(
@@ -343,7 +355,7 @@ export class StateManager {
     const snapshotDir = join(storyDir, "snapshots", String(chapterNumber));
 
     const files = [
-      "current_state.md", "particle_ledger.md", "pending_hooks.md",
+      "current_state.md", "particle_ledger.md", "pending_hooks.md", "foreshadow_registry.json",
       "chapter_summaries.md", "subplot_board.md", "emotional_arcs.md", "character_matrix.md",
     ];
     try {

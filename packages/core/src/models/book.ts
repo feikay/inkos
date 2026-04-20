@@ -19,7 +19,11 @@ export type BookStatus = z.infer<typeof BookStatusSchema>;
 export const FanficModeSchema = z.enum(["canon", "au", "ooc", "cp"]);
 export type FanficMode = z.infer<typeof FanficModeSchema>;
 
+export const WebnovelTemplateSchema = z.enum(["xuanhuan"]);
+export type WebnovelTemplate = z.infer<typeof WebnovelTemplateSchema>;
+
 export const BookConfigSchema = z.object({
+  schemaVersion: z.literal(2).optional(),
   id: z.string().min(1),
   title: z.string().min(1),
   platform: PlatformSchema,
@@ -32,6 +36,7 @@ export const BookConfigSchema = z.object({
   updatedAt: z.string().datetime(),
   parentBookId: z.string().optional(),
   fanficMode: FanficModeSchema.optional(),
+  webnovelTemplate: WebnovelTemplateSchema.optional(),
 });
 
 export type BookConfig = z.infer<typeof BookConfigSchema>;

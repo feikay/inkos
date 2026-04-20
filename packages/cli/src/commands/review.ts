@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { StateManager, formatLengthCount, readGenreProfile, resolveLengthCountingMode } from "@actalk/inkos-core";
-import { findProjectRoot, resolveBookId, log, logError } from "../utils.js";
+import { findProjectRoot, resolveBookId, log, logError, loadReviewPresentation } from "../utils.js";
 
 export const reviewCommand = new Command("review")
   .description("Review and approve chapters");
@@ -24,6 +24,18 @@ reviewCommand
         readonly wordCount: number;
         readonly status: string;
         readonly issues: ReadonlyArray<string>;
+        readonly reviewGroups?: {
+          readonly chapterGoal?: {
+            readonly mainConflict: string;
+            readonly protagonistGoal: string;
+            readonly endingHookType: string;
+            readonly payoffToDeliver: string;
+            readonly foreshadowToTouch: ReadonlyArray<string>;
+          };
+          readonly disciplineChecks: ReadonlyArray<string>;
+          readonly continuityNotes: ReadonlyArray<string>;
+          readonly traditionalWarnings: ReadonlyArray<string>;
+        };
       }> = [];
 
       for (const id of bookIds) {
@@ -43,6 +55,7 @@ reviewCommand
           log(`\n${book.title} (${id}):`);
         }
         for (const ch of pending) {
+          const presentation = await loadReviewPresentation(state.bookDir(id), ch.number, ch.auditIssues);
           allPending.push({
             bookId: id,
             title: book.title,
@@ -51,16 +64,26 @@ reviewCommand
             wordCount: ch.wordCount,
             status: ch.status,
             issues: ch.auditIssues,
+            reviewGroups: {
+              chapterGoal: presentation.chapterGoal
+                ? {
+                  mainConflict: presentation.chapterGoal.mainConflict,
+                  protagonistGoal: presentation.chapterGoal.protagonistGoal,
+                  endingHookType: presentation.chapterGoal.endingHookType,
+                  payoffToDeliver: presentation.chapterGoal.payoffToDeliver,
+                  foreshadowToTouch: presentation.chapterGoal.foreshadowToTouch,
+                }
+                : undefined,
+              disciplineChecks: presentation.disciplineChecks,
+              continuityNotes: presentation.continuityNotes,
+              traditionalWarnings: presentation.traditionalWarnings,
+            },
           });
           if (!opts.json) {
             log(
               `  Ch.${ch.number} "${ch.title}" | ${formatLengthCount(ch.wordCount, countingMode)} | ${ch.status}`,
             );
-            if (ch.auditIssues.length > 0) {
-              for (const issue of ch.auditIssues) {
-                log(`    - ${issue}`);
-              }
-            }
+            renderReviewGroups(presentation, ch.auditIssues);
           }
         }
       }
@@ -79,6 +102,51 @@ reviewCommand
       process.exit(1);
     }
   });
+
+function renderReviewGroups(
+  presentation: Awaited<ReturnType<typeof loadReviewPresentation>>,
+  rawIssues: ReadonlyArray<string>,
+): void {
+  const chapterGoalLines = presentation.chapterGoal
+    ? [
+      `mainConflict: ${presentation.chapterGoal.mainConflict}`,
+      `protagonistGoal: ${presentation.chapterGoal.protagonistGoal}`,
+      `endingHookType: ${presentation.chapterGoal.endingHookType}`,
+      `payoffToDeliver: ${presentation.chapterGoal.payoffToDeliver}`,
+      presentation.chapterGoal.foreshadowToTouch.length > 0
+        ? `foreshadowToTouch: ${presentation.chapterGoal.foreshadowToTouch.join(", ")}`
+        : undefined,
+    ].filter((line): line is string => Boolean(line))
+    : [];
+
+  const groups = [
+    { name: "Chapter Goal", items: chapterGoalLines },
+    { name: "Discipline Checks", items: presentation.disciplineChecks },
+    { name: "Continuity / Planning Notes", items: presentation.continuityNotes },
+    { name: "Traditional Warnings", items: presentation.traditionalWarnings },
+  ].filter((group) => group.items.length > 0);
+
+  if (groups.length === 0 && rawIssues.length > 0) {
+    for (const issue of rawIssues) {
+      log(`    - ${issue}`);
+    }
+    return;
+  }
+
+  if (groups.length === 1 && groups[0]?.name === "Traditional Warnings") {
+    for (const issue of groups[0].items) {
+      log(`    - ${issue}`);
+    }
+    return;
+  }
+
+  for (const group of groups) {
+    log(`    ${group.name}:`);
+    for (const item of group.items) {
+      log(`      - ${item}`);
+    }
+  }
+}
 
 /**
  * Parse "[book-id] <chapter>" style arguments from variadic args.

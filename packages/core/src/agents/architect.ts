@@ -14,6 +14,12 @@ export interface ArchitectOutput {
   readonly pendingHooks: string;
 }
 
+interface WebnovelTemplateFiles {
+  readonly genreProfile: string;
+  readonly arcMap: string;
+  readonly powerSystem: string;
+}
+
 export class ArchitectAgent extends BaseAgent {
   get name(): string {
     return "architect";
@@ -289,6 +295,7 @@ ${finalRequirementsPrompt}`;
     output: ArchitectOutput,
     numericalSystem: boolean = true,
     language: "zh" | "en" = "zh",
+    webnovelTemplate?: "xuanhuan",
   ): Promise<void> {
     const storyDir = join(bookDir, "story");
     await mkdir(storyDir, { recursive: true });
@@ -338,7 +345,98 @@ ${finalRequirementsPrompt}`;
       ),
     );
 
+    const templateFiles = this.buildWebnovelTemplateFiles(webnovelTemplate);
+    if (templateFiles) {
+      writes.push(
+        writeFile(join(storyDir, "genre_profile.yaml"), templateFiles.genreProfile, "utf-8"),
+        writeFile(join(storyDir, "arc_map.yaml"), templateFiles.arcMap, "utf-8"),
+        writeFile(join(storyDir, "power_system.yaml"), templateFiles.powerSystem, "utf-8"),
+      );
+    }
+
     await Promise.all(writes);
+  }
+
+  private buildWebnovelTemplateFiles(
+    template?: "xuanhuan",
+  ): WebnovelTemplateFiles | null {
+    if (template !== "xuanhuan") {
+      return null;
+    }
+
+    return {
+      genreProfile: [
+        "template: xuanhuan",
+        "label: 玄幻网文",
+        "language: zh",
+        "tone:",
+        "  - 热血升级",
+        "  - 危机压迫",
+        "  - 爽点密集",
+        "style:",
+        "  pov: 第三人称近距离",
+        "  sentence_rhythm: 短中句为主，关键节点拉长",
+        "  exposition_rule: 设定服务冲突，不做大段空讲",
+        "core_loop:",
+        "  - 遭遇压制",
+        "  - 获得线索/资源/机缘",
+        "  - 冒险试错",
+        "  - 小胜立威",
+        "  - 引出更高层威胁",
+        "forbidden_patterns:",
+        "  - 主角连续被动挨打且无反制筹码",
+        "  - 大段设定说明脱离人物行动",
+        "  - 冲突刚抬起立刻泄气",
+        "  - 配角只做工具人发言",
+        "",
+      ].join("\n"),
+      arcMap: [
+        "template: xuanhuan",
+        "volumes:",
+        "  - id: vol-01",
+        "    title: 山门外的活路",
+        "    chapter_range: \"1-30\"",
+        "    core_conflict: 主角在边缘地带求生并找到第一条向上爬的路径",
+        "    expected_payoffs:",
+        "      - 拿到第一份真正改变命运的机缘",
+        "      - 在宗门/家族外围立住名字",
+        "    escalation:",
+        "      opening: 生存压力与身份低位",
+        "      midpoint: 资源争夺与第一次公开对抗",
+        "      climax: 越级破局，代价换名声",
+        "  - id: vol-02",
+        "    title: 内门风暴",
+        "    chapter_range: \"31-80\"",
+        "    core_conflict: 主角进入更高层规则场，旧敌升级，新盟友出现",
+        "    expected_payoffs:",
+        "      - 建立稳定成长路线",
+        "      - 触碰更高层世界真相",
+        "    escalation:",
+        "      opening: 新秩序与新压制",
+        "      midpoint: 阵营站队与秘密暴露",
+        "      climax: 以局破局，撬动更大棋盘",
+        "",
+      ].join("\n"),
+      powerSystem: [
+        "template: xuanhuan",
+        "realm_tree:",
+        "  - 炼体",
+        "  - 聚气",
+        "  - 筑基",
+        "  - 化灵",
+        "  - 神府",
+        "  - 归真",
+        "base_rules:",
+        "  - 境界压制真实存在，越级取胜必须依赖明确外力、信息差或代价",
+        "  - 资源获取与境界提升绑定，不能无因暴涨",
+        "  - 每次大突破都应带来战斗方式或生存方式的变化",
+        "exception_rules:",
+        "  - 主角可凭特殊体质或异宝短时突破上限，但必须留下后遗症或债务",
+        "  - 极端环境、古遗迹、禁术可暂时改写常规规则，但要写清触发条件",
+        "  - 反杀高阶敌人时，必须让读者看见筹备链条，而非纯运气翻盘",
+        "",
+      ].join("\n"),
+    };
   }
 
   /**

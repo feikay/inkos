@@ -11,11 +11,21 @@ import { readGenreProfile, readBookRules } from "./rules-reader.js";
 import {
   detectCrossChapterRepetition,
   detectParagraphLengthDrift,
+  evaluateChapterGoalDiscipline,
+  evaluateHookDebtThrottle,
+  evaluateResourceLedgerDiscipline,
+  toHookDebtWarnings,
+  toResourceLedgerWarnings,
+  toDisciplineWarnings,
   validatePostWrite,
+  type EndingHookCheck,
+  type HookDebtCheck,
+  type PayoffCheck,
   type PostWriteViolation,
+  type ResourceLedgerCheck,
 } from "./post-write-validator.js";
 import { analyzeAITells } from "./ai-tells.js";
-import type { ChapterTrace, ContextPackage, RuleStack } from "../models/input-governance.js";
+import type { ChapterGoal, ChapterTrace, ContextPackage, RuleStack } from "../models/input-governance.js";
 import type { LengthSpec } from "../models/length-governance.js";
 import type { RuntimeStateDelta } from "../models/runtime-state.js";
 import { buildLengthSpec, countChapterLength } from "../utils/length-metrics.js";
@@ -89,6 +99,10 @@ export interface WriteChapterOutput {
   readonly updatedCharacterMatrix: string;
   readonly postWriteErrors: ReadonlyArray<PostWriteViolation>;
   readonly postWriteWarnings: ReadonlyArray<PostWriteViolation>;
+  readonly endingHookCheck?: EndingHookCheck;
+  readonly payoffCheck?: PayoffCheck;
+  readonly resourceLedgerCheck?: ResourceLedgerCheck;
+  readonly hookDebtCheck?: HookDebtCheck;
   readonly hookHealthIssues?: ReadonlyArray<{
     readonly severity: "critical" | "warning" | "info";
     readonly category: string;
@@ -342,17 +356,41 @@ export class WriterAgent extends BaseAgent {
       ...detectCrossChapterRepetition(creative.content, fingerprintChapters, resolvedLanguage),
       ...detectParagraphLengthDrift(creative.content, fingerprintChapters, resolvedLanguage),
     ];
+    const chapterGoal = input.contextPackage?.chapterGoal ?? this.readChapterGoalFromIntentMarkdown(input.chapterIntent);
+    const disciplineChecks = chapterGoal
+      ? evaluateChapterGoalDiscipline(creative.content, chapterGoal)
+      : undefined;
+    const disciplineWarnings = disciplineChecks
+      ? toDisciplineWarnings(disciplineChecks, resolvedLanguage)
+      : [];
+    const resourceLedgerCheck = evaluateResourceLedgerDiscipline({
+      content: creative.content,
+      currentState,
+      updatedState: runtimeStateArtifacts?.currentStateMarkdown ?? settlement.updatedState,
+      originalLedger: ledger,
+      updatedLedger: settlement.updatedLedger,
+      runtimeStateSnapshot: runtimeStateArtifacts?.snapshot ?? settlement.runtimeStateSnapshot,
+      language: resolvedLanguage,
+    });
+    const resourceLedgerWarnings = toResourceLedgerWarnings(resourceLedgerCheck, resolvedLanguage);
+    const hookDebtCheck = evaluateHookDebtThrottle({
+      snapshot: runtimeStateArtifacts?.snapshot ?? settlement.runtimeStateSnapshot,
+      delta: resolvedRuntimeStateDelta,
+      existingHookIds: [...priorHookIds],
+    });
+    const hookDebtWarnings = toHookDebtWarnings(hookDebtCheck, resolvedLanguage);
+    const allWarnings = [...ruleViolations, ...disciplineWarnings, ...resourceLedgerWarnings, ...hookDebtWarnings];
     const aiTellIssues = analyzeAITells(creative.content, resolvedLanguage).issues;
 
-    const postWriteErrors = ruleViolations.filter(v => v.severity === "error");
-    const postWriteWarnings = ruleViolations.filter(v => v.severity === "warning");
+    const postWriteErrors = allWarnings.filter(v => v.severity === "error");
+    const postWriteWarnings = allWarnings.filter(v => v.severity === "warning");
 
-    if (ruleViolations.length > 0) {
+    if (allWarnings.length > 0) {
       this.logWarn(resolvedLanguage, {
         zh: `后写校验：第${chapterNumber}章 ${postWriteErrors.length} 个错误，${postWriteWarnings.length} 个警告`,
         en: `Post-write: ${postWriteErrors.length} errors, ${postWriteWarnings.length} warnings in chapter ${chapterNumber}`,
       });
-      for (const v of ruleViolations) {
+      for (const v of allWarnings) {
         this.ctx.logger?.warn(`[${v.severity}] ${v.rule}: ${v.description}`);
       }
     }
@@ -403,6 +441,10 @@ export class WriterAgent extends BaseAgent {
       updatedCharacterMatrix: settlement.updatedCharacterMatrix,
       postWriteErrors,
       postWriteWarnings,
+      endingHookCheck: disciplineChecks?.endingHookCheck,
+      payoffCheck: disciplineChecks?.payoffCheck,
+      resourceLedgerCheck,
+      hookDebtCheck,
       hookHealthIssues,
       tokenUsage,
     };
@@ -497,8 +539,70 @@ export class WriterAgent extends BaseAgent {
       updatedCharacterMatrix: settlement.updatedCharacterMatrix,
       postWriteErrors: [],
       postWriteWarnings: [],
+      endingHookCheck: undefined,
+      payoffCheck: undefined,
+      resourceLedgerCheck: undefined,
+      hookDebtCheck: undefined,
       tokenUsage: settleResult.usage,
     };
+  }
+
+  private readChapterGoalFromIntentMarkdown(chapterIntent: string | undefined): ChapterGoal | undefined {
+    if (!chapterIntent) {
+      return undefined;
+    }
+
+    const section = this.extractMarkdownSection(chapterIntent, "## Chapter Goal");
+    if (!section) {
+      return undefined;
+    }
+
+    const entries = new Map<string, string>();
+    for (const line of section.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("-")) continue;
+      const body = trimmed.replace(/^-\s*/, "");
+      const separator = body.indexOf(":");
+      if (separator < 0) continue;
+      const key = body.slice(0, separator).trim();
+      const value = body.slice(separator + 1).trim();
+      if (!key || !value || value === "none") continue;
+      entries.set(key, value);
+    }
+
+    const mainConflict = entries.get("mainConflict");
+    const protagonistGoal = entries.get("protagonistGoal");
+    const payoffToDeliver = entries.get("payoffToDeliver");
+    const endingHookType = entries.get("endingHookType");
+    const nextChapterPull = entries.get("nextChapterPull");
+    if (!mainConflict || !protagonistGoal || !payoffToDeliver || !endingHookType || !nextChapterPull) {
+      return undefined;
+    }
+
+    if (!["danger", "reveal", "pursuit", "choice", "breakthrough"].includes(endingHookType)) {
+      return undefined;
+    }
+
+    return {
+      mainConflict,
+      protagonistGoal,
+      activeCharacters: this.splitInlineList(entries.get("activeCharacters")),
+      foreshadowToTouch: this.splitInlineList(entries.get("foreshadowToTouch")),
+      payoffToDeliver,
+      endingHookType: endingHookType as ChapterGoal["endingHookType"],
+      nextChapterPull,
+    };
+  }
+
+  private splitInlineList(value: string | undefined): string[] {
+    if (!value || value === "none") {
+      return [];
+    }
+
+    return value
+      .split(/,|，|、/u)
+      .map((item) => item.trim())
+      .filter(Boolean);
   }
 
   private async settle(params: {
@@ -669,6 +773,17 @@ export class WriterAgent extends BaseAgent {
       writeFile(join(chaptersDir, filename), chapterContent, "utf-8"),
       writeFile(join(storyDir, "current_state.md"), runtimeStateArtifacts?.currentStateMarkdown ?? output.updatedState, "utf-8"),
       writeFile(join(storyDir, "pending_hooks.md"), runtimeStateArtifacts?.hooksMarkdown ?? output.updatedHooks, "utf-8"),
+      writeFile(
+        join(storyDir, "foreshadow_registry.json"),
+        JSON.stringify(
+          this.buildForeshadowRegistry(
+            runtimeStateArtifacts?.hooksMarkdown ?? output.updatedHooks,
+          ),
+          null,
+          2,
+        ) + "\n",
+        "utf-8",
+      ),
     ];
 
     if (runtimeStateArtifacts?.chapterSummariesMarkdown) {
@@ -1079,6 +1194,28 @@ ${overrides}\n`;
     }
 
     await Promise.all(writes);
+  }
+
+  private buildForeshadowRegistry(hooksMarkdown: string): ReadonlyArray<{
+    readonly hookId: string;
+    readonly startChapter: number;
+    readonly type: string;
+    readonly status: string;
+    readonly lastAdvancedChapter: number;
+    readonly expectedPayoff: string;
+    readonly payoffTiming?: string;
+    readonly notes: string;
+  }> {
+    return parsePendingHooksMarkdown(hooksMarkdown).map((hook) => ({
+      hookId: hook.hookId,
+      startChapter: hook.startChapter,
+      type: hook.type,
+      status: hook.status,
+      lastAdvancedChapter: hook.lastAdvancedChapter,
+      expectedPayoff: hook.expectedPayoff,
+      ...(hook.payoffTiming ? { payoffTiming: hook.payoffTiming } : {}),
+      notes: hook.notes,
+    }));
   }
 
   private renderDeltaSummaryRow(delta: RuntimeStateDelta): string {

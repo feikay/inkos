@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WriterAgent } from "../agents/writer.js";
@@ -1220,6 +1220,529 @@ describe("WriterAgent", () => {
       expect(creativePrompt).toContain("ledger-fragment");
       expect(creativePrompt).toContain("stale-ledger");
       expect(creativePrompt).toContain("relationship");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("syncs foreshadow_registry.json from pending_hooks.md when saving a chapter", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-registry-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    try {
+      await agent.saveChapter(bookDir, {
+        chapterNumber: 1,
+        title: "活埋与觉醒",
+        content: "正文",
+        wordCount: 2,
+        preWriteCheck: "",
+        postSettlement: "",
+        updatedState: "# 当前状态\n",
+        updatedLedger: "# 资源账本\n",
+        updatedHooks: [
+          "# 伏笔池",
+          "",
+          "| hook_id | 起始章节 | 类型 | 状态 | 最近推进 | 预期回收 | 回收节奏 | 备注 |",
+          "| --- | --- | --- | --- | --- | --- | --- | --- |",
+          "| buried-bloodline | 1 | 身世 | open | 1 | 第一次觉醒真相 | 中程 | 活埋异象暴露血脉线索 |",
+        ].join("\n"),
+        chapterSummary: "",
+        updatedSubplots: "",
+        updatedEmotionalArcs: "",
+        updatedCharacterMatrix: "",
+        postWriteErrors: [],
+        postWriteWarnings: [],
+      }, true, "zh");
+
+      const raw = await readFile(join(storyDir, "foreshadow_registry.json"), "utf-8");
+      const registry = JSON.parse(raw) as Array<{ hookId: string; type: string; lastAdvancedChapter: number }>;
+      expect(registry).toEqual([
+        expect.objectContaining({
+          hookId: "buried-bloodline",
+          type: "身世",
+          lastAdvancedChapter: 1,
+        }),
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("adds chapter-goal discipline warnings without blocking the write flow", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-discipline-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n\n- 黑色古碑会吞噬煞气。\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 2\n先逃出追兵视野。\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n\n- Keep the prose restrained.\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# Current State\n\n- 秦枭仍在逃亡。\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n\n- 黑色古碑的代价尚未揭开。\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+      writeFile(join(storyDir, "subplot_board.md"), "# 支线进度板\n", "utf-8"),
+      writeFile(join(storyDir, "emotional_arcs.md"), "# 情感弧线\n", "utf-8"),
+      writeFile(join(storyDir, "character_matrix.md"), "# 角色交互矩阵\n", "utf-8"),
+    ]);
+
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    vi.spyOn(WriterAgent.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "逃出生天",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "秦枭一路冲出矿道，暂时甩开了追兵，却还没摸清黑色古碑的代价。",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- ok",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== POST_SETTLEMENT ===",
+          "- 黑色古碑代价仍未揭开",
+          "",
+          "=== UPDATED_STATE ===",
+          "# 当前状态",
+          "",
+          "=== UPDATED_HOOKS ===",
+          "# 伏笔池",
+          "",
+          "=== CHAPTER_SUMMARY ===",
+          "| 2 | 逃出生天 | 秦枭 | 甩开追兵 | 仍在逃亡 | 古碑代价未解 | 紧张 | 逃亡 |",
+          "",
+          "=== UPDATED_SUBPLOTS ===",
+          "# 支线进度板",
+          "",
+          "=== UPDATED_EMOTIONAL_ARCS ===",
+          "# 情感弧线",
+          "",
+          "=== UPDATED_CHARACTER_MATRIX ===",
+          "# 角色交互矩阵",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    try {
+      const output = await agent.writeChapter({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "tomato",
+          genre: "xuanhuan",
+          status: "active",
+          targetChapters: 20,
+          chapterWordCount: 2200,
+          language: "zh",
+          createdAt: "2026-04-20T00:00:00.000Z",
+          updatedAt: "2026-04-20T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 2,
+        chapterIntent: [
+          "# Chapter Intent",
+          "",
+          "## Chapter Goal",
+          "- mainConflict: 秦枭还没真正脱离追杀。",
+          "- protagonistGoal: 先摆脱追兵，再弄清黑色古碑的代价。",
+          "- activeCharacters: 秦枭, 碑灵",
+          "- foreshadowToTouch: black-stele",
+          "- payoffToDeliver: 揭开黑色古碑的代价",
+          "- endingHookType: reveal",
+          "- nextChapterPull: 代价真相会把局势再往前推一步。",
+        ].join("\n"),
+        contextPackage: {
+          chapter: 2,
+          selectedContext: [],
+          chapterGoal: {
+            mainConflict: "秦枭还没真正脱离追杀。",
+            protagonistGoal: "先摆脱追兵，再弄清黑色古碑的代价。",
+            activeCharacters: ["秦枭", "碑灵"],
+            foreshadowToTouch: ["black-stele"],
+            payoffToDeliver: "揭开黑色古碑的代价",
+            endingHookType: "reveal",
+            nextChapterPull: "代价真相会把局势再往前推一步。",
+          },
+        },
+        ruleStack: {
+          layers: [{ id: "L4", name: "current_task", precedence: 70, scope: "local" }],
+          sections: { hard: [], soft: [], diagnostic: [] },
+          overrideEdges: [],
+          activeOverrides: [],
+        },
+        lengthSpec: buildLengthSpec(220, "zh"),
+      });
+
+      expect(output.endingHookCheck).toEqual(expect.objectContaining({
+        expectedType: "reveal",
+        matched: false,
+      }));
+      expect(output.payoffCheck).toEqual(expect.objectContaining({
+        expectedPayoff: "揭开黑色古碑的代价",
+        matched: false,
+      }));
+      expect(output.postWriteWarnings.some((warning) => warning.rule === "ending-hook-check")).toBe(true);
+      expect(output.postWriteWarnings.some((warning) => warning.rule === "payoff-check")).toBe(true);
+      expect(output.postWriteErrors).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("adds resource ledger discipline warnings when正文资源变化没有同步到账本或状态", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-resource-ledger-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n\n- 煞气会反噬经脉。\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 2\n先逃出矿道。\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# 当前状态\n\n- 秦枭仍在逃亡。\n", "utf-8"),
+      writeFile(join(storyDir, "particle_ledger.md"), "# 资源账本\n\n- 煞气：十缕\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# 伏笔池\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+      writeFile(join(storyDir, "subplot_board.md"), "# 支线进度板\n", "utf-8"),
+      writeFile(join(storyDir, "emotional_arcs.md"), "# 情感弧线\n", "utf-8"),
+      writeFile(join(storyDir, "character_matrix.md"), "# 角色交互矩阵\n", "utf-8"),
+    ]);
+
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    vi.spyOn(WriterAgent.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "血路",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "秦枭强行催动煞气，一口气吞下十五缕煞气，气血骤降，反噬震得经脉刺痛。",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- ok",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== POST_SETTLEMENT ===",
+          "- settled",
+          "",
+          "=== UPDATED_STATE ===",
+          "# 当前状态",
+          "",
+          "- 秦枭仍在逃亡。",
+          "",
+          "=== UPDATED_HOOKS ===",
+          "# 伏笔池",
+          "",
+          "=== CHAPTER_SUMMARY ===",
+          "| 2 | 血路 | 秦枭 | 强催煞气逃亡 | 仍在逃亡 | none | 紧张 | 逃亡 |",
+          "",
+          "=== UPDATED_SUBPLOTS ===",
+          "# 支线进度板",
+          "",
+          "=== UPDATED_EMOTIONAL_ARCS ===",
+          "# 情感弧线",
+          "",
+          "=== UPDATED_CHARACTER_MATRIX ===",
+          "# 角色交互矩阵",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    try {
+      const output = await agent.writeChapter({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "tomato",
+          genre: "xuanhuan",
+          status: "active",
+          targetChapters: 20,
+          chapterWordCount: 2200,
+          language: "zh",
+          createdAt: "2026-04-20T00:00:00.000Z",
+          updatedAt: "2026-04-20T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 2,
+        lengthSpec: buildLengthSpec(220, "zh"),
+      });
+
+      expect(output.resourceLedgerCheck).toBeDefined();
+      expect(output.resourceLedgerCheck?.matched).toBe(false);
+      expect(output.resourceLedgerCheck?.warnings).toEqual(expect.arrayContaining([
+        "resource-ledger-missing-consumption",
+        "resource-ledger-missing-injury-update",
+        "resource-ledger-value-mismatch",
+      ]));
+      expect(output.postWriteWarnings.some((warning) => warning.rule === "resource-ledger-missing-consumption")).toBe(true);
+      expect(output.postWriteWarnings.some((warning) => warning.rule === "resource-ledger-missing-injury-update")).toBe(true);
+      expect(output.postWriteErrors).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("adds hook debt throttle warnings when high debt chapters still open multiple new hooks without advancing old debt", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-hook-debt-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    const stateDir = join(storyDir, "state");
+    const chaptersDir = join(bookDir, "chapters");
+    await mkdir(stateDir, { recursive: true });
+    await mkdir(chaptersDir, { recursive: true });
+
+    const pendingHookRows = Array.from({ length: 13 }, (_, index) =>
+      `| old-debt-${index + 1} | ${index + 1} | mystery | open | ${Math.max(1, 8 - index)} | Old payoff ${index + 1} | Dormant unresolved line ${index + 1} |`,
+    );
+    const runtimeHooks = Array.from({ length: 13 }, (_, index) => ({
+      hookId: `old-debt-${index + 1}`,
+      startChapter: index + 1,
+      type: "mystery",
+      status: "open",
+      lastAdvancedChapter: Math.max(1, 8 - index),
+      expectedPayoff: `Old payoff ${index + 1}`,
+      notes: `Dormant unresolved line ${index + 1}.`,
+    }));
+
+    await Promise.all([
+      writeFile(
+        join(chaptersDir, "index.json"),
+        JSON.stringify([
+          { number: 1, title: "Ch1", status: "approved" },
+          { number: 2, title: "Ch2", status: "approved" },
+        ]),
+        "utf-8",
+      ),
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n\n- Old debts are piling up.\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 3\nDo not spray new hook debt.\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n\n- Keep the prose restrained.\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# Current State\n\n- Lin Yue is already carrying too many open debts.\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), [
+        "# Pending Hooks",
+        "",
+        "| hook_id | 起始章节 | 类型 | 状态 | 最近推进 | 预期回收 | 备注 |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+        ...pendingHookRows,
+        "",
+      ].join("\n"), "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+      writeFile(join(storyDir, "subplot_board.md"), "# 支线进度板\n", "utf-8"),
+      writeFile(join(storyDir, "emotional_arcs.md"), "# 情感弧线\n", "utf-8"),
+      writeFile(join(storyDir, "character_matrix.md"), "# 角色交互矩阵\n", "utf-8"),
+      writeFile(join(stateDir, "manifest.json"), JSON.stringify({
+        schemaVersion: 2,
+        language: "en",
+        lastAppliedChapter: 2,
+        projectionVersion: 1,
+        migrationWarnings: [],
+      }, null, 2), "utf-8"),
+      writeFile(join(stateDir, "current_state.json"), JSON.stringify({
+        chapter: 2,
+        facts: [],
+      }, null, 2), "utf-8"),
+      writeFile(join(stateDir, "hooks.json"), JSON.stringify({
+        hooks: runtimeHooks,
+      }, null, 2), "utf-8"),
+      writeFile(join(stateDir, "chapter_summaries.json"), JSON.stringify({
+        rows: [
+          {
+            chapter: 2,
+            title: "Debt Heat",
+            characters: "Lin Yue",
+            events: "Old debts remained unresolved.",
+            stateChanges: "Pressure rose.",
+            hookActivity: "opened new route hook",
+            mood: "tight",
+            chapterType: "mainline",
+          },
+        ],
+      }, null, 2), "utf-8"),
+    ]);
+
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    vi.spyOn(WriterAgent.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "Parallel Pits",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "Lin Yue glimpsed two fresh mysteries but did not settle any of the old debts.",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- ok",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== POST_SETTLEMENT ===",
+          "- opened more debt without advancing the old lines",
+          "",
+          "=== RUNTIME_STATE_DELTA ===",
+          "```json",
+          JSON.stringify({
+            chapter: 3,
+            hookOps: {
+              upsert: [
+                {
+                  hookId: "new-pit-1",
+                  startChapter: 3,
+                  type: "mystery",
+                  status: "open",
+                  lastAdvancedChapter: 3,
+                  expectedPayoff: "New pit payoff 1",
+                  notes: "A fresh parallel debt line.",
+                },
+                {
+                  hookId: "new-pit-2",
+                  startChapter: 3,
+                  type: "route",
+                  status: "open",
+                  lastAdvancedChapter: 3,
+                  expectedPayoff: "New pit payoff 2",
+                  notes: "Another fresh parallel debt line.",
+                },
+              ],
+              mention: [],
+              resolve: [],
+              defer: [],
+            },
+            chapterSummary: {
+              chapter: 3,
+              title: "Parallel Pits",
+              characters: "Lin Yue",
+              events: "Lin Yue brushes against two new mysteries.",
+              stateChanges: "Old debt remains untouched.",
+              hookActivity: "opened two new hooks",
+              mood: "tight",
+              chapterType: "mainline",
+            },
+            notes: [],
+          }, null, 2),
+          "```",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    try {
+      const output = await agent.writeChapter({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "tomato",
+          genre: "other",
+          status: "active",
+          targetChapters: 20,
+          chapterWordCount: 2200,
+          language: "en",
+          createdAt: "2026-04-20T00:00:00.000Z",
+          updatedAt: "2026-04-20T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 3,
+        lengthSpec: buildLengthSpec(2200, "en"),
+      });
+
+      expect(output.hookDebtCheck).toBeDefined();
+      expect(output.hookDebtCheck?.matched).toBe(false);
+      expect(output.hookDebtCheck).toEqual(expect.objectContaining({
+        activeCount: 14,
+        cap: 12,
+        newHooksOpened: 1,
+        oldHooksAdvanced: 0,
+      }));
+      expect(output.hookDebtCheck?.warnings).toEqual(expect.arrayContaining([
+        "hook-debt-over-cap",
+        "hook-debt-no-old-hook-advance",
+        "hook-debt-throttle-violation",
+      ]));
+      expect(output.postWriteWarnings.some((warning) => warning.rule === "hook-debt-over-cap")).toBe(true);
+      expect(output.postWriteWarnings.some((warning) => warning.rule === "hook-debt-no-old-hook-advance")).toBe(true);
+      expect(output.postWriteWarnings.some((warning) => warning.rule === "hook-debt-throttle-violation")).toBe(true);
+      expect(output.postWriteErrors).toEqual([]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

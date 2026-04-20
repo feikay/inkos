@@ -26,6 +26,7 @@ describe("buildStudioBookConfig", () => {
     );
 
     expect(config).toMatchObject({
+      schemaVersion: 2,
       title: "测试书",
       genre: "xuanhuan",
       platform: "qidian",
@@ -49,6 +50,7 @@ describe("buildStudioBookConfig", () => {
     expect(config.platform).toBe("other");
     expect(config.language).toBe("en");
     expect(config.id).toBe("english-book");
+    expect(config.schemaVersion).toBe(2);
   });
 });
 

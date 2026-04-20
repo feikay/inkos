@@ -10,6 +10,7 @@ export interface StudioCreateBookBody {
 }
 
 export interface StudioBookConfigDraft {
+  readonly schemaVersion: 2;
   readonly id: string;
   readonly title: string;
   readonly platform: Platform;
@@ -48,6 +49,7 @@ export function normalizeStudioPlatform(platform?: string): Platform {
 
 export function buildStudioBookConfig(body: StudioCreateBookBody, now: string): StudioBookConfigDraft {
   return {
+    schemaVersion: 2,
     id: body.title
       .toLowerCase()
       .replace(/[^a-z0-9\u4e00-\u9fff]/g, "-")

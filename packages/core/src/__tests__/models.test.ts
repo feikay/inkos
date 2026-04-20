@@ -122,6 +122,16 @@ describe("BookConfigSchema", () => {
       BookConfigSchema.parse({ ...validBook, createdAt: "not-a-date" }),
     ).toThrow();
   });
+
+  it("accepts an optional webnovel template flag", () => {
+    const result = BookConfigSchema.parse({ ...validBook, webnovelTemplate: "xuanhuan" });
+    expect(result.webnovelTemplate).toBe("xuanhuan");
+  });
+
+  it("accepts current-format schema metadata for new books", () => {
+    const result = BookConfigSchema.parse({ ...validBook, schemaVersion: 2 });
+    expect(result.schemaVersion).toBe(2);
+  });
 });
 
 describe("PlatformSchema", () => {
@@ -510,6 +520,15 @@ describe("ChapterIntentSchema", () => {
           resolution: "allow local outline deferral",
         },
       ],
+      chapterGoal: {
+        mainConflict: "The mentor debt is still forcing every move.",
+        protagonistGoal: "Pull the confrontation back under control before the guild reacts.",
+        activeCharacters: ["Lin Yue", "Master Shen"],
+        foreshadowToTouch: ["mentor-oath"],
+        payoffToDeliver: "Deliver the first concrete clue about the mentor's disappearance.",
+        endingHookType: "reveal",
+        nextChapterPull: "The clue points toward a worse truth waiting in the next chapter.",
+      },
       hookAgenda: {
         pressureMap: [
           {
@@ -540,6 +559,10 @@ describe("ChapterIntentSchema", () => {
     expect(result.moodDirective).toContain("Release pressure");
     expect(result.titleDirective).toContain("ledger title");
     expect(result.conflicts).toHaveLength(1);
+    expect(result.chapterGoal).toEqual(expect.objectContaining({
+      mainConflict: "The mentor debt is still forcing every move.",
+      endingHookType: "reveal",
+    }));
     expect(result.hookAgenda.pressureMap).toEqual([
       expect.objectContaining({
         hookId: "H019",
@@ -574,6 +597,7 @@ describe("ChapterIntentSchema", () => {
     expect(result.mustAvoid).toEqual([]);
     expect(result.styleEmphasis).toEqual([]);
     expect(result.conflicts).toEqual([]);
+    expect(result.chapterGoal).toBeUndefined();
     expect(result.hookAgenda.pressureMap).toEqual([]);
     expect(result.hookAgenda.mustAdvance).toEqual([]);
     expect(result.hookAgenda.eligibleResolve).toEqual([]);
@@ -606,10 +630,20 @@ describe("ContextPackageSchema", () => {
           reason: "Provide prior conflict context",
         },
       ],
+      chapterGoal: {
+        mainConflict: "Mentor debt must surface in the current confrontation.",
+        protagonistGoal: "Force one direct answer out of the witness.",
+        activeCharacters: ["Lin Yue"],
+        foreshadowToTouch: ["mentor-oath"],
+        payoffToDeliver: "Deliver the first direct answer about the vanished mentor.",
+        endingHookType: "reveal",
+        nextChapterPull: "The answer opens a worse question for next chapter.",
+      },
     });
 
     expect(result.chapter).toBe(8);
     expect(result.selectedContext).toHaveLength(2);
+    expect(result.chapterGoal?.endingHookType).toBe("reveal");
   });
 
   it("rejects context entries without source", () => {

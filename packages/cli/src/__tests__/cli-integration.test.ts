@@ -778,6 +778,97 @@ describe("CLI integration", () => {
   });
 
   describe("inkos review", () => {
+    it("groups chapter goal, discipline checks, continuity notes, and traditional warnings in review list", async () => {
+      const configPath = join(projectDir, "inkos.json");
+      const initialized = await stat(configPath).then(() => true).catch(() => false);
+      if (!initialized) run(["init"]);
+
+      const bookId = "review-grouped-cli";
+      const bookDir = join(projectDir, "books", bookId);
+      const storyDir = join(bookDir, "story");
+      const runtimeDir = join(storyDir, "runtime");
+      const chaptersDir = join(bookDir, "chapters");
+      await mkdir(runtimeDir, { recursive: true });
+      await mkdir(chaptersDir, { recursive: true });
+
+      await writeFile(
+        join(bookDir, "book.json"),
+        JSON.stringify({
+          id: bookId,
+          title: "Review Grouped CLI",
+          platform: "other",
+          genre: "other",
+          status: "active",
+          targetChapters: 10,
+          chapterWordCount: 2200,
+          language: "zh",
+          createdAt: "2026-04-20T00:00:00.000Z",
+          updatedAt: "2026-04-20T00:00:00.000Z",
+        }, null, 2),
+        "utf-8",
+      );
+      await writeFile(
+        join(chaptersDir, "index.json"),
+        JSON.stringify([
+          {
+            number: 4,
+            title: "黑市门缝",
+            status: "audit-failed",
+            wordCount: 1888,
+            createdAt: "2026-04-20T00:00:00.000Z",
+            updatedAt: "2026-04-20T00:00:00.000Z",
+            auditIssues: [
+              "[warning] 章尾没有明显兑现预期的收尾钩子类型：reveal。",
+              "[warning] 检测到资源/状态可能漏记：需要在当前状态中同步伤势、反噬或经脉受损。",
+              "[warning] 连续性：角色位置矛盾",
+              "[warning] 转折/惊讶标记词共3次（上限1次/1200字）",
+            ],
+            lengthWarnings: [],
+          },
+        ], null, 2),
+        "utf-8",
+      );
+      await writeFile(
+        join(runtimeDir, "chapter-0004.intent.md"),
+        [
+          "# Chapter Intent",
+          "",
+          "## Goal",
+          "继续黑市入口线。",
+          "",
+          "## Chapter Goal",
+          "- mainConflict: 秦枭必须在暴露前挤进黑市入口。",
+          "- protagonistGoal: 先骗过守门人，再找到黑市接头点。",
+          "- activeCharacters: 秦枭, 守门人",
+          "- foreshadowToTouch: black-market-key",
+          "- payoffToDeliver: 拿到进入黑市的钥匙情报",
+          "- endingHookType: reveal",
+          "- nextChapterPull: 黑市入口背后的人会立刻盯上他。",
+          "",
+          "## Conflicts",
+          "- outline_vs_recent_state: prefer latest state continuity anchor",
+          "- hook_debt_throttle: advance an existing hook before opening parallel debt",
+          "",
+        ].join("\n"),
+        "utf-8",
+      );
+
+      const output = run(["review", "list", bookId]);
+
+      expect(output).toContain('Ch.4 "黑市门缝" | 1888字 | audit-failed');
+      expect(output).toContain("Chapter Goal:");
+      expect(output).toContain("mainConflict: 秦枭必须在暴露前挤进黑市入口。");
+      expect(output).toContain("endingHookType: reveal");
+      expect(output).toContain("Discipline Checks:");
+      expect(output).toContain("章尾没有明显兑现预期的收尾钩子类型：reveal。");
+      expect(output).toContain("检测到资源/状态可能漏记");
+      expect(output).toContain("Continuity / Planning Notes:");
+      expect(output).toContain("outline_vs_recent_state: prefer latest state continuity anchor");
+      expect(output).toContain("连续性：角色位置矛盾");
+      expect(output).toContain("Traditional Warnings:");
+      expect(output).toContain("转折/惊讶标记词共3次");
+    });
+
     it("preserves the original chapter snapshot when approving review", async () => {
       const configPath = join(projectDir, "inkos.json");
       const initialized = await stat(configPath).then(() => true).catch(() => false);

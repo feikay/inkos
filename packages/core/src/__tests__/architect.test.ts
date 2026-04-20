@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { ArchitectAgent } from "../agents/architect.js";
 import type { BookConfig } from "../models/book.js";
 
@@ -704,5 +707,49 @@ describe("ArchitectAgent", () => {
       expect.any(Array),
       expect.objectContaining({ temperature: 0.7, maxTokens: 16384 }),
     );
+  });
+
+  it("writes webnovel template skeleton files when requested", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-architect-template-"));
+    const agent = new ArchitectAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+
+    try {
+      await agent.writeFoundationFiles(
+        root,
+        {
+          storyBible: "# Story Bible",
+          volumeOutline: "# Volume Outline",
+          bookRules: "# Book Rules",
+          currentState: "# Current State",
+          pendingHooks: "# Pending Hooks",
+        },
+        true,
+        "zh",
+        "xuanhuan",
+      );
+
+      await expect(readFile(join(root, "story", "genre_profile.yaml"), "utf-8"))
+        .resolves.toContain("template: xuanhuan");
+      await expect(readFile(join(root, "story", "arc_map.yaml"), "utf-8"))
+        .resolves.toContain("vol-01");
+      await expect(readFile(join(root, "story", "power_system.yaml"), "utf-8"))
+        .resolves.toContain("realm_tree:");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

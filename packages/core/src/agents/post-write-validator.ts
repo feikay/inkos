@@ -8,12 +8,56 @@
 import { analyzeChapterCadence } from "../utils/chapter-cadence.js";
 import type { BookRules } from "../models/book-rules.js";
 import type { GenreProfile } from "../models/genre-profile.js";
+import type { ChapterGoal, EndingHookType } from "../models/input-governance.js";
+import type { RuntimeStateDelta } from "../models/runtime-state.js";
+import type { RuntimeStateSnapshot } from "../state/state-reducer.js";
 
 export interface PostWriteViolation {
   readonly rule: string;
   readonly severity: "error" | "warning";
   readonly description: string;
   readonly suggestion: string;
+}
+
+export interface EndingHookCheck {
+  readonly expectedType: EndingHookType;
+  readonly matched: boolean;
+  readonly evidence?: string;
+}
+
+export interface PayoffCheck {
+  readonly expectedPayoff: string;
+  readonly matched: boolean;
+  readonly evidence?: string;
+}
+
+export interface PostWriteDisciplineChecks {
+  readonly endingHookCheck: EndingHookCheck;
+  readonly payoffCheck: PayoffCheck;
+}
+
+export interface ResourceLedgerFinding {
+  readonly kind: "consumption" | "recovery" | "growth" | "injury";
+  readonly signal: string;
+  readonly matched: boolean;
+  readonly evidence: string;
+  readonly expectedUpdate: string;
+  readonly stateEvidence?: string;
+}
+
+export interface ResourceLedgerCheck {
+  readonly matched: boolean;
+  readonly findings: ReadonlyArray<ResourceLedgerFinding>;
+  readonly warnings: ReadonlyArray<string>;
+}
+
+export interface HookDebtCheck {
+  readonly activeCount: number;
+  readonly cap: number;
+  readonly newHooksOpened: number;
+  readonly oldHooksAdvanced: number;
+  readonly matched: boolean;
+  readonly warnings: ReadonlyArray<string>;
 }
 
 interface ParagraphShape {
@@ -24,6 +68,97 @@ interface ParagraphShape {
   readonly averageLength: number;
   readonly maxConsecutiveShort: number;
 }
+
+const ENDING_HOOK_PATTERNS: Record<EndingHookType, ReadonlyArray<RegExp>> = {
+  danger: [
+    /危险|威胁|杀机|死路|压来|逼近|袭来|追上来|活不下去|撑不住/u,
+    /danger|threat|closing in|bearing down|survival pressure|no way out/i,
+  ],
+  reveal: [
+    /真相|秘密|身份|揭开|揭晓|原来|线索|发现|看清|道出|说破/u,
+    /reveal|truth|secret|identity|clue|discovered|turned out/i,
+  ],
+  pursuit: [
+    /追兵|追来|追上|追踪|追逃|封锁|咬上来|尾随/u,
+    /pursuit|chase|tracked|tracking|closing the gap|hunters/i,
+  ],
+  choice: [
+    /选择|抉择|取舍|两难|必须决定|只能选|要么|不得不决定/u,
+    /choice|decision|must choose|either .* or|forced to decide|dilemma/i,
+  ],
+  breakthrough: [
+    /突破|破境|晋阶|觉醒|掌握|领悟|蜕变|提升|新能力/u,
+    /breakthrough|ascend|advanced|awakened|mastered|new ability|leveled up/i,
+  ],
+};
+
+const RESOURCE_SIGNAL_RULES: ReadonlyArray<{
+  readonly kind: ResourceLedgerFinding["kind"];
+  readonly signal: string;
+  readonly patterns: ReadonlyArray<RegExp>;
+  readonly statePatterns: ReadonlyArray<RegExp>;
+  readonly warningRule: string;
+  readonly expectedUpdate: {
+    readonly zh: string;
+    readonly en: string;
+  };
+}> = [
+  {
+    kind: "consumption",
+    signal: "qi-blood-consumption",
+    patterns: [/气血.{0,8}(下降|减少|亏空|亏损|耗尽|消耗|骤降|暴跌)/u, /blood.*(drain|loss|spent|depleted|drop|plunge)/i],
+    statePatterns: [/气血|血气|亏空|耗损|不足/u, /blood|vitality|drain|depleted/i],
+    warningRule: "resource-ledger-missing-consumption",
+    expectedUpdate: {
+      zh: "需要在当前状态或资源账本中记录气血消耗/亏空。",
+      en: "Record qi-blood loss or depletion in current state or resource ledger.",
+    },
+  },
+  {
+    kind: "consumption",
+    signal: "shaqi-consumption",
+    patterns: [/煞气.{0,8}(消耗|耗尽|减少|抽空|亏空)|强行催动.{0,8}煞气/u, /sha qi.*(spent|drain|depleted|reduced)|force.*sha qi/i],
+    statePatterns: [/煞气|消耗|抽空|亏空/u, /sha qi|depleted|spent|drain/i],
+    warningRule: "resource-ledger-missing-consumption",
+    expectedUpdate: {
+      zh: "需要在资源账本或状态中记录煞气消耗。",
+      en: "Record sha-qi expenditure in the ledger or current state.",
+    },
+  },
+  {
+    kind: "injury",
+    signal: "backlash-or-injury",
+    patterns: [/强行催动|反噬|噬心之痛|五脏六腑受损|经脉.{0,6}(刺痛|震伤)|伤口.{0,6}(恶化|崩裂|加重)/u, /backlash|heart-rending pain|organs? damaged|meridians?.*(hurt|shaken)|wound.*(worsen|split|reopen)/i],
+    statePatterns: [/伤势|伤口|经脉|反噬|受损|刺痛|震伤/u, /injury|wound|meridian|backlash|damaged|pain/i],
+    warningRule: "resource-ledger-missing-injury-update",
+    expectedUpdate: {
+      zh: "需要在当前状态中同步伤势、反噬或经脉受损。",
+      en: "Reflect injury, backlash, or meridian damage in current state.",
+    },
+  },
+  {
+    kind: "recovery",
+    signal: "recovery",
+    patterns: [/气血.{0,8}(恢复|回升)|煞气.{0,8}(补充|恢复|回升)|伤口.{0,8}(止血|愈合)|修复伤势|经脉.{0,8}恢复|体力.{0,8}回升/u, /blood.*recover|sha qi.*recover|wound.*(closed|stopped bleeding|healed)|recover(ed)? strength|meridians?.*recover/i],
+    statePatterns: [/恢复|回升|止血|愈合|修复/u, /recover|restored|healed|stopped bleeding/i],
+    warningRule: "resource-ledger-missing-recovery",
+    expectedUpdate: {
+      zh: "需要在当前状态或账本中体现恢复/修复结果。",
+      en: "Reflect recovery or repair in current state or ledger.",
+    },
+  },
+  {
+    kind: "growth",
+    signal: "growth",
+    patterns: [/煞气.{0,8}(增加|暴涨|更盛)|境界.{0,8}(提升|突破)|掌握.{0,8}(新手段|新能力)|临时突破/u, /sha qi.*(increase|surge)|realm.*(advance|breakthrough)|mastered.*(ability|method)|temporary breakthrough/i],
+    statePatterns: [/提升|突破|掌握|增加|更盛/u, /advance|breakthrough|mastered|increase|surge/i],
+    warningRule: "resource-ledger-missing-growth-update",
+    expectedUpdate: {
+      zh: "需要在状态或账本中同步能力/资源增长。",
+      en: "Reflect growth in ability or resources in state or ledger.",
+    },
+  },
+];
 
 // --- Marker word lists ---
 
@@ -566,6 +701,327 @@ function extractParagraphs(content: string): string[] {
     .filter((paragraph) => !paragraph.startsWith("#"));
 }
 
+function extractEndingRegion(content: string): string {
+  const paragraphs = extractParagraphs(content);
+  if (paragraphs.length === 0) {
+    return content.trim();
+  }
+  return paragraphs.slice(-3).join("\n\n");
+}
+
+function detectResourceMatches(
+  content: string,
+  rule: (typeof RESOURCE_SIGNAL_RULES)[number],
+): ResourceLedgerFinding[] {
+  const findings: ResourceLedgerFinding[] = [];
+  for (const pattern of rule.patterns) {
+    for (const match of content.matchAll(new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`))) {
+      const evidence = snippetAround(content, match.index ?? 0, (match[0] ?? "").length);
+      if (isNegatedSnippet(evidence)) {
+        continue;
+      }
+      findings.push({
+        kind: rule.kind,
+        signal: rule.signal,
+        matched: false,
+        evidence,
+        expectedUpdate: rule.expectedUpdate.zh,
+      });
+    }
+  }
+  return findings;
+}
+
+function evaluateResourceFinding(
+  finding: ResourceLedgerFinding,
+  params: {
+    readonly currentState: string;
+    readonly updatedState: string;
+    readonly originalLedger: string;
+    readonly updatedLedger: string;
+    readonly runtimeStateSnapshot?: RuntimeStateSnapshot;
+    readonly language: "zh" | "en";
+  },
+): ResourceLedgerFinding {
+  const rule = RESOURCE_SIGNAL_RULES.find((candidate) => candidate.signal === finding.signal);
+  if (!rule) {
+    return finding;
+  }
+
+  const updatedCombined = buildResourceComparisonText(
+    params.updatedState,
+    params.updatedLedger,
+    params.runtimeStateSnapshot,
+  );
+  const originalCombined = buildResourceComparisonText(
+    params.currentState,
+    params.originalLedger,
+    undefined,
+  );
+  const stateEvidence = findRegexEvidence(updatedCombined, rule.statePatterns);
+  const originalEvidence = findRegexEvidence(originalCombined, rule.statePatterns);
+  const numericSignal = extractResourceNumericSignal(finding.evidence);
+  const numericMatched = numericSignal
+    ? containsNumericSignal(updatedCombined, numericSignal)
+    : true;
+  const changed = normalizeLooseText(stateEvidence ?? "") !== normalizeLooseText(originalEvidence ?? "");
+  const matched = Boolean(stateEvidence) && numericMatched && (changed || !originalEvidence);
+
+  return {
+    ...finding,
+    matched,
+    expectedUpdate: params.language === "en" ? rule.expectedUpdate.en : rule.expectedUpdate.zh,
+    ...(stateEvidence ? { stateEvidence } : {}),
+  };
+}
+
+function buildResourceComparisonText(
+  stateMarkdown: string,
+  ledgerMarkdown: string,
+  runtimeStateSnapshot: RuntimeStateSnapshot | undefined,
+): string {
+  const snapshotText = runtimeStateSnapshot
+    ? JSON.stringify({
+      manifest: runtimeStateSnapshot.manifest,
+      currentState: runtimeStateSnapshot.currentState,
+    }, null, 2)
+    : "";
+  return [stateMarkdown, ledgerMarkdown, snapshotText]
+    .filter((value) => hasMeaningfulLedgerSource(value))
+    .join("\n");
+}
+
+function hasMeaningfulLedgerSource(value: string | undefined): boolean {
+  const normalized = value?.trim();
+  return Boolean(normalized && normalized !== "(文件尚未创建)");
+}
+
+function extractResourceNumericSignal(evidence: string): { value: string; unit?: string } | undefined {
+  const arabicMatch = evidence.match(/(\d+)\s*(缕|点|成|层|分|丝|滴)?/u);
+  if (arabicMatch?.[1]) {
+    return {
+      value: arabicMatch[1],
+      ...(arabicMatch[2] ? { unit: arabicMatch[2] } : {}),
+    };
+  }
+
+  const chineseMatch = evidence.match(/([一二三四五六七八九十百两]+)\s*(缕|点|成|层|分|丝|滴)?/u);
+  if (!chineseMatch?.[1]) {
+    return undefined;
+  }
+
+  return {
+    value: normalizeChineseNumber(chineseMatch[1]),
+    ...(chineseMatch[2] ? { unit: chineseMatch[2] } : {}),
+  };
+}
+
+function containsNumericSignal(content: string, signal: { value: string; unit?: string }): boolean {
+  const normalized = normalizeLooseText(content);
+  if (!normalized.includes(signal.value)) {
+    return false;
+  }
+  if (!signal.unit) {
+    return true;
+  }
+  return content.includes(signal.unit);
+}
+
+function normalizeChineseNumber(value: string): string {
+  const mapping: Record<string, number> = {
+    一: 1,
+    二: 2,
+    两: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+    十: 10,
+    百: 100,
+  };
+
+  if (value === "十") return "10";
+  if (value.length === 2 && value.startsWith("十")) {
+    return String(10 + (mapping[value[1]!] ?? 0));
+  }
+  if (value.length === 2 && value.endsWith("十")) {
+    return String((mapping[value[0]!] ?? 0) * 10);
+  }
+  if (value.length === 3 && value[1] === "十") {
+    return String((mapping[value[0]!] ?? 0) * 10 + (mapping[value[2]!] ?? 0));
+  }
+  return String(mapping[value] ?? 0);
+}
+
+function determineBaseResourceWarningRule(
+  finding: ResourceLedgerFinding,
+): string {
+  switch (finding.kind) {
+    case "consumption":
+      return "resource-ledger-missing-consumption";
+    case "recovery":
+      return "resource-ledger-missing-recovery";
+    case "injury":
+      return "resource-ledger-missing-injury-update";
+    case "growth":
+      return "resource-ledger-missing-growth-update";
+    default:
+      return "resource-ledger-value-mismatch";
+  }
+}
+
+function hasNumericResourceMismatch(
+  finding: ResourceLedgerFinding,
+  updatedState: string,
+  updatedLedger: string,
+): boolean {
+  const numericSignal = extractResourceNumericSignal(finding.evidence);
+  if (!numericSignal) {
+    return false;
+  }
+  return !containsNumericSignal([updatedState, updatedLedger].join("\n"), numericSignal);
+}
+
+function localizeHookDebtWarning(
+  rule: string,
+  check: HookDebtCheck,
+  language: "zh" | "en",
+): string {
+  if (language === "en") {
+    switch (rule) {
+      case "hook-debt-over-cap":
+        return `Active hooks ${check.activeCount} exceed the recommended cap of ${check.cap}.`;
+      case "hook-debt-too-many-new-hooks":
+        return `This chapter opened ${check.newHooksOpened} new hooks under the current debt throttle.`;
+      case "hook-debt-no-old-hook-advance":
+        return "This chapter did not advance or resolve any older hook debt.";
+      case "hook-debt-throttle-violation":
+        return "The chapter kept opening new hooks while high debt remained untouched.";
+      default:
+        return "Hook debt throttle warning.";
+    }
+  }
+
+  switch (rule) {
+    case "hook-debt-over-cap":
+      return `当前活跃伏笔数 ${check.activeCount} 已超过建议上限 ${check.cap}。`;
+    case "hook-debt-too-many-new-hooks":
+      return `本章在高债务状态下仍新开了 ${check.newHooksOpened} 条伏笔。`;
+    case "hook-debt-no-old-hook-advance":
+      return "本章没有推进或回收任何旧伏笔。";
+    case "hook-debt-throttle-violation":
+      return "高债务状态下，本章仍主要在开新坑而没有处理旧债。";
+    default:
+      return "伏笔节流警告。";
+  }
+}
+
+function findRegexEvidence(content: string, patterns: ReadonlyArray<RegExp>): string | undefined {
+  for (const pattern of patterns) {
+    const match = content.match(pattern);
+    if (match?.index !== undefined) {
+      return snippetAround(content, match.index, match[0].length);
+    }
+  }
+  return undefined;
+}
+
+function findPayoffEvidence(content: string, expectedPayoff: string): string | undefined {
+  const normalizedExpected = normalizeLooseText(expectedPayoff);
+  const normalizedContent = normalizeLooseText(content);
+  if (normalizedExpected && normalizedContent.includes(normalizedExpected)) {
+    const index = normalizedContent.indexOf(normalizedExpected);
+    const snippet = snippetAround(content, mapLooseIndexToRaw(content, index), expectedPayoff.length);
+    return isNegatedSnippet(snippet) ? undefined : snippet;
+  }
+
+  const keywords = extractPayoffKeywords(expectedPayoff);
+  if (keywords.length === 0) {
+    return undefined;
+  }
+
+  const matched = keywords.filter((keyword) => {
+    const rawIndex = content.indexOf(keyword);
+    if (rawIndex < 0) return false;
+    return !isNegatedSnippet(snippetAround(content, rawIndex, keyword.length));
+  });
+  const threshold = keywords.length >= 3 ? 2 : 1;
+  if (matched.length < threshold) {
+    return undefined;
+  }
+
+  const lead = matched[0]!;
+  const rawIndex = content.indexOf(lead);
+  return rawIndex >= 0 ? snippetAround(content, rawIndex, lead.length) : matched.join(" / ");
+}
+
+function extractPayoffKeywords(text: string): string[] {
+  const english = (text.match(/\b[a-z]{4,}\b/gi) ?? [])
+    .map((word) => word.toLowerCase())
+    .filter((word) => !ENGLISH_PAYOFF_STOPWORDS.has(word));
+  const chinese = (text.match(/[\u4e00-\u9fff]{2,12}/gu) ?? [])
+    .flatMap((phrase) => buildChinesePayoffFragments(phrase));
+  return [...new Set([...english, ...chinese])];
+}
+
+function buildChinesePayoffFragments(phrase: string): string[] {
+  const cleaned = phrase.trim();
+  if (cleaned.length < 2) return [];
+  if (CHINESE_PAYOFF_STOPWORDS.has(cleaned)) return [];
+
+  const fragments = new Set<string>();
+  if (cleaned.length <= 4) {
+    fragments.add(cleaned);
+  } else {
+    for (let size = 2; size <= 4; size += 1) {
+      for (let index = 0; index <= cleaned.length - size; index += 1) {
+        const fragment = cleaned.slice(index, index + size);
+        if (!CHINESE_PAYOFF_STOPWORDS.has(fragment)) {
+          fragments.add(fragment);
+        }
+      }
+    }
+  }
+
+  return [...fragments];
+}
+
+function normalizeLooseText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\u4e00-\u9fff]+/gu, "");
+}
+
+function mapLooseIndexToRaw(raw: string, normalizedIndex: number): number {
+  if (normalizedIndex <= 0) return 0;
+
+  let count = 0;
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index]!;
+    if (/[\p{L}\p{N}\u4e00-\u9fff]/u.test(char)) {
+      if (count === normalizedIndex) {
+        return index;
+      }
+      count += 1;
+    }
+  }
+
+  return Math.max(0, raw.length - 1);
+}
+
+function snippetAround(content: string, start: number, length: number): string {
+  const safeStart = Math.max(0, start - 24);
+  const safeEnd = Math.min(content.length, start + length + 24);
+  return content.slice(safeStart, safeEnd).replace(/\s+/g, " ").trim();
+}
+
+function isNegatedSnippet(value: string): boolean {
+  return /没有|未能|未曾|未|还没|没能|并未|尚未|不能|无力|not\b|did not|didn't|without\b|failed to/i.test(value);
+}
+
 const ENGLISH_NAME_STOP_WORDS = new Set([
   "The",
   "And",
@@ -577,6 +1033,32 @@ const ENGLISH_NAME_STOP_WORDS = new Set([
   "Even",
   "Then",
   "They",
+]);
+
+const ENGLISH_PAYOFF_STOPWORDS = new Set([
+  "first",
+  "deliver",
+  "reader",
+  "chapter",
+  "concrete",
+  "immediate",
+  "before",
+  "after",
+]);
+
+const CHINESE_PAYOFF_STOPWORDS = new Set([
+  "第一次",
+  "本章",
+  "读者",
+  "回报",
+  "即时",
+  "获得",
+  "拿到",
+  "一个",
+  "关键",
+  "线索",
+  "资源",
+  "小胜",
 ]);
 
 const CHINESE_TITLE_STOP_WORDS = new Set([
@@ -690,6 +1172,213 @@ export function resolveDuplicateTitle(
   }
 
   return { title: trimmed, issues: collapseIssues };
+}
+
+export function evaluateChapterGoalDiscipline(
+  content: string,
+  chapterGoal: ChapterGoal,
+): PostWriteDisciplineChecks {
+  const endingRegion = extractEndingRegion(content);
+  const endingEvidence = findRegexEvidence(endingRegion, ENDING_HOOK_PATTERNS[chapterGoal.endingHookType]);
+  const payoffEvidence = findPayoffEvidence(content, chapterGoal.payoffToDeliver);
+
+  return {
+    endingHookCheck: {
+      expectedType: chapterGoal.endingHookType,
+      matched: Boolean(endingEvidence),
+      ...(endingEvidence ? { evidence: endingEvidence } : {}),
+    },
+    payoffCheck: {
+      expectedPayoff: chapterGoal.payoffToDeliver,
+      matched: Boolean(payoffEvidence),
+      ...(payoffEvidence ? { evidence: payoffEvidence } : {}),
+    },
+  };
+}
+
+export function toDisciplineWarnings(
+  checks: PostWriteDisciplineChecks,
+  language: "zh" | "en",
+): ReadonlyArray<PostWriteViolation> {
+  const warnings: PostWriteViolation[] = [];
+
+  if (!checks.endingHookCheck.matched) {
+    warnings.push({
+      rule: "ending-hook-check",
+      severity: "warning",
+      description: language === "en"
+        ? `The ending does not clearly cash out the expected hook type: ${checks.endingHookCheck.expectedType}.`
+        : `章尾没有明显兑现预期的收尾钩子类型：${checks.endingHookCheck.expectedType}。`,
+      suggestion: language === "en"
+        ? "Strengthen the closing paragraphs with a clearer end-beat signal."
+        : "在结尾段补强更明确的章尾信号。",
+    });
+  }
+
+  if (!checks.payoffCheck.matched) {
+    warnings.push({
+      rule: "payoff-check",
+      severity: "warning",
+      description: language === "en"
+        ? `The chapter does not clearly deliver the planned payoff: ${checks.payoffCheck.expectedPayoff}.`
+        : `本章没有明显兑现预期即时回报：${checks.payoffCheck.expectedPayoff}。`,
+      suggestion: language === "en"
+        ? "Add one visible payoff beat, clue, win, or resource before the chapter closes."
+        : "在本章中补一个读者能明确感知到的回报节点。",
+    });
+  }
+
+  return warnings;
+}
+
+export function evaluateResourceLedgerDiscipline(params: {
+  readonly content: string;
+  readonly currentState: string;
+  readonly updatedState: string;
+  readonly originalLedger: string;
+  readonly updatedLedger: string;
+  readonly runtimeStateSnapshot?: RuntimeStateSnapshot;
+  readonly language: "zh" | "en";
+}): ResourceLedgerCheck {
+  const sourcesAvailable = [
+    params.currentState,
+    params.updatedState,
+    params.originalLedger,
+    params.updatedLedger,
+    params.runtimeStateSnapshot ? JSON.stringify(params.runtimeStateSnapshot.currentState) : "",
+  ].some((value) => hasMeaningfulLedgerSource(value));
+  if (!sourcesAvailable) {
+    return {
+      matched: true,
+      findings: [],
+      warnings: [],
+    };
+  }
+
+  const findings = RESOURCE_SIGNAL_RULES
+    .flatMap((rule) => detectResourceMatches(params.content, rule))
+    .filter((finding, index, list) =>
+      list.findIndex((candidate) => candidate.kind === finding.kind && candidate.signal === finding.signal) === index,
+    )
+    .map((finding) => evaluateResourceFinding(finding, params));
+
+  const warnings = [...new Set(findings
+    .filter((finding) => !finding.matched)
+    .flatMap((finding) => {
+      const rules = [determineBaseResourceWarningRule(finding)];
+      if (hasNumericResourceMismatch(finding, params.updatedState, params.updatedLedger)) {
+        rules.push("resource-ledger-value-mismatch");
+      }
+      return rules;
+    }))];
+
+  return {
+    matched: warnings.length === 0,
+    findings,
+    warnings,
+  };
+}
+
+export function toResourceLedgerWarnings(
+  check: ResourceLedgerCheck,
+  language: "zh" | "en",
+): ReadonlyArray<PostWriteViolation> {
+  const warnings: PostWriteViolation[] = [];
+  const seen = new Set<string>();
+
+  for (const finding of check.findings.filter((candidate) => !candidate.matched)) {
+    const rules = [determineBaseResourceWarningRule(finding)];
+    if (check.warnings.includes("resource-ledger-value-mismatch") && hasNumericResourceMismatch(finding, finding.stateEvidence ?? "", "")) {
+      rules.push("resource-ledger-value-mismatch");
+    }
+
+    for (const rule of rules) {
+      if (seen.has(rule)) continue;
+      seen.add(rule);
+      warnings.push({
+        rule,
+        severity: "warning" as const,
+        description: language === "en"
+          ? `Resource/state drift detected for ${finding.signal}: ${finding.expectedUpdate}`
+          : `检测到资源/状态可能漏记：${finding.expectedUpdate}`,
+        suggestion: language === "en"
+          ? `Update the ledger/state to reflect: ${finding.evidence}`
+          : `请在状态或账本中补记：${finding.evidence}`,
+      });
+    }
+  }
+
+  return warnings;
+}
+
+export function evaluateHookDebtThrottle(params: {
+  readonly snapshot?: RuntimeStateSnapshot;
+  readonly delta?: RuntimeStateDelta;
+  readonly existingHookIds?: ReadonlyArray<string>;
+  readonly cap?: number;
+}): HookDebtCheck | undefined {
+  if (!params.snapshot || !params.delta) {
+    return undefined;
+  }
+
+  const cap = params.cap ?? 12;
+  const activeHooks = params.snapshot.hooks.hooks.filter((hook) => hook.status !== "resolved");
+  const activeCount = activeHooks.length;
+  const existingIds = new Set(params.existingHookIds ?? []);
+  const newHookIds = [...new Set(
+    params.delta.hookOps.upsert
+      .map((hook) => hook.hookId)
+      .filter((hookId) => !existingIds.has(hookId)),
+  )];
+  const oldHooksAdvanced = new Set([
+    ...params.delta.hookOps.resolve,
+    ...params.delta.hookOps.defer,
+    ...params.delta.hookOps.upsert
+      .filter((hook) => existingIds.has(hook.hookId) && hook.lastAdvancedChapter === params.delta!.chapter)
+      .map((hook) => hook.hookId),
+  ]);
+
+  const newHookCap = activeCount > cap || existingIds.size > cap ? 1 : 2;
+  const warnings: string[] = [];
+  if (activeCount > cap) {
+    warnings.push("hook-debt-over-cap");
+  }
+  if (newHookIds.length > newHookCap) {
+    warnings.push("hook-debt-too-many-new-hooks");
+  }
+  if ((activeCount >= cap || existingIds.size >= cap) && oldHooksAdvanced.size === 0) {
+    warnings.push("hook-debt-no-old-hook-advance");
+  }
+  if ((activeCount >= cap || existingIds.size >= cap) && newHookIds.length > 0 && oldHooksAdvanced.size === 0) {
+    warnings.push("hook-debt-throttle-violation");
+  }
+
+  return {
+    activeCount,
+    cap,
+    newHooksOpened: newHookIds.length,
+    oldHooksAdvanced: oldHooksAdvanced.size,
+    matched: warnings.length === 0,
+    warnings,
+  };
+}
+
+export function toHookDebtWarnings(
+  check: HookDebtCheck | undefined,
+  language: "zh" | "en",
+): ReadonlyArray<PostWriteViolation> {
+  if (!check) {
+    return [];
+  }
+
+  return check.warnings.map((rule) => ({
+    rule,
+    severity: "warning" as const,
+    description: localizeHookDebtWarning(rule, check, language),
+    suggestion: language === "en"
+      ? "Favor advancing or resolving existing hooks before opening parallel debt."
+      : "优先推进或回收旧伏笔，再考虑开新坑。",
+  }));
 }
 
 function detectTitleCollapse(

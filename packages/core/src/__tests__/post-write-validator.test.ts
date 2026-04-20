@@ -3,7 +3,13 @@ import {
   detectDuplicateTitle,
   detectParagraphLengthDrift,
   detectParagraphShapeWarnings,
+  evaluateChapterGoalDiscipline,
+  evaluateHookDebtThrottle,
+  evaluateResourceLedgerDiscipline,
   resolveDuplicateTitle,
+  toDisciplineWarnings,
+  toHookDebtWarnings,
+  toResourceLedgerWarnings,
   validatePostWrite,
   type PostWriteViolation,
 } from "../agents/post-write-validator.js";
@@ -273,5 +279,148 @@ describe("validatePostWrite", () => {
     expect(result.issues.some((issue) => issue.rule === "title-collapse")).toBe(true);
     expect(result.title).not.toContain("名单");
     expect(result.title).toContain("塔楼");
+  });
+
+  it("matches ending hook signals against the ending region", () => {
+    const checks = evaluateChapterGoalDiscipline(
+      [
+        "他整章都在追查石碑来历，却始终没有说破。",
+        "",
+        "直到最后，碑灵低声道出一句话：那块石碑原本属于秦家的禁地。",
+      ].join("\n\n"),
+      {
+        mainConflict: "石碑来历压在身世之谜上。",
+        protagonistGoal: "逼出石碑真正的来历。",
+        activeCharacters: ["秦枭", "碑灵"],
+        foreshadowToTouch: ["black-stele"],
+        payoffToDeliver: "道出石碑真正的来历",
+        endingHookType: "reveal",
+        nextChapterPull: "这条来历会把禁地线彻底扯出来。",
+      },
+    );
+
+    expect(checks.endingHookCheck.matched).toBe(true);
+    expect(checks.endingHookCheck.evidence).toContain("道出一句话");
+  });
+
+  it("turns an undelivered payoff into a warning", () => {
+    const checks = evaluateChapterGoalDiscipline(
+      "他一路逃命，只是暂时甩开了追兵，却没有拿到任何地图或补给。",
+      {
+        mainConflict: "逃生压力不断升级。",
+        protagonistGoal: "先逃出矿坑。",
+        activeCharacters: ["秦枭"],
+        foreshadowToTouch: [],
+        payoffToDeliver: "获得地图和补给",
+        endingHookType: "danger",
+        nextChapterPull: "下一章追兵会再次逼近。",
+      },
+    );
+
+    const warnings = toDisciplineWarnings(checks, "zh");
+    expect(checks.payoffCheck.matched).toBe(false);
+    expect(warnings.some((warning) => warning.rule === "payoff-check")).toBe(true);
+  });
+
+  it("warns when consumption and backlash appear in prose but state and ledger stay unchanged", () => {
+    const check = evaluateResourceLedgerDiscipline({
+      content: "秦枭强行催动煞气，气血骤降，反噬之下经脉刺痛，五脏六腑都像被火灼过。",
+      currentState: "# 当前状态\n\n- 秦枭仍在逃亡。\n",
+      updatedState: "# 当前状态\n\n- 秦枭仍在逃亡。\n",
+      originalLedger: "# 资源账本\n\n- 煞气：稳定\n",
+      updatedLedger: "# 资源账本\n\n- 煞气：稳定\n",
+      language: "zh",
+    });
+
+    const warnings = toResourceLedgerWarnings(check, "zh");
+    expect(check.matched).toBe(false);
+    expect(check.warnings).toContain("resource-ledger-missing-consumption");
+    expect(check.warnings).toContain("resource-ledger-missing-injury-update");
+    expect(warnings.some((warning) => warning.rule === "resource-ledger-missing-consumption")).toBe(true);
+  });
+
+  it("flags numeric mismatch when prose gives a concrete resource amount that ledger does not carry forward", () => {
+    const check = evaluateResourceLedgerDiscipline({
+      content: "他一口气吞下十五缕煞气，伤口止血，体力也回升了几分。",
+      currentState: "# 当前状态\n",
+      updatedState: "# 当前状态\n\n- 伤口止血，体力回升。\n",
+      originalLedger: "# 资源账本\n\n- 煞气：十缕\n",
+      updatedLedger: "# 资源账本\n\n- 煞气：十缕\n",
+      language: "zh",
+    });
+
+    expect(check.warnings).toContain("resource-ledger-value-mismatch");
+  });
+
+  it("warns when high hook debt still opens multiple new hooks without advancing old debt", () => {
+    const check = evaluateHookDebtThrottle({
+      snapshot: {
+        manifest: {
+          schemaVersion: 2,
+          language: "zh",
+          lastAppliedChapter: 12,
+          projectionVersion: 1,
+          migrationWarnings: [],
+        },
+        currentState: {
+          chapter: 12,
+          facts: [],
+        },
+        hooks: {
+          hooks: [
+            { hookId: "old-1", startChapter: 1, type: "mystery", status: "open", lastAdvancedChapter: 5, expectedPayoff: "A", notes: "" },
+            { hookId: "old-2", startChapter: 2, type: "route", status: "open", lastAdvancedChapter: 6, expectedPayoff: "B", notes: "" },
+            { hookId: "old-3", startChapter: 3, type: "artifact", status: "open", lastAdvancedChapter: 7, expectedPayoff: "C", notes: "" },
+            { hookId: "old-4", startChapter: 4, type: "power", status: "open", lastAdvancedChapter: 7, expectedPayoff: "D", notes: "" },
+            { hookId: "old-5", startChapter: 5, type: "faction", status: "open", lastAdvancedChapter: 8, expectedPayoff: "E", notes: "" },
+            { hookId: "old-6", startChapter: 6, type: "enemy", status: "open", lastAdvancedChapter: 8, expectedPayoff: "F", notes: "" },
+            { hookId: "old-7", startChapter: 7, type: "lineage", status: "open", lastAdvancedChapter: 9, expectedPayoff: "G", notes: "" },
+            { hookId: "old-8", startChapter: 8, type: "debt", status: "open", lastAdvancedChapter: 9, expectedPayoff: "H", notes: "" },
+            { hookId: "old-9", startChapter: 9, type: "oath", status: "open", lastAdvancedChapter: 10, expectedPayoff: "I", notes: "" },
+            { hookId: "old-10", startChapter: 10, type: "betrayal", status: "open", lastAdvancedChapter: 10, expectedPayoff: "J", notes: "" },
+            { hookId: "old-11", startChapter: 11, type: "beast", status: "open", lastAdvancedChapter: 11, expectedPayoff: "K", notes: "" },
+            { hookId: "new-a", startChapter: 13, type: "market", status: "open", lastAdvancedChapter: 13, expectedPayoff: "L", notes: "" },
+            { hookId: "new-b", startChapter: 13, type: "killer", status: "open", lastAdvancedChapter: 13, expectedPayoff: "M", notes: "" },
+          ],
+        },
+        chapterSummaries: {
+          rows: [],
+        },
+      },
+      delta: {
+        chapter: 13,
+        currentStatePatch: {},
+        hookOps: {
+          upsert: [
+            { hookId: "new-a", startChapter: 13, type: "market", status: "open", lastAdvancedChapter: 13, expectedPayoff: "L", notes: "" },
+            { hookId: "new-b", startChapter: 13, type: "killer", status: "open", lastAdvancedChapter: 13, expectedPayoff: "M", notes: "" },
+          ],
+          mention: [],
+          resolve: [],
+          defer: [],
+        },
+        newHookCandidates: [],
+        subplotOps: [],
+        emotionalArcOps: [],
+        characterMatrixOps: [],
+        notes: [],
+      },
+      existingHookIds: Array.from({ length: 11 }, (_, index) => `old-${index + 1}`),
+    });
+
+    const warnings = toHookDebtWarnings(check, "zh");
+    expect(check).toEqual(expect.objectContaining({
+      activeCount: 13,
+      newHooksOpened: 2,
+      oldHooksAdvanced: 0,
+      matched: false,
+    }));
+    expect(check?.warnings).toEqual(expect.arrayContaining([
+      "hook-debt-over-cap",
+      "hook-debt-too-many-new-hooks",
+      "hook-debt-no-old-hook-advance",
+      "hook-debt-throttle-violation",
+    ]));
+    expect(warnings.some((warning) => warning.rule === "hook-debt-throttle-violation")).toBe(true);
   });
 });

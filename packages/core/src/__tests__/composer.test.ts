@@ -50,6 +50,40 @@ describe("ComposerAgent", () => {
       writeFile(join(storyDir, "current_state.md"), "# Current State\n\n- Lin Yue still hides the broken oath token.\n", "utf-8"),
       writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n\n- Why the mentor vanished after the trial.\n", "utf-8"),
       writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n\n- Keep the prose restrained.\n", "utf-8"),
+      writeFile(join(storyDir, "genre_profile.yaml"), [
+        "template: xuanhuan",
+        "label: 玄幻网文",
+        "tone:",
+        "  - 热血升级",
+        "  - 危机压迫",
+        "core_loop:",
+        "  - 遭遇压制",
+        "  - 获得机缘",
+        "forbidden_patterns:",
+        "  - 大段设定说明脱离人物行动",
+        "",
+      ].join("\n"), "utf-8"),
+      writeFile(join(storyDir, "arc_map.yaml"), [
+        "template: xuanhuan",
+        "volumes:",
+        "  - id: vol-01",
+        "    title: 山门外的活路",
+        "    chapter_range: \"1-30\"",
+        "    core_conflict: 主角在边缘地带求生并找到第一条向上爬的路径",
+        "",
+      ].join("\n"), "utf-8"),
+      writeFile(join(storyDir, "power_system.yaml"), [
+        "template: xuanhuan",
+        "realm_tree:",
+        "  - 炼体",
+        "  - 聚气",
+        "  - 筑基",
+        "base_rules:",
+        "  - 境界压制真实存在，越级取胜必须依赖明确外力、信息差或代价",
+        "exception_rules:",
+        "  - 主角可凭特殊体质短时突破上限，但必须留下代价",
+        "",
+      ].join("\n"), "utf-8"),
     ]);
 
     const runtimePath = join(storyDir, "runtime", "chapter-0004.intent.md");
@@ -72,6 +106,15 @@ describe("ComposerAgent", () => {
             resolution: "allow local outline deferral",
           },
         ],
+        chapterGoal: {
+          mainConflict: "Mentor debt collides with the guild trail.",
+          protagonistGoal: "Force one answer out of the guild route before the mentor line closes.",
+          activeCharacters: ["Lin Yue", "Mentor Witness"],
+          foreshadowToTouch: ["mentor-oath"],
+          payoffToDeliver: "Deliver the first concrete clue about the vanished mentor.",
+          endingHookType: "reveal",
+          nextChapterPull: "The clue points at a worse truth waiting in the next chapter.",
+        },
         hookAgenda: {
           pressureMap: [],
           mustAdvance: [],
@@ -163,6 +206,60 @@ describe("ComposerAgent", () => {
     expect(result.trace.selectedSources).toContain("story/current_focus.md");
     expect(result.trace.notes).toContain("allow local outline deferral");
     await expect(readFile(result.tracePath, "utf-8")).resolves.toContain("allow local outline deferral");
+  });
+
+  it("injects summarized webnovel book files into context selection and rule stack", async () => {
+    const composer = new ComposerAgent({
+      client: {} as ConstructorParameters<typeof ComposerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await composer.composeChapter({
+      book,
+      bookDir,
+      chapterNumber: 4,
+      plan,
+    });
+
+    const selected = result.contextPackage.selectedContext;
+    expect(selected).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: "story/genre_profile.yaml",
+      }),
+      expect.objectContaining({
+        source: "story/arc_map.yaml",
+      }),
+      expect.objectContaining({
+        source: "story/power_system.yaml",
+      }),
+    ]));
+    expect(selected.find((entry) => entry.source === "story/genre_profile.yaml")?.excerpt).toContain("玄幻网文");
+    expect(selected.find((entry) => entry.source === "story/arc_map.yaml")?.excerpt).toContain("山门外的活路");
+    expect(selected.find((entry) => entry.source === "story/power_system.yaml")?.excerpt).toContain("炼体");
+    expect(result.ruleStack.sections.soft).toContain("genre_profile");
+    expect(result.ruleStack.sections.soft).toContain("arc_map");
+    expect(result.ruleStack.sections.hard).toContain("power_system");
+  });
+
+  it("carries chapter_goal into the structured context package", async () => {
+    const composer = new ComposerAgent({
+      client: {} as ConstructorParameters<typeof ComposerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await composer.composeChapter({
+      book,
+      bookDir,
+      chapterNumber: 4,
+      plan,
+    });
+
+    expect(result.contextPackage.chapterGoal).toEqual(plan.intent.chapterGoal);
+    await expect(readFile(result.contextPath, "utf-8")).resolves.toContain("\"chapterGoal\"");
   });
 
   it("retrieves summary and hook evidence chunks instead of whole long memory files", async () => {

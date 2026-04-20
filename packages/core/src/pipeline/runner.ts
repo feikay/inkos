@@ -478,6 +478,7 @@ export class PipelineRunner {
         foundation,
         gp.numericalSystem,
         book.language ?? gp.language,
+        book.webnovelTemplate,
       );
 
       this.logStage(stageLanguage, { zh: "初始化控制文档", en: "initializing control documents" });
@@ -485,6 +486,7 @@ export class PipelineRunner {
         stagingBookDir,
         book.language ?? gp.language,
         options.authorIntent ?? this.config.externalContext,
+        book.webnovelTemplate,
       );
       if (options.currentFocus?.trim()) {
         await writeFile(
@@ -574,9 +576,10 @@ export class PipelineRunner {
       foundation,
       gp.numericalSystem,
       book.language ?? gp.language,
+      book.webnovelTemplate,
     );
     this.logStage(stageLanguage, { zh: "初始化控制文档", en: "initializing control documents" });
-    await this.state.ensureControlDocuments(book.id, this.config.externalContext);
+    await this.state.ensureControlDocuments(book.id, this.config.externalContext, book.webnovelTemplate);
 
     // Step 3: Generate style guide from source material
     if (sourceText.length >= 500) {

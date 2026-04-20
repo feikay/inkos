@@ -65,6 +65,7 @@ function buildBookConfig(input: {
 }): BookConfig {
   const now = new Date().toISOString();
   return {
+    schemaVersion: 2,
     id: deriveBookId(input.title),
     title: input.title,
     platform: normalizePlatform(input.platform),

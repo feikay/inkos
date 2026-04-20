@@ -25,11 +25,15 @@ bookCommand
   .option("--target-chapters <n>", "Target chapter count", "200")
   .option("--chapter-words <n>", "Words per chapter", "3000")
   .option("--brief <path>", "Path to creative brief file (.md/.txt) — Architect builds from your ideas instead of generating from scratch")
+  .option("--webnovel-template <template>", "Optional webnovel skeleton template. Currently supported: xuanhuan")
   .option("--lang <language>", "Writing language: zh (Chinese) or en (English). Defaults from genre.")
   .option("--json", "Output JSON")
   .action(async (opts) => {
     try {
       const root = findProjectRoot();
+      if (opts.webnovelTemplate && opts.webnovelTemplate !== "xuanhuan") {
+        throw new Error(`Unsupported webnovel template "${opts.webnovelTemplate}". Supported: xuanhuan`);
+      }
 
       const bookId = opts.title
         .toLowerCase()
@@ -52,7 +56,8 @@ bookCommand
 
       const config = await loadConfig();
       const now = new Date().toISOString();
-      const book: BookConfig = {
+      const book = {
+        schemaVersion: 2,
         id: bookId,
         title: opts.title,
         platform: opts.platform,
@@ -61,9 +66,10 @@ bookCommand
         targetChapters: parseInt(opts.targetChapters, 10),
         chapterWordCount: parseInt(opts.chapterWords, 10),
         language: opts.lang ?? config.language,
+        webnovelTemplate: opts.webnovelTemplate,
         createdAt: now,
         updatedAt: now,
-      };
+      } as BookConfig;
       const language = resolveCliLanguage(book.language);
 
       if (!opts.json) log(formatBookCreateCreating(language, book.title, book.genre, book.platform));

@@ -57,6 +57,28 @@ export const HookAgendaSchema = z.object({
 
 export type HookAgenda = z.infer<typeof HookAgendaSchema>;
 
+export const EndingHookTypeSchema = z.enum([
+  "danger",
+  "reveal",
+  "pursuit",
+  "choice",
+  "breakthrough",
+]);
+
+export type EndingHookType = z.infer<typeof EndingHookTypeSchema>;
+
+export const ChapterGoalSchema = z.object({
+  mainConflict: z.string().min(1),
+  protagonistGoal: z.string().min(1),
+  activeCharacters: z.array(z.string().min(1)).max(4).default([]),
+  foreshadowToTouch: z.array(z.string().min(1)).max(2).default([]),
+  payoffToDeliver: z.string().min(1),
+  endingHookType: EndingHookTypeSchema,
+  nextChapterPull: z.string().min(1),
+});
+
+export type ChapterGoal = z.infer<typeof ChapterGoalSchema>;
+
 export const ChapterIntentSchema = z.object({
   chapter: z.number().int().min(1),
   goal: z.string().min(1),
@@ -69,6 +91,7 @@ export const ChapterIntentSchema = z.object({
   mustAvoid: z.array(z.string()).default([]),
   styleEmphasis: z.array(z.string()).default([]),
   conflicts: z.array(ChapterConflictSchema).default([]),
+  chapterGoal: ChapterGoalSchema.optional(),
   hookAgenda: HookAgendaSchema.default({
     pressureMap: [],
     mustAdvance: [],
@@ -91,6 +114,7 @@ export type ContextSource = z.infer<typeof ContextSourceSchema>;
 export const ContextPackageSchema = z.object({
   chapter: z.number().int().min(1),
   selectedContext: z.array(ContextSourceSchema).default([]),
+  chapterGoal: ChapterGoalSchema.optional(),
 });
 
 export type ContextPackage = z.infer<typeof ContextPackageSchema>;

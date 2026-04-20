@@ -35,6 +35,7 @@ export async function loadPersistedPlan(
         return { type, resolution };
       })
       .filter((conflict): conflict is { type: string; resolution: string } => conflict !== null);
+    const chapterGoal = readChapterGoal(sections);
 
     return {
       intent: ChapterIntentSchema.parse({
@@ -45,6 +46,7 @@ export async function loadPersistedPlan(
         mustAvoid: readIntentList(sections, "Must Avoid"),
         styleEmphasis: readIntentList(sections, "Style Emphasis"),
         conflicts,
+        ...(chapterGoal ? { chapterGoal } : {}),
       }),
       intentMarkdown,
       plannerInputs: [runtimePath],
@@ -88,6 +90,49 @@ function readIntentList(sections: Map<string, string[]>, name: string): string[]
     .map((line) => line.trim())
     .filter((line) => line.startsWith("-") && line !== "- none")
     .map((line) => line.replace(/^-\s*/, ""));
+}
+
+function readChapterGoal(sections: Map<string, string[]>) {
+  const entries = new Map<string, string>();
+
+  for (const line of readIntentList(sections, "Chapter Goal")) {
+    const separator = line.indexOf(":");
+    if (separator < 0) continue;
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (!key || !value || value === "none") continue;
+    entries.set(key, value);
+  }
+
+  const mainConflict = entries.get("mainConflict");
+  const protagonistGoal = entries.get("protagonistGoal");
+  const payoffToDeliver = entries.get("payoffToDeliver");
+  const endingHookType = entries.get("endingHookType");
+  const nextChapterPull = entries.get("nextChapterPull");
+  if (!mainConflict || !protagonistGoal || !payoffToDeliver || !endingHookType || !nextChapterPull) {
+    return undefined;
+  }
+
+  return {
+    mainConflict,
+    protagonistGoal,
+    activeCharacters: splitInlineList(entries.get("activeCharacters")),
+    foreshadowToTouch: splitInlineList(entries.get("foreshadowToTouch")),
+    payoffToDeliver,
+    endingHookType,
+    nextChapterPull,
+  };
+}
+
+function splitInlineList(value: string | undefined): string[] {
+  if (!value || value === "none") {
+    return [];
+  }
+
+  return value
+    .split(/,|，|、/u)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function isInvalidPersistedIntentScalar(value: string): boolean {

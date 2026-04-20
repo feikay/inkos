@@ -16,6 +16,11 @@ import {
   parseChapterSummariesMarkdown,
   retrieveMemorySelection,
 } from "../utils/memory-retrieval.js";
+import {
+  summarizeArcMap,
+  summarizeGenreProfile,
+  summarizePowerSystem,
+} from "../utils/webnovel-inputs.js";
 
 export interface ComposeChapterInput {
   readonly book: BookConfig;
@@ -51,6 +56,7 @@ export class ComposerAgent extends BaseAgent {
     const contextPackage = ContextPackageSchema.parse({
       chapter: input.chapterNumber,
       selectedContext,
+      chapterGoal: input.plan.intent.chapterGoal,
     });
 
     const ruleStack = RuleStackSchema.parse({
@@ -61,8 +67,8 @@ export class ComposerAgent extends BaseAgent {
         { id: "L4", name: "current_task", precedence: 70, scope: "local" },
       ],
       sections: {
-        hard: ["story_bible", "current_state", "book_rules"],
-        soft: ["author_intent", "current_focus", "volume_outline"],
+        hard: ["story_bible", "current_state", "book_rules", "power_system"],
+        soft: ["author_intent", "current_focus", "volume_outline", "genre_profile", "arc_map"],
         diagnostic: ["anti_ai_checks", "continuity_audit", "style_regression_checks"],
       },
       overrideEdges: [
@@ -112,6 +118,12 @@ export class ComposerAgent extends BaseAgent {
     plan: PlanChapterOutput,
     language: "zh" | "en",
   ): Promise<ContextPackage["selectedContext"]> {
+    const genreProfileRaw = await this.readFileOrDefault(join(storyDir, "genre_profile.yaml"));
+    const arcMapRaw = await this.readFileOrDefault(join(storyDir, "arc_map.yaml"));
+    const powerSystemRaw = await this.readFileOrDefault(join(storyDir, "power_system.yaml"));
+    const genreProfile = summarizeGenreProfile(genreProfileRaw, language);
+    const arcMap = summarizeArcMap(arcMapRaw, plan.intent.chapter, language);
+    const powerSystem = summarizePowerSystem(powerSystemRaw, language);
     const entries = await Promise.all([
       this.maybeContextSource(storyDir, "current_focus.md", "Current task focus for this chapter."),
       this.maybeContextSource(
@@ -136,6 +148,30 @@ export class ComposerAgent extends BaseAgent {
         "volume_outline.md",
         "Anchor the default planning node for this chapter.",
         plan.intent.outlineNode ? [plan.intent.outlineNode] : [],
+      ),
+      this.maybeSyntheticContextSource(
+        storyDir,
+        "genre_profile.yaml",
+        language === "en"
+          ? "Carry the genre lane, tone, core loop, and forbidden-pattern steering into governed chapter generation."
+          : "把题材赛道、语气、核心循环和禁用模式带入受控生成。",
+        genreProfile.excerpt,
+      ),
+      this.maybeSyntheticContextSource(
+        storyDir,
+        "arc_map.yaml",
+        language === "en"
+          ? "Keep the chapter anchored to the current volume range and its core conflict."
+          : "让本章锚定在当前分卷区间及其核心冲突上。",
+        arcMap.excerpt,
+      ),
+      this.maybeSyntheticContextSource(
+        storyDir,
+        "power_system.yaml",
+        language === "en"
+          ? "Carry forward the realm ladder and power-system guardrails so the chapter does not drift into arbitrary escalation."
+          : "带入境界阶梯和战力边界，避免本章出现随意越阶膨胀。",
+        powerSystem.excerpt,
       ),
       this.maybeContextSource(
         storyDir,
@@ -377,6 +413,27 @@ export class ComposerAgent extends BaseAgent {
       source: `story/${fileName}`,
       reason,
       excerpt: this.pickExcerpt(content, preferredExcerpts),
+    };
+  }
+
+  private async maybeSyntheticContextSource(
+    storyDir: string,
+    fileName: string,
+    reason: string,
+    excerpt?: string,
+  ): Promise<ContextPackage["selectedContext"][number] | null> {
+    if (!excerpt || excerpt.trim().length === 0) {
+      return null;
+    }
+
+    const path = join(storyDir, fileName);
+    const content = await this.readFileOrDefault(path);
+    if (!content || content === "(文件尚未创建)") return null;
+
+    return {
+      source: `story/${fileName}`,
+      reason,
+      excerpt,
     };
   }
 

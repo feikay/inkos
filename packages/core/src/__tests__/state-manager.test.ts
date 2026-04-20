@@ -818,6 +818,18 @@ describe("StateManager", () => {
       expect(currentFocus).not.toContain("# Current Focus");
     });
 
+    it("initializes foreshadow_registry.json for webnovel template books", async () => {
+      await manager.ensureControlDocuments(
+        "template-book",
+        "# 初始意图\n\n稳住升级主线。\n",
+        "xuanhuan",
+      );
+
+      await expect(
+        readFile(join(manager.bookDir("template-book"), "story", "foreshadow_registry.json"), "utf-8"),
+      ).resolves.toBe("[]\n");
+    });
+
     it("bootstraps structured runtime state from legacy markdown truth files", async () => {
       const bookId = "runtime-state-book";
       const storyDir = join(manager.bookDir(bookId), "story");
@@ -1174,12 +1186,14 @@ describe("StateManager", () => {
       // Write initial state (chapter 0 baseline)
       await writeFile(join(storyDir, "current_state.md"), "# State\n\n- Initial state.\n", "utf-8");
       await writeFile(join(storyDir, "pending_hooks.md"), "# Hooks\n\n- hook-1\n", "utf-8");
+      await writeFile(join(storyDir, "foreshadow_registry.json"), JSON.stringify([{ hookId: "hook-1" }], null, 2), "utf-8");
       await writeFile(join(storyDir, "chapter_summaries.md"), "# Summaries\n", "utf-8");
       await manager.snapshotState(bookId, 0);
 
       // Write chapter 1 state + file
       await writeFile(join(storyDir, "current_state.md"), "# State\n\n- After chapter 1.\n", "utf-8");
       await writeFile(join(storyDir, "pending_hooks.md"), "# Hooks\n\n- hook-1\n- hook-2\n", "utf-8");
+      await writeFile(join(storyDir, "foreshadow_registry.json"), JSON.stringify([{ hookId: "hook-1" }, { hookId: "hook-2" }], null, 2), "utf-8");
       await writeFile(join(storyDir, "chapter_summaries.md"), "# Summaries\n\n| 1 | Title 1 |\n", "utf-8");
       await writeFile(join(chaptersDir, "0001_Title_One.md"), "# Chapter 1\n\nContent 1.", "utf-8");
       await manager.snapshotState(bookId, 1);
@@ -1187,6 +1201,7 @@ describe("StateManager", () => {
       // Write chapter 2 state + file
       await writeFile(join(storyDir, "current_state.md"), "# State\n\n- After chapter 2.\n", "utf-8");
       await writeFile(join(storyDir, "pending_hooks.md"), "# Hooks\n\n- hook-1\n- hook-2\n- hook-3\n", "utf-8");
+      await writeFile(join(storyDir, "foreshadow_registry.json"), JSON.stringify([{ hookId: "hook-1" }, { hookId: "hook-2" }, { hookId: "hook-3" }], null, 2), "utf-8");
       await writeFile(join(storyDir, "chapter_summaries.md"), "# Summaries\n\n| 1 | Title 1 |\n| 2 | Title 2 |\n", "utf-8");
       await writeFile(join(chaptersDir, "0002_Title_Two.md"), "# Chapter 2\n\nContent 2.", "utf-8");
       await writeFile(join(runtimeDir, "chapter-002.intent.md"), "intent 2", "utf-8");
@@ -1195,6 +1210,7 @@ describe("StateManager", () => {
       // Write chapter 3 state + file
       await writeFile(join(storyDir, "current_state.md"), "# State\n\n- After chapter 3.\n", "utf-8");
       await writeFile(join(storyDir, "pending_hooks.md"), "# Hooks\n\n- hook-1\n- hook-2\n- hook-3\n- hook-4\n", "utf-8");
+      await writeFile(join(storyDir, "foreshadow_registry.json"), JSON.stringify([{ hookId: "hook-1" }, { hookId: "hook-2" }, { hookId: "hook-3" }, { hookId: "hook-4" }], null, 2), "utf-8");
       await writeFile(join(storyDir, "chapter_summaries.md"), "# Summaries\n\n| 1 | Title 1 |\n| 2 | Title 2 |\n| 3 | Title 3 |\n", "utf-8");
       await writeFile(join(chaptersDir, "0003_Title_Three.md"), "# Chapter 3\n\nContent 3.", "utf-8");
       await writeFile(join(runtimeDir, "chapter-003.intent.md"), "intent 3", "utf-8");
@@ -1225,6 +1241,10 @@ describe("StateManager", () => {
       const hooks = await readFile(join(bookDir, "story", "pending_hooks.md"), "utf-8");
       expect(hooks).toContain("hook-2");
       expect(hooks).not.toContain("hook-4");
+
+      const foreshadowRegistry = await readFile(join(bookDir, "story", "foreshadow_registry.json"), "utf-8");
+      expect(foreshadowRegistry).toContain("\"hook-2\"");
+      expect(foreshadowRegistry).not.toContain("\"hook-4\"");
 
       // Chapter index should only have chapter 1
       const index = await manager.loadChapterIndex(bookId);

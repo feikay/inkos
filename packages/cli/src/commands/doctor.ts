@@ -204,13 +204,12 @@ export const doctorCommand = new Command("doctor")
       const hasStructuredState = existsSync(join(root, "books"));
       if (hasStructuredState) {
         const { StateManager } = await import("@actalk/inkos-core");
+        const { usesLegacyBookFormat } = await import("../utils.js");
         const sm = new StateManager(root);
         const bookIds = await sm.listBooks();
         let legacyCount = 0;
         for (const bid of bookIds) {
-          const stateDir = join(sm.bookDir(bid), "story", "state");
-          const hasNewState = existsSync(stateDir);
-          if (!hasNewState) legacyCount++;
+          if (await usesLegacyBookFormat(sm.bookDir(bid))) legacyCount++;
         }
         if (legacyCount > 0) {
           checks.push({

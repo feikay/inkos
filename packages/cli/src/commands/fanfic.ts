@@ -45,7 +45,8 @@ fanficCommand
         .slice(0, 30);
 
       const now = new Date().toISOString();
-      const book: BookConfig = {
+      const book = {
+        schemaVersion: 2,
         id: bookId,
         title: opts.title,
         platform: opts.platform,
@@ -57,7 +58,7 @@ fanficCommand
         createdAt: now,
         updatedAt: now,
         fanficMode: mode,
-      };
+      } as BookConfig;
 
       if (!opts.json) log(`Creating fanfic "${book.title}" (${mode} mode, ${book.genre})...`);
       if (!opts.json) log(`  Source: ${sourceName} (${sourceText.length} chars)`);

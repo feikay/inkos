@@ -32,6 +32,15 @@ describe("persisted governed plan helpers", () => {
         "## Style Emphasis",
         "- restrained prose",
         "",
+        "## Chapter Goal",
+        "- mainConflict: Mentor debt and guild pressure now collide.",
+        "- protagonistGoal: Force one answer out of the oath trail before it closes.",
+        "- activeCharacters: Lin Yue, Master Shen",
+        "- foreshadowToTouch: mentor-oath",
+        "- payoffToDeliver: Deliver the first concrete clue about the vanished mentor.",
+        "- endingHookType: reveal",
+        "- nextChapterPull: The clue points toward a worse truth waiting in the next chapter.",
+        "",
         "## Conflicts",
         "- duty: repay the oath without exposing the token",
         "- trust: keep the mentor debt personal",
@@ -53,6 +62,15 @@ describe("persisted governed plan helpers", () => {
       ]);
       expect(plan?.intent.mustAvoid).toEqual(["Open a new guild-route mystery."]);
       expect(plan?.intent.styleEmphasis).toEqual(["restrained prose"]);
+      expect(plan?.intent.chapterGoal).toEqual({
+        mainConflict: "Mentor debt and guild pressure now collide.",
+        protagonistGoal: "Force one answer out of the oath trail before it closes.",
+        activeCharacters: ["Lin Yue", "Master Shen"],
+        foreshadowToTouch: ["mentor-oath"],
+        payoffToDeliver: "Deliver the first concrete clue about the vanished mentor.",
+        endingHookType: "reveal",
+        nextChapterPull: "The clue points toward a worse truth waiting in the next chapter.",
+      });
       expect(plan?.intent.conflicts).toEqual([
         { type: "duty", resolution: "repay the oath without exposing the token" },
         { type: "trust", resolution: "keep the mentor debt personal" },
