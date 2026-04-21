@@ -303,6 +303,28 @@ describe("validatePostWrite", () => {
     expect(checks.endingHookCheck.evidence).toContain("道出一句话");
   });
 
+  it("treats pursuit-start signals in the ending region as a valid pursuit hook", () => {
+    const checks = evaluateChapterGoalDiscipline(
+      [
+        "楚夜一路清理痕迹，想趁夜翻出岩窟。",
+        "",
+        "章尾时，追兵发现岩壁徽记，开始追踪。",
+      ].join("\n\n"),
+      {
+        mainConflict: "楚夜还没真正摆脱追捕。",
+        protagonistGoal: "先逃出岩窟。",
+        activeCharacters: ["楚夜", "追兵"],
+        foreshadowToTouch: [],
+        payoffToDeliver: "逃离追捕",
+        endingHookType: "pursuit",
+        nextChapterPull: "追踪已经启动，下章会更危险。",
+      },
+    );
+
+    expect(checks.endingHookCheck.matched).toBe(true);
+    expect(checks.endingHookCheck.evidence).toContain("开始追踪");
+  });
+
   it("turns an undelivered payoff into a warning", () => {
     const checks = evaluateChapterGoalDiscipline(
       "他一路逃命，只是暂时甩开了追兵，却没有拿到任何地图或补给。",
@@ -319,7 +341,28 @@ describe("validatePostWrite", () => {
 
     const warnings = toDisciplineWarnings(checks, "zh");
     expect(checks.payoffCheck.matched).toBe(false);
+    expect(checks.payoffCheck.matchLevel).toBe("none");
     expect(warnings.some((warning) => warning.rule === "payoff-check")).toBe(true);
+  });
+
+  it("treats escape progress as a partial payoff without raising a warning", () => {
+    const checks = evaluateChapterGoalDiscipline(
+      "楚夜暂时甩开追兵，赢得喘息，但还没真正离开矿区。",
+      {
+        mainConflict: "追兵紧追不舍。",
+        protagonistGoal: "先逃离追捕。",
+        activeCharacters: ["楚夜", "追兵"],
+        foreshadowToTouch: [],
+        payoffToDeliver: "逃离追捕",
+        endingHookType: "pursuit",
+        nextChapterPull: "下一章追兵还会咬上来。",
+      },
+    );
+
+    const warnings = toDisciplineWarnings(checks, "zh");
+    expect(checks.payoffCheck.matchLevel).toBe("partial");
+    expect(checks.payoffCheck.matched).toBe(true);
+    expect(warnings.some((warning) => warning.rule === "payoff-check")).toBe(false);
   });
 
   it("warns when consumption and backlash appear in prose but state and ledger stay unchanged", () => {

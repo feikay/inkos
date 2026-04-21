@@ -28,6 +28,7 @@ export interface EndingHookCheck {
 export interface PayoffCheck {
   readonly expectedPayoff: string;
   readonly matched: boolean;
+  readonly matchLevel: "none" | "partial" | "full";
   readonly evidence?: string;
 }
 
@@ -79,8 +80,8 @@ const ENDING_HOOK_PATTERNS: Record<EndingHookType, ReadonlyArray<RegExp>> = {
     /reveal|truth|secret|identity|clue|discovered|turned out/i,
   ],
   pursuit: [
-    /追兵|追来|追上|追踪|追逃|封锁|咬上来|尾随/u,
-    /pursuit|chase|tracked|tracking|closing the gap|hunters/i,
+    /追兵|追来|追上|追踪|追逃|封锁|咬上来|尾随|追兵发现|被发现|被盯上|行踪暴露|痕迹暴露|开始追踪|锁定踪迹|尾随逼近|反扑逼近|威胁逼近|杀机逼近/u,
+    /pursuit|chase|tracked|tracking|closing the gap|hunters|discovered|marked|pursuit begins|threat closes in/i,
   ],
   choice: [
     /选择|抉择|取舍|两难|必须决定|只能选|要么|不得不决定/u,
@@ -929,18 +930,20 @@ function findRegexEvidence(content: string, patterns: ReadonlyArray<RegExp>): st
   return undefined;
 }
 
-function findPayoffEvidence(content: string, expectedPayoff: string): string | undefined {
+function findPayoffEvidence(content: string, expectedPayoff: string): { evidence?: string; matchLevel: "none" | "partial" | "full" } {
   const normalizedExpected = normalizeLooseText(expectedPayoff);
   const normalizedContent = normalizeLooseText(content);
   if (normalizedExpected && normalizedContent.includes(normalizedExpected)) {
     const index = normalizedContent.indexOf(normalizedExpected);
     const snippet = snippetAround(content, mapLooseIndexToRaw(content, index), expectedPayoff.length);
-    return isNegatedSnippet(snippet) ? undefined : snippet;
+    if (!isNegatedSnippet(snippet)) {
+      return { evidence: snippet, matchLevel: "full" };
+    }
   }
 
   const keywords = extractPayoffKeywords(expectedPayoff);
   if (keywords.length === 0) {
-    return undefined;
+    return findPartialEscapeProgressEvidence(content, expectedPayoff);
   }
 
   const matched = keywords.filter((keyword) => {
@@ -950,12 +953,15 @@ function findPayoffEvidence(content: string, expectedPayoff: string): string | u
   });
   const threshold = keywords.length >= 3 ? 2 : 1;
   if (matched.length < threshold) {
-    return undefined;
+    return findPartialEscapeProgressEvidence(content, expectedPayoff);
   }
 
   const lead = matched[0]!;
   const rawIndex = content.indexOf(lead);
-  return rawIndex >= 0 ? snippetAround(content, rawIndex, lead.length) : matched.join(" / ");
+  return {
+    evidence: rawIndex >= 0 ? snippetAround(content, rawIndex, lead.length) : matched.join(" / "),
+    matchLevel: "full",
+  };
 }
 
 function extractPayoffKeywords(text: string): string[] {
@@ -1180,7 +1186,7 @@ export function evaluateChapterGoalDiscipline(
 ): PostWriteDisciplineChecks {
   const endingRegion = extractEndingRegion(content);
   const endingEvidence = findRegexEvidence(endingRegion, ENDING_HOOK_PATTERNS[chapterGoal.endingHookType]);
-  const payoffEvidence = findPayoffEvidence(content, chapterGoal.payoffToDeliver);
+  const payoffMatch = findPayoffEvidence(content, chapterGoal.payoffToDeliver);
 
   return {
     endingHookCheck: {
@@ -1190,8 +1196,9 @@ export function evaluateChapterGoalDiscipline(
     },
     payoffCheck: {
       expectedPayoff: chapterGoal.payoffToDeliver,
-      matched: Boolean(payoffEvidence),
-      ...(payoffEvidence ? { evidence: payoffEvidence } : {}),
+      matched: payoffMatch.matchLevel !== "none",
+      matchLevel: payoffMatch.matchLevel,
+      ...(payoffMatch.evidence ? { evidence: payoffMatch.evidence } : {}),
     },
   };
 }
@@ -1229,6 +1236,37 @@ export function toDisciplineWarnings(
   }
 
   return warnings;
+}
+
+function findPartialEscapeProgressEvidence(
+  content: string,
+  expectedPayoff: string,
+): { evidence?: string; matchLevel: "none" | "partial" | "full" } {
+  if (!isEscapePayoff(expectedPayoff)) {
+    return { matchLevel: "none" };
+  }
+
+  const partialPatterns = [
+    /暂时甩开追兵|拉开距离|脱离包围|摆脱追踪|冲出封锁|逃出缺口|赢得喘息|暂时安全/u,
+    /shook off pursuers|opened a gap|broke free|escaped the cordon|won a brief respite|temporarily safe/i,
+  ];
+  const evidence = findRegexEvidence(content, partialPatterns);
+  if (!evidence || isNegatedEscapeProgressSnippet(evidence)) {
+    return { matchLevel: "none" };
+  }
+
+  return {
+    evidence,
+    matchLevel: "partial",
+  };
+}
+
+function isEscapePayoff(expectedPayoff: string): boolean {
+  return /逃离追捕|逃出追捕|摆脱追捕|甩开追兵|脱离追杀|escape|evade|lose the pursuers|shake off/i.test(expectedPayoff);
+}
+
+function isNegatedEscapeProgressSnippet(value: string): boolean {
+  return /没有甩开|未能甩开|没能甩开|没有摆脱|未能摆脱|没能摆脱|没有冲出|未能冲出|没能冲出|did not shake off|failed to shake off|failed to break free/i.test(value);
 }
 
 export function evaluateResourceLedgerDiscipline(params: {

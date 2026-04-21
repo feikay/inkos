@@ -385,6 +385,169 @@ describe("PlannerAgent", () => {
     expect(result.intent.chapterGoal?.nextChapterPull).not.toContain("描述接下来1-3章");
   });
 
+  it("hard-bans abstract payoff templates and still falls back to a relatively concrete result", async () => {
+    await Promise.all([
+      writeFile(
+        join(storyDir, "current_focus.md"),
+        "# Current Focus\n\nTODO\n",
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "current_state.md"),
+        [
+          "# Current State",
+          "",
+          "| Field | Value |",
+          "| --- | --- |",
+          "| Current Chapter | 1 |",
+          "| Current Goal | 有所推进 |",
+          "| Current Conflict | 追兵压上来，洞口快被封死。 |",
+          "",
+        ].join("\n"),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "volume_outline.md"),
+        [
+          "# Volume Outline",
+          "",
+          "## Chapter 2",
+          "楚夜必须先逃离追捕，再寻找下一条活路。",
+          "",
+        ].join("\n"),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "foreshadow_registry.json"),
+        JSON.stringify([
+          {
+            hookId: "escape-line",
+            startChapter: 1,
+            type: "route",
+            status: "open",
+            lastAdvancedChapter: 1,
+            expectedPayoff: "本章至少让主角获得一个可见资源、线索、脱身结果或战术优势。",
+            notes: "给读者一个看得见的即时收益：遭遇压制 -> 获得线索/资源/机缘 -> 冒险试错。",
+          },
+        ], null, 2),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "chapter_summaries.md"),
+        [
+          "# Chapter Summaries",
+          "",
+          "| 1 | 断尾夜奔 | 楚夜 | 楚夜被追兵逼入尸坑边缘。 | 暂无恢复 | none | 紧绷 | 逃亡 |",
+        ].join("\n"),
+        "utf-8",
+      ),
+    ]);
+
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await planner.planChapter({
+      book: {
+        ...book,
+        language: "zh",
+      },
+      bookDir,
+      chapterNumber: 2,
+    });
+
+    expect(result.intent.chapterGoal?.payoffToDeliver).not.toContain("给读者一个看得见的即时收益");
+    expect(result.intent.chapterGoal?.payoffToDeliver).not.toContain("本章至少让主角获得一个可见资源、线索、脱身结果或战术优势");
+    expect(result.intent.chapterGoal?.payoffToDeliver).not.toContain("有所推进");
+    expect(result.intent.chapterGoal?.payoffToDeliver).toMatch(/逃离追捕|暂时脱离当前压制|拿到一个可持续使用的资源|获得一条明确逃生线索/u);
+  });
+
+  it("hard-bans payoff timing metadata and falls back to hook notes instead of timing labels", async () => {
+    await Promise.all([
+      writeFile(
+        join(storyDir, "current_focus.md"),
+        "# Current Focus\n\nTODO\n",
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "current_state.md"),
+        [
+          "# Current State",
+          "",
+          "| Field | Value |",
+          "| --- | --- |",
+          "| Current Chapter | 1 |",
+          "| Current Goal | TBD |",
+          "| Current Conflict | 楚夜必须在追兵逼近前读懂卷轴异动。 |",
+          "",
+        ].join("\n"),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "volume_outline.md"),
+        [
+          "# Volume Outline",
+          "",
+          "## Chapter 2",
+          "楚夜发现骸骨和卷轴，再顺着刻痕找到去路。",
+          "",
+        ].join("\n"),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "foreshadow_registry.json"),
+        JSON.stringify([
+          {
+            hookId: "bone-scroll",
+            startChapter: 1,
+            type: "mystery",
+            status: "open",
+            lastAdvancedChapter: 1,
+            expectedPayoff: "中期(5-10章)",
+            payoffTiming: "short-term",
+            notes: "关联蚀骨兽之谜",
+          },
+        ], null, 2),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "chapter_summaries.md"),
+        [
+          "# Chapter Summaries",
+          "",
+          "| 1 | 尸坑卷轴 | 楚夜 | 发现骸骨和卷轴，追兵逼近。 | 卷轴异动加剧 | bone-scroll seeded | 紧绷 | 探索 |",
+        ].join("\n"),
+        "utf-8",
+      ),
+    ]);
+
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await planner.planChapter({
+      book: {
+        ...book,
+        language: "zh",
+      },
+      bookDir,
+      chapterNumber: 2,
+    });
+
+    expect(result.intent.chapterGoal?.payoffToDeliver).not.toContain("中期");
+    expect(result.intent.chapterGoal?.payoffToDeliver).not.toContain("5-10章");
+    expect(result.intent.chapterGoal?.payoffToDeliver).not.toContain("short-term");
+    expect(result.intent.chapterGoal?.payoffToDeliver).toMatch(/关联蚀骨兽之谜|发现骸骨和卷轴/u);
+    expect(result.intent.chapterGoal?.nextChapterPull).not.toContain("中期");
+    expect(result.intent.chapterGoal?.nextChapterPull).not.toContain("5-10章");
+  });
+
   it("does not treat cave/object fragments like 骸骨 or 符文 as active characters", async () => {
     await Promise.all([
       writeFile(

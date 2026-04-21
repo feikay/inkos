@@ -116,7 +116,9 @@ export function buildChapterGoal(input: BuildChapterGoalInput): ChapterGoal {
     protagonistGoal,
     goal: input.goal,
     mainConflict,
+    outlineNode: input.outlineNode,
     currentState: input.currentState,
+    chapterSummaries: input.chapterSummaries,
     stateFacts,
     payoffHook,
   });
@@ -149,11 +151,14 @@ export function buildChapterGoal(input: BuildChapterGoalInput): ChapterGoal {
     ),
     activeCharacters,
     foreshadowToTouch,
-    payoffToDeliver: sanitizeChapterGoalText(payoffToDeliver) ?? defaultSentence(
-      input.language,
-      "Secure one visible gain or clue before the chapter closes.",
-      "本章至少让主角获得一个可见资源、线索或脱离当前压制。",
-    ),
+    payoffToDeliver: sanitizeChapterGoalText(payoffToDeliver) ?? defaultConcretePayoff(input.language, [
+      protagonistGoal,
+      input.goal,
+      mainConflict,
+      input.outlineNode,
+      input.currentState,
+      input.chapterSummaries,
+    ]),
     endingHookType,
     nextChapterPull: sanitizeChapterGoalText(nextChapterPull) ?? defaultSentence(
       input.language,
@@ -420,13 +425,20 @@ function derivePayoffToDeliver(input: {
   readonly protagonistGoal: string;
   readonly goal: string;
   readonly mainConflict: string;
+  readonly outlineNode?: string;
   readonly currentState: string;
+  readonly chapterSummaries: string;
   readonly stateFacts: ReturnType<typeof parseCurrentStateFacts>;
   readonly payoffHook?: ChapterGoalHook;
 }): string {
   const hookPayoff = sanitizePayoffText(input.payoffHook?.expectedPayoff);
   if (hookPayoff) {
     return hookPayoff;
+  }
+
+  const hookNotes = sanitizePayoffText(input.payoffHook?.notes);
+  if (hookNotes) {
+    return hookNotes;
   }
 
   const directSignal = sanitizePayoffText(
@@ -445,11 +457,22 @@ function derivePayoffToDeliver(input: {
     return stateSignal;
   }
 
-  return defaultSentence(
-    input.language,
-    "Make sure the chapter delivers one visible resource, clue, escape, or tactical gain.",
-    "本章至少让主角获得一个可见资源、线索、脱身结果或战术优势。",
+  const outlineSignal = sanitizePayoffText(
+    pickDirectPayoffSignal(input.outlineNode ?? "")
+      ?? pickRecentSummaryPayoffSignal(input.chapterSummaries),
   );
+  if (outlineSignal) {
+    return outlineSignal;
+  }
+
+  return defaultConcretePayoff(input.language, [
+    input.protagonistGoal,
+    input.goal,
+    input.mainConflict,
+    input.outlineNode,
+    input.currentState,
+    input.chapterSummaries,
+  ]);
 }
 
 function pickDirectPayoffSignal(text: string): string | undefined {
@@ -490,6 +513,23 @@ function pickStateDeltaPayoffSignal(
       Boolean(line)
       && /恢复|回升|修复|止血|获得|拿到|线索|资源|掌握|突破|脱离|压住|稳住|recover|heal|gain|resource|clue|master|breakthrough|escape|stabilize/i.test(line)
     );
+}
+
+function pickRecentSummaryPayoffSignal(chapterSummaries: string): string | undefined {
+  const summaries = parseChapterSummariesMarkdown(chapterSummaries)
+    .sort((left, right) => left.chapter - right.chapter)
+    .slice(-3)
+    .reverse();
+
+  for (const summary of summaries) {
+    const signal = pickDirectPayoffSignal(summary.stateChanges)
+      ?? pickDirectPayoffSignal(summary.events);
+    if (signal) {
+      return signal;
+    }
+  }
+
+  return undefined;
 }
 
 function inferEndingHookType(input: {
@@ -618,7 +658,9 @@ function sanitizePayoffText(value: string | undefined): string | undefined {
   if (/^\d+$/.test(normalized)) return undefined;
   if (/^\d+\s*[-~–—]\s*\d+$/.test(normalized)) return undefined;
   if (/^(chapter|第)?\s*\d+$/iu.test(normalized)) return undefined;
+  if (isTimingMetadataText(normalized)) return undefined;
   if (isTemplateishPayoff(normalized)) return undefined;
+  if (isAbstractPayoff(normalized)) return undefined;
   if (normalized.length <= 1) return undefined;
   return normalized;
 }
@@ -659,9 +701,31 @@ function isTemplateishPayoff(value: string): boolean {
     || /遭遇压制\s*[-=~>]+\s*获得线索\/资源\/机缘/u.test(value)
     || /遭遇压制.*获得线索\/资源\/机缘/u.test(value)
     || /冒险试错/u.test(value)
+    || /本章至少让主角获得一个可见资源、线索、脱身结果或战术优势/u.test(value)
+    || /本章至少让主角获得一个可见资源、线索或脱离当前压制/u.test(value)
     || /core loop/i.test(value)
     || /visible immediate gain/i.test(value)
     || /win, clue, or resource before the chapter closes/i.test(value)
+  );
+}
+
+function isTimingMetadataText(value: string): boolean {
+  return (
+    /^(短期|中期|长期)(?:\(\d+(?:-\d+|\+)?章\))?$/u.test(value)
+    || /^(short-term|mid-arc|long-term|late-arc)$/i.test(value)
+    || /^\d+(?:-\d+|\+)?章$/u.test(value)
+    || /^(短期|中期|长期)\s*\(\d+(?:-\d+|\+)?章\)$/u.test(value)
+    || /^(short-term|mid-arc|long-term|late-arc)\s*\(\d+(?:-\d+|\+)?\s*chapters?\)$/i.test(value)
+  );
+}
+
+function isAbstractPayoff(value: string): boolean {
+  return (
+    /^(获得收益|得到线索|有所推进|形成优势|获得战术优势|获得资源或线索|争取喘息空间|可见收益|即时收益|本章收益|进展|推进主线)$/u.test(value)
+    || /^(gain a benefit|get a clue|make progress|create an advantage|gain a tactical advantage)$/i.test(value)
+    || (/收益|线索|资源|优势|进展|推进/u.test(value)
+      && !/(腰牌|残卷|刻痕|追兵|追捕|反噬|封锁|逃离|逃出|甩开|地图|徽记|毒囊|符印|石碑|名册|令牌|洞口|黑市|血焰录)/u.test(value)
+      && value.length <= 10)
   );
 }
 
@@ -675,6 +739,30 @@ function compactSpecificPayoff(text: string): string {
   const englishPattern = /(?:gain|obtain|secure|escape|break free|stabilize|suppress|master|learn|reveal|find|recover|heal)[^,.;!?]{0,40}/i;
   const match = sanitized.match(payoffPattern) ?? sanitized.match(englishPattern);
   return match?.[0]?.trim() ?? sanitized;
+}
+
+function defaultConcretePayoff(
+  language: "zh" | "en",
+  sources: ReadonlyArray<string | undefined>,
+): string {
+  const combined = sources.filter(Boolean).join(" ");
+
+  if (/逃|追捕|追兵|封锁|围堵/u.test(combined)) {
+    return language === "zh" ? "暂时脱离当前压制" : "Temporarily break free from the current pressure.";
+  }
+  if (/腰牌|令牌|残卷|地图|名册|药瓶|毒囊|资源/u.test(combined)) {
+    return language === "zh" ? "拿到一个可持续使用的资源" : "Secure one durable resource.";
+  }
+  if (/线索|刻痕|徽记|真相|来历/u.test(combined)) {
+    return language === "zh" ? "获得一条明确逃生线索" : "Gain one concrete clue that changes the next move.";
+  }
+  if (/反噬|伤势|经脉|气血/u.test(combined)) {
+    return language === "zh" ? "压住当前代价并稳住局面" : "Stabilize the cost and regain control.";
+  }
+
+  return language === "zh"
+    ? "拿到一条可立即使用的线索"
+    : "Secure one immediately usable clue.";
 }
 
 function isStructuredControlText(value: string): boolean {
