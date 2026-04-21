@@ -6,7 +6,7 @@
  */
 
 import { analyzeChapterCadence } from "../utils/chapter-cadence.js";
-import { isInvalidTitleReplacement } from "../utils/chapter-title-engine.js";
+import { hasInvalidTitleIntegrity, isInvalidTitleReplacement } from "../utils/chapter-title-engine.js";
 import type { BookRules } from "../models/book-rules.js";
 import type { GenreProfile } from "../models/genre-profile.js";
 import type { ChapterGoal, EndingHookType } from "../models/input-governance.js";
@@ -1748,14 +1748,17 @@ function extractChineseTitleQualifier(
   const segments = content.match(/[\u4e00-\u9fff]+/g) ?? [];
 
   for (const segment of segments) {
-    for (let start = 0; start < segment.length; start += 1) {
-      for (let size = 2; size <= 4; size += 1) {
-        const candidate = segment.slice(start, start + size).trim();
-        if (candidate.length < 2) continue;
-        if (CHINESE_TITLE_STOP_WORDS.has(candidate)) continue;
-        if ([...candidate].some((char) => CHINESE_TITLE_STOP_CHARS.has(char))) continue;
-        if (blocked.has(candidate)) continue;
-        return candidate;
+    const condensed = segment.replace(/[的了着一只从在和与把被有没里又才并因而会]/gu, "");
+    for (const source of [condensed, segment]) {
+      for (let start = 0; start < source.length; start += 1) {
+        for (let size = 6; size >= 4; size -= 1) {
+          const candidate = source.slice(start, start + size).trim();
+          if (candidate.length < 4) continue;
+          if (CHINESE_TITLE_STOP_WORDS.has(candidate)) continue;
+          if (blocked.has(candidate)) continue;
+          if (hasInvalidTitleIntegrity(candidate, "zh")) continue;
+          return candidate;
+        }
       }
     }
   }

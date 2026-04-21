@@ -112,6 +112,36 @@ export function scoreResolvedTitle(
   return scoreTitle(cleaned, inferCandidateStyle(cleaned, input), input);
 }
 
+export function hasInvalidTitleIntegrity(
+  title: string,
+  language: "zh" | "en",
+): boolean {
+  const cleaned = sanitizeCandidateTitle(title, language);
+  if (!cleaned) return true;
+
+  if (language === "en") {
+    return cleaned.split(/\s+/u).filter(Boolean).length <= 1;
+  }
+
+  if (cleaned.length < 4) {
+    return true;
+  }
+
+  if (/^[的并因而了会]/u.test(cleaned) || /[的并因而了]$/u.test(cleaned)) {
+    return true;
+  }
+
+  if (/(并未因|的秘密会|索并未因|河尽头前)$/u.test(cleaned)) {
+    return true;
+  }
+
+  if (isLikelyChineseTitleFragment(cleaned)) {
+    return true;
+  }
+
+  return false;
+}
+
 export function isInvalidTitleReplacement(input: TitleReplacementDecisionInput): boolean {
   const current = sanitizeCandidateTitle(input.currentTitle, input.language);
   const replacement = sanitizeCandidateTitle(input.replacementTitle, input.language);
@@ -477,6 +507,10 @@ function isHardBannedWeakTitle(
   language: "zh" | "en",
   chapterGoal: ChapterGoal | undefined,
 ): boolean {
+  if (hasInvalidTitleIntegrity(title, language)) {
+    return true;
+  }
+
   if (language === "en") {
     const words = title.split(/\s+/u).filter(Boolean);
     return words.length <= 1;
@@ -494,6 +528,21 @@ function isHardBannedWeakTitle(
     return true;
   }
   return false;
+}
+
+function isLikelyChineseTitleFragment(title: string): boolean {
+  if (/^(?:索|并|因|而|的)[\u4e00-\u9fff]{2,}$/u.test(title)) {
+    return true;
+  }
+
+  const completeNounPhrase = /^[\u4e00-\u9fff]{1,8}的[\u4e00-\u9fff]{1,8}$/u.test(title);
+  const completeActionPhrase = /^(?:拿到|获得|找到|发现|揭开|掌握|压住|摆脱|逃离|冲出|逼退|踏入|斩开|守住|踏破)[\u4e00-\u9fff]{2,10}$/u.test(title);
+  const completeCrisisPhrase = /[\u4e00-\u9fff]{1,8}(?:死局|代价|追兵|杀机|威胁|封锁|围杀|反噬|真相|铜铃|火种|药材|情报|暗河|黑市|裂谷|入口|尽头)$/u.test(title);
+  if (completeNounPhrase || completeActionPhrase || completeCrisisPhrase) {
+    return false;
+  }
+
+  return title.length <= 5;
 }
 
 function detectTitlePattern(title: string, language: "zh" | "en"): string | undefined {

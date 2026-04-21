@@ -295,6 +295,20 @@ describe("validatePostWrite", () => {
     expect(result.title).toBe("暗河尽头前的死局");
   });
 
+  it("rejects corrupted fragment replacements and falls back to the original title", () => {
+    const result = resolveDuplicateTitle(
+      "暗河尽头前的死局",
+      ["死局将至", "死局再近", "死局未解"],
+      "zh",
+      {
+        content: "索并未因暗河尽头前的杀机消散，众人只是更安静地握紧兵器。",
+      },
+    );
+
+    expect(result.title).toBe("暗河尽头前的死局");
+    expect(result.title).not.toBe("索并未因");
+  });
+
   it("allows a replacement when the current title is weak and the regenerated title is more usable", () => {
     const result = resolveDuplicateTitle(
       "暗河尽头的灵气结晶和花草果实",
