@@ -31,7 +31,7 @@ export async function runChapterReviewCycle(params: {
   readonly book: Pick<{ genre: string }, "genre">;
   readonly bookDir: string;
   readonly chapterNumber: number;
-  readonly initialOutput: Pick<WriteChapterOutput, "content" | "wordCount" | "postWriteErrors">;
+  readonly initialOutput: Pick<WriteChapterOutput, "content" | "wordCount" | "postWriteErrors" | "postWriteWarnings">;
   readonly reducedControlInput?: ChapterReviewCycleControlInput;
   readonly lengthSpec: LengthSpec;
   readonly initialUsage: ChapterReviewCycleUsage;
@@ -92,23 +92,34 @@ export async function runChapterReviewCycle(params: {
   let finalWordCount = params.initialOutput.wordCount;
   let revised = false;
 
-  if (params.initialOutput.postWriteErrors.length > 0) {
-    params.logWarn({
-      zh: `检测到 ${params.initialOutput.postWriteErrors.length} 个后写错误，审计前触发 spot-fix 修补`,
-      en: `${params.initialOutput.postWriteErrors.length} post-write errors detected, triggering spot-fix before audit`,
-    });
-    const reviser = params.createReviser();
-    const spotFixIssues = params.initialOutput.postWriteErrors.map((violation) => ({
+  const cadenceSpotFixWarnings = params.initialOutput.postWriteWarnings
+    .filter((warning) => warning.rule === "cadence-directive-violation");
+  const preAuditSpotFixIssues = [
+    ...params.initialOutput.postWriteErrors.map((violation) => ({
       severity: "critical" as const,
       category: violation.rule,
       description: violation.description,
       suggestion: violation.suggestion,
-    }));
+    })),
+    ...cadenceSpotFixWarnings.map((warning) => ({
+      severity: "critical" as const,
+      category: warning.rule,
+      description: warning.description,
+      suggestion: warning.suggestion,
+    })),
+  ];
+
+  if (preAuditSpotFixIssues.length > 0) {
+    params.logWarn({
+      zh: `检测到 ${preAuditSpotFixIssues.length} 条后写修补信号，审计前触发 spot-fix 修补`,
+      en: `${preAuditSpotFixIssues.length} post-write repair signals detected, triggering spot-fix before audit`,
+    });
+    const reviser = params.createReviser();
     const fixResult = await reviser.reviseChapter(
       params.bookDir,
       finalContent,
       params.chapterNumber,
-      spotFixIssues,
+      preAuditSpotFixIssues,
       "spot-fix",
       params.book.genre,
       {

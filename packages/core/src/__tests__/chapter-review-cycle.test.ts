@@ -62,6 +62,7 @@ describe("runChapterReviewCycle", () => {
           suggestion: "merge short fragments",
           severity: "error",
         }],
+        postWriteWarnings: [],
       },
       lengthSpec: LENGTH_SPEC,
       reducedControlInput: undefined,
@@ -145,6 +146,7 @@ describe("runChapterReviewCycle", () => {
         content: "original draft",
         wordCount: 13,
         postWriteErrors: [],
+        postWriteWarnings: [],
       },
       lengthSpec: LENGTH_SPEC,
       reducedControlInput: undefined,
@@ -170,5 +172,76 @@ describe("runChapterReviewCycle", () => {
     expect(auditChapter).toHaveBeenNthCalledWith(2, "/tmp/book", "original draft", 1, "xuanhuan", { temperature: 0 });
     expect(result.finalContent).toBe("original draft");
     expect(result.revised).toBe(false);
+  });
+
+  it("routes cadence-directive-violation warnings into the existing pre-audit spot-fix", async () => {
+    const auditChapter = vi.fn()
+      .mockResolvedValue(createAuditResult());
+    const reviseChapter = vi.fn().mockResolvedValue({
+      revisedContent: "escalated draft",
+      wordCount: 14,
+      fixedIssues: ["reshaped scene skeleton"],
+      updatedState: "",
+      updatedLedger: "",
+      updatedHooks: "",
+      tokenUsage: ZERO_USAGE,
+    });
+    const normalizeDraftLengthIfNeeded = vi.fn()
+      .mockResolvedValue({
+        content: "escalated draft",
+        wordCount: 14,
+        applied: false,
+        tokenUsage: ZERO_USAGE,
+      });
+
+    const result = await runChapterReviewCycle({
+      book: { genre: "xuanhuan" },
+      bookDir: "/tmp/book",
+      chapterNumber: 10,
+      initialOutput: {
+        content: "warm breathing draft",
+        wordCount: 20,
+        postWriteErrors: [],
+        postWriteWarnings: [{
+          rule: "cadence-directive-violation",
+          description: "The chapter ignores the forced cadence directive and still reads like a breathing beat instead of escalation / confrontation / discovery-under-threat.",
+          suggestion: "Rewrite the scene skeleton toward escalation, confrontation, or discovery under threat while keeping the chapter facts.",
+          severity: "warning",
+        }],
+      },
+      lengthSpec: LENGTH_SPEC,
+      reducedControlInput: undefined,
+      initialUsage: ZERO_USAGE,
+      createReviser: () => ({ reviseChapter }),
+      auditor: { auditChapter },
+      normalizeDraftLengthIfNeeded,
+      assertChapterContentNotEmpty: () => undefined,
+      addUsage: (left, right) => ({
+        promptTokens: left.promptTokens + (right?.promptTokens ?? 0),
+        completionTokens: left.completionTokens + (right?.completionTokens ?? 0),
+        totalTokens: left.totalTokens + (right?.totalTokens ?? 0),
+      }),
+      restoreLostAuditIssues: (_previous, next) => next,
+      analyzeAITells: () => ({ issues: [] as AuditIssue[] }),
+      analyzeSensitiveWords: () => ({ found: [] as Array<{ severity: "warn" | "block" }>, issues: [] as AuditIssue[] }),
+      logWarn: () => undefined,
+      logStage: () => undefined,
+    });
+
+    expect(reviseChapter).toHaveBeenCalledTimes(1);
+    expect(reviseChapter.mock.calls[0]?.[3]).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        category: "cadence-directive-violation",
+      }),
+    ]));
+    expect(auditChapter).toHaveBeenCalledWith(
+      "/tmp/book",
+      "escalated draft",
+      10,
+      "xuanhuan",
+      undefined,
+    );
+    expect(result.finalContent).toBe("escalated draft");
+    expect(result.revised).toBe(true);
   });
 });

@@ -38,6 +38,12 @@ export interface PostWriteDisciplineChecks {
   readonly payoffCheck: PayoffCheck;
 }
 
+export interface CadenceDirectiveCheck {
+  readonly expectedTypes: ReadonlyArray<"escalation" | "confrontation" | "discovery-under-threat">;
+  readonly matched: boolean;
+  readonly evidence?: string;
+}
+
 export interface ResourceLedgerFinding {
   readonly kind: "consumption" | "recovery" | "growth" | "injury";
   readonly signal: string;
@@ -1257,6 +1263,51 @@ export function toDisciplineWarnings(
   return warnings;
 }
 
+export function evaluateCadenceDirectiveCompliance(
+  content: string,
+  chapterIntent: string | undefined,
+): CadenceDirectiveCheck | undefined {
+  const sceneDirective = extractSceneDirective(chapterIntent);
+  if (!sceneDirective || !/Force tension escalation this chapter\./i.test(sceneDirective)) {
+    return undefined;
+  }
+
+  const expectedTypes = parseForcedCadenceTypes(sceneDirective);
+  if (expectedTypes.length === 0) {
+    return undefined;
+  }
+
+  for (const type of expectedTypes) {
+    const evidence = findCadenceEvidence(content, type);
+    if (evidence) {
+      return { expectedTypes, matched: true, evidence };
+    }
+  }
+
+  return { expectedTypes, matched: false };
+}
+
+export function toCadenceDirectiveWarnings(
+  check: CadenceDirectiveCheck | undefined,
+  language: "zh" | "en",
+): ReadonlyArray<PostWriteViolation> {
+  if (!check || check.matched) {
+    return [];
+  }
+
+  const expected = check.expectedTypes.join(" / ");
+  return [{
+    rule: "cadence-directive-violation",
+    severity: "warning",
+    description: language === "en"
+      ? `The chapter ignores the forced cadence directive and still reads like a breathing beat instead of ${expected}.`
+      : `本章没有兑现强制节奏指令，仍然更像喘息段，而不是 ${expected}。`,
+    suggestion: language === "en"
+      ? "Rewrite the scene skeleton toward escalation, confrontation, or discovery under threat while keeping the chapter facts."
+      : "优先重写场景骨架，把本章拉回升压、对抗或带威胁的信息发现，但保留既有事实。",
+  }];
+}
+
 function findPartialEscapeProgressEvidence(
   content: string,
   expectedPayoff: string,
@@ -1278,6 +1329,48 @@ function findPartialEscapeProgressEvidence(
     evidence,
     matchLevel: "partial",
   };
+}
+
+function extractSceneDirective(chapterIntent: string | undefined): string | undefined {
+  if (!chapterIntent) return undefined;
+  const match = chapterIntent.match(/## Structured Directives[\s\S]*?- scene:\s*(.+)/i);
+  return match?.[1]?.trim();
+}
+
+function parseForcedCadenceTypes(
+  sceneDirective: string,
+): ReadonlyArray<"escalation" | "confrontation" | "discovery-under-threat"> {
+  const allowed: Array<"escalation" | "confrontation" | "discovery-under-threat"> = [];
+  if (/escalation/i.test(sceneDirective)) allowed.push("escalation");
+  if (/confrontation/i.test(sceneDirective)) allowed.push("confrontation");
+  if (/discovery-under-threat/i.test(sceneDirective)) allowed.push("discovery-under-threat");
+  return allowed;
+}
+
+function findCadenceEvidence(
+  content: string,
+  type: "escalation" | "confrontation" | "discovery-under-threat",
+): string | undefined {
+  switch (type) {
+    case "escalation":
+      return findRegexEvidence(content, [
+        /逼近|杀机|威胁|封锁|反扑|追兵|危机|爆开|骤然收紧|pressure|threat|closing in|sealed|ambush/i,
+      ]);
+    case "confrontation":
+      return findRegexEvidence(content, [
+        /对峙|交锋|厮杀|动手|逼问|喝问|争执| confront|face[- ]off|clash|accuse|lunged/i,
+      ]);
+    case "discovery-under-threat":
+      return findThreatenedDiscoveryEvidence(content);
+  }
+}
+
+function findThreatenedDiscoveryEvidence(content: string): string | undefined {
+  const snippets = content.split(/[\n。！？!?]/u).map((line) => line.trim()).filter(Boolean);
+  return snippets.find((snippet) =>
+    /(发现|看见|揭开|线索|痕迹|认出|clue|found|discovered|noticed|revealed)/i.test(snippet)
+    && /(威胁|追兵|杀机|封锁|危险|逼近|threat|danger|tracked|chase|closing in)/i.test(snippet),
+  );
 }
 
 function isEscapePayoff(expectedPayoff: string): boolean {

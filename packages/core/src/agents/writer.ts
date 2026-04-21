@@ -12,11 +12,13 @@ import {
   detectCrossChapterRepetition,
   detectParagraphLengthDrift,
   evaluateChapterGoalDiscipline,
+  evaluateCadenceDirectiveCompliance,
   evaluateHookDebtThrottle,
   evaluateResourceLedgerDiscipline,
   toHookDebtWarnings,
   toResourceLedgerWarnings,
   toDisciplineWarnings,
+  toCadenceDirectiveWarnings,
   validatePostWrite,
   type EndingHookCheck,
   type HookDebtCheck,
@@ -392,6 +394,11 @@ export class WriterAgent extends BaseAgent {
     const disciplineWarnings = disciplineChecks
       ? toDisciplineWarnings(disciplineChecks, resolvedLanguage)
       : [];
+    const cadenceDirectiveCheck = evaluateCadenceDirectiveCompliance(
+      creative.content,
+      input.chapterIntent,
+    );
+    const cadenceDirectiveWarnings = toCadenceDirectiveWarnings(cadenceDirectiveCheck, resolvedLanguage);
     const resourceLedgerCheck = evaluateResourceLedgerDiscipline({
       content: creative.content,
       currentState,
@@ -408,7 +415,13 @@ export class WriterAgent extends BaseAgent {
       existingHookIds: [...priorHookIds],
     });
     const hookDebtWarnings = toHookDebtWarnings(hookDebtCheck, resolvedLanguage);
-    const allWarnings = [...ruleViolations, ...disciplineWarnings, ...resourceLedgerWarnings, ...hookDebtWarnings];
+    const allWarnings = [
+      ...ruleViolations,
+      ...disciplineWarnings,
+      ...cadenceDirectiveWarnings,
+      ...resourceLedgerWarnings,
+      ...hookDebtWarnings,
+    ];
     const aiTellIssues = analyzeAITells(creative.content, resolvedLanguage).issues;
 
     const postWriteErrors = allWarnings.filter(v => v.severity === "error");

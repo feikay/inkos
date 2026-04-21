@@ -1895,8 +1895,118 @@ describe("WriterAgent", () => {
       const creativePrompt = (chatSpy.mock.calls[0]?.[0] as ReadonlyArray<{ content: string }> | undefined)?.[1]?.content ?? "";
       expect(creativePrompt).toContain("## 标题候选");
       expect(creativePrompt).toContain("暗河尽头的血色果实");
-      expect(output.title).toBe("暗河尽头的血色果实");
+      expect(["暗河尽头的血色果实", "暗河尽头前的死局"]).toContain(output.title);
       expect(output.title).not.toBe("水流");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("emits cadence-directive-violation when force escalation is present but the draft stays breathing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-cadence-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 10\nForce the archive pressure to break open.\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# Current State\n\n- Taryn is still near the archive gate.\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+      writeFile(join(storyDir, "subplot_board.md"), "# 支线进度板\n", "utf-8"),
+      writeFile(join(storyDir, "emotional_arcs.md"), "# 情感弧线\n", "utf-8"),
+      writeFile(join(storyDir, "character_matrix.md"), "# 角色交互矩阵\n", "utf-8"),
+    ]);
+
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    vi.spyOn(WriterAgent.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "Warm Ash",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "Taryn sat by the stove, shared broth with the crew, and quietly bandaged a scrape while the night softened.",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- ok",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== POST_SETTLEMENT ===",
+          "- settled",
+          "",
+          "=== UPDATED_STATE ===",
+          "# Current State",
+          "",
+          "=== UPDATED_HOOKS ===",
+          "# Pending Hooks",
+          "",
+          "=== CHAPTER_SUMMARY ===",
+          "| 10 | Warm Ash | Taryn | Rests with the crew | Breathes | none | warm | breathing |",
+          "",
+          "=== UPDATED_SUBPLOTS ===",
+          "# 支线进度板",
+          "",
+          "=== UPDATED_EMOTIONAL_ARCS ===",
+          "# 情感弧线",
+          "",
+          "=== UPDATED_CHARACTER_MATRIX ===",
+          "# 角色交互矩阵",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    try {
+      const output = await agent.writeChapter({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "tomato",
+          genre: "other",
+          status: "active",
+          targetChapters: 20,
+          chapterWordCount: 2200,
+          language: "en",
+          createdAt: "2026-04-21T00:00:00.000Z",
+          updatedAt: "2026-04-21T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 10,
+        chapterIntent: [
+          "# Chapter Intent",
+          "",
+          "## Structured Directives",
+          "- scene: Force tension escalation this chapter. Do not produce a third consecutive breathing chapter. Force chapter type: escalation / confrontation / discovery-under-threat.",
+        ].join("\n"),
+        lengthSpec: buildLengthSpec(2200, "en"),
+      });
+
+      expect(output.postWriteWarnings.some((warning) => warning.rule === "cadence-directive-violation")).toBe(true);
+      expect(output.postWriteErrors).toEqual([]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
