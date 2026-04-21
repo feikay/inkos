@@ -1280,6 +1280,9 @@ export function evaluateCadenceDirectiveCompliance(
   for (const type of expectedTypes) {
     const evidence = findCadenceEvidence(content, type);
     if (evidence) {
+      if (looksLikeBreathingChapter(content)) {
+        return { expectedTypes, matched: false, evidence };
+      }
       return { expectedTypes, matched: true, evidence };
     }
   }
@@ -1371,6 +1374,101 @@ function findThreatenedDiscoveryEvidence(content: string): string | undefined {
     /(发现|看见|揭开|线索|痕迹|认出|clue|found|discovered|noticed|revealed)/i.test(snippet)
     && /(威胁|追兵|杀机|封锁|危险|逼近|threat|danger|tracked|chase|closing in)/i.test(snippet),
   );
+}
+
+function looksLikeBreathingChapter(content: string): boolean {
+  const normalized = content.trim();
+  if (!normalized) return false;
+
+  const breathingHits = countPatternHits(normalized, [
+    /坐在/u,
+    /坐下/u,
+    /靠着/u,
+    /倚着/u,
+    /喝汤/u,
+    /喝粥/u,
+    /分汤/u,
+    /包扎/u,
+    /疗伤/u,
+    /歇着/u,
+    /休息/u,
+    /喘口气/u,
+    /缓了缓/u,
+    /静下来/u,
+    /火堆/u,
+    /炉火/u,
+    /夜色软下来/u,
+    /平静/u,
+    /喘息/u,
+    /合作/u,
+    /休整/u,
+    /恢复/u,
+    /资源整理/u,
+    /分配药材/u,
+    /讨论计划/u,
+    /并肩而行/u,
+    /结伴深入/u,
+    /慢慢推进/u,
+    /暂时安全/u,
+    /信任加深/u,
+    /探索环境/u,
+    /交换情报/u,
+    /sat by/i,
+    /shared broth/i,
+    /bandaged/i,
+    /rested/i,
+    /quietly/i,
+    /softened/i,
+    /caught a breath/i,
+    /by the stove/i,
+    /tended wounds/i,
+  ]);
+  const escalationHits = countPatternHits(normalized, [
+    /追兵/u,
+    /封锁/u,
+    /逼近/u,
+    /杀机/u,
+    /对峙/u,
+    /交锋/u,
+    /厮杀/u,
+    /喝问/u,
+    /爆开/u,
+    /闯入/u,
+    /扑来/u,
+    /围堵/u,
+    /危机/u,
+    /threat/i,
+    /closing in/i,
+    /sealed/i,
+    /ambush/i,
+    /face[- ]off/i,
+    /clash/i,
+    /lunged/i,
+    /stormed in/i,
+    /tracked/i,
+  ]);
+  const dialoguePressureHits = countPatternHits(normalized, [
+    /“[^”]{0,20}(站住|交出来|别动|杀|追|滚开|说清楚)[^”]{0,20}”/u,
+    /"[^"]{0,30}(stop|hand it over|don't move|speak|drop it)[^"]{0,30}"/i,
+  ]);
+
+  const breathingScore = breathingHits;
+  const pressureScore = escalationHits + dialoguePressureHits;
+
+  if (breathingScore >= 4) {
+    return true;
+  }
+
+  return breathingScore >= 3 && pressureScore <= 2;
+}
+
+function countPatternHits(content: string, patterns: ReadonlyArray<RegExp>): number {
+  return patterns.reduce((total, pattern) => total + countRegexMatches(content, pattern), 0);
+}
+
+function countRegexMatches(content: string, pattern: RegExp): number {
+  const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+  return [...content.matchAll(new RegExp(pattern.source, flags))].length;
 }
 
 function isEscapePayoff(expectedPayoff: string): boolean {

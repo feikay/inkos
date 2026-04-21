@@ -2011,4 +2011,222 @@ describe("WriterAgent", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("still emits cadence-directive-violation when a breathing draft only sprinkles danger keywords", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-cadence-danger-sprinkle-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 10\nForce the archive pressure to break open.\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# Current State\n\n- Taryn is still near the archive gate.\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+      writeFile(join(storyDir, "subplot_board.md"), "# 支线进度板\n", "utf-8"),
+      writeFile(join(storyDir, "emotional_arcs.md"), "# 情感弧线\n", "utf-8"),
+      writeFile(join(storyDir, "character_matrix.md"), "# 角色交互矩阵\n", "utf-8"),
+    ]);
+
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    vi.spyOn(WriterAgent.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "Low Fire",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "Taryn sat by the stove, shared broth with the crew, and quietly bandaged a scrape. Someone mentioned the threat outside, but no one moved, and the night softened while they caught a breath.",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- ok",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== POST_SETTLEMENT ===",
+          "- settled",
+          "",
+          "=== UPDATED_STATE ===",
+          "# Current State",
+          "",
+          "=== UPDATED_HOOKS ===",
+          "# Pending Hooks",
+          "",
+          "=== CHAPTER_SUMMARY ===",
+          "| 10 | Low Fire | Taryn | Shares broth and rests | Breathes | none | warm | breathing |",
+          "",
+          "=== UPDATED_SUBPLOTS ===",
+          "# 支线进度板",
+          "",
+          "=== UPDATED_EMOTIONAL_ARCS ===",
+          "# 情感弧线",
+          "",
+          "=== UPDATED_CHARACTER_MATRIX ===",
+          "# 角色交互矩阵",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    try {
+      const output = await agent.writeChapter({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "tomato",
+          genre: "other",
+          status: "active",
+          targetChapters: 20,
+          chapterWordCount: 2200,
+          language: "en",
+          createdAt: "2026-04-21T00:00:00.000Z",
+          updatedAt: "2026-04-21T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 10,
+        chapterIntent: [
+          "# Chapter Intent",
+          "",
+          "## Structured Directives",
+          "- scene: Force tension escalation this chapter. Do not produce a third consecutive breathing chapter. Force chapter type: escalation / confrontation / discovery-under-threat.",
+        ].join("\n"),
+        lengthSpec: buildLengthSpec(2200, "en"),
+      });
+
+      expect(output.postWriteWarnings.some((warning) => warning.rule === "cadence-directive-violation")).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("still emits cadence-directive-violation for a Chinese breathing shell with a few danger keywords", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-cadence-zh-shell-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 15\nForce the ruin pressure to break open.\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# 当前状态\n\n- 众人刚进入遗迹外圈。\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# 伏笔池\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+      writeFile(join(storyDir, "subplot_board.md"), "# 支线进度板\n", "utf-8"),
+      writeFile(join(storyDir, "emotional_arcs.md"), "# 情感弧线\n", "utf-8"),
+      writeFile(join(storyDir, "character_matrix.md"), "# 角色交互矩阵\n", "utf-8"),
+    ]);
+
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    vi.spyOn(WriterAgent.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "暂栖火边",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "众人暂时安全，先在石壁旁包扎伤口，分配药材，讨论计划，又交换情报，慢慢推进到下一处岔路。有人提到外面仍有追兵和杀机逼近，可谁也没有立刻动身，气氛反而平静下来，信任也在合作里慢慢加深。",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- ok",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== POST_SETTLEMENT ===",
+          "- settled",
+          "",
+          "=== UPDATED_STATE ===",
+          "# 当前状态",
+          "",
+          "=== UPDATED_HOOKS ===",
+          "# 伏笔池",
+          "",
+          "=== CHAPTER_SUMMARY ===",
+          "| 15 | 暂栖火边 | 楚夜,陆焚 | 包扎休整并交换情报 | 暂时安全 | none | 平静 | 日常/喘息、温情 |",
+          "",
+          "=== UPDATED_SUBPLOTS ===",
+          "# 支线进度板",
+          "",
+          "=== UPDATED_EMOTIONAL_ARCS ===",
+          "# 情感弧线",
+          "",
+          "=== UPDATED_CHARACTER_MATRIX ===",
+          "# 角色交互矩阵",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    try {
+      const output = await agent.writeChapter({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "tomato",
+          genre: "other",
+          status: "active",
+          targetChapters: 20,
+          chapterWordCount: 2200,
+          language: "zh",
+          createdAt: "2026-04-21T00:00:00.000Z",
+          updatedAt: "2026-04-21T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 15,
+        chapterIntent: [
+          "# Chapter Intent",
+          "",
+          "## Structured Directives",
+          "- scene: Force tension escalation this chapter. Do not produce a third consecutive breathing chapter. Force chapter type: escalation / confrontation / discovery-under-threat.",
+        ].join("\n"),
+        lengthSpec: buildLengthSpec(220, "zh"),
+      });
+
+      expect(output.postWriteWarnings.some((warning) => warning.rule === "cadence-directive-violation")).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
