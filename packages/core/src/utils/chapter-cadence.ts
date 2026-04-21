@@ -34,6 +34,13 @@ export interface ChapterCadenceAnalysis {
   readonly scenePressure?: SceneCadencePressure;
   readonly moodPressure?: MoodCadencePressure;
   readonly titlePressure?: TitleCadencePressure;
+  readonly breathingCollapse?: BreathingCadencePressure;
+}
+
+export interface BreathingCadencePressure {
+  readonly pressure: "medium" | "high";
+  readonly streak: number;
+  readonly recentTypes: ReadonlyArray<string>;
 }
 
 export const DEFAULT_CHAPTER_CADENCE_WINDOW = CADENCE_WINDOW_DEFAULTS.summaryLookback;
@@ -63,6 +70,7 @@ export function analyzeChapterCadence(params: {
     scenePressure: analyzeScenePressure(recentRows),
     moodPressure: analyzeMoodPressure(recentRows),
     titlePressure: analyzeTitlePressure(recentRows, params.language),
+    breathingCollapse: analyzeBreathingCollapse(recentRows),
   };
 }
 
@@ -75,7 +83,7 @@ function analyzeScenePressure(
   rows: ReadonlyArray<CadenceSummaryRow>,
 ): SceneCadencePressure | undefined {
   const types = rows
-    .map((row) => row.chapterType.trim())
+    .map((row) => normalizeChapterType(row.chapterType))
     .filter((value) => isMeaningfulValue(value));
   if (types.length < 2) {
     return undefined;
@@ -179,6 +187,37 @@ function analyzeTitlePressure(
   return undefined;
 }
 
+function analyzeBreathingCollapse(
+  rows: ReadonlyArray<CadenceSummaryRow>,
+): BreathingCadencePressure | undefined {
+  const types = rows
+    .map((row) => normalizeChapterType(row.chapterType))
+    .filter((value) => isMeaningfulValue(value));
+  if (types.length < 2) {
+    return undefined;
+  }
+
+  const recentTypes: string[] = [];
+  let streak = 0;
+  for (const type of [...types].reverse()) {
+    if (!isBreathingType(type)) {
+      break;
+    }
+    recentTypes.unshift(type);
+    streak += 1;
+  }
+
+  if (streak < 2) {
+    return undefined;
+  }
+
+  return {
+    pressure: streak >= 3 ? "high" : "medium",
+    streak,
+    recentTypes,
+  };
+}
+
 function extractTitleTokens(title: string, language: "zh" | "en"): string[] {
   if (language === "en") {
     const words = title.match(/[a-z]{4,}/gi) ?? [];
@@ -206,4 +245,39 @@ function isMeaningfulValue(value: string): boolean {
   const normalized = value.trim().toLowerCase();
   if (!normalized) return false;
   return normalized !== "none" && normalized !== "(none)" && normalized !== "无";
+}
+
+function isBreathingType(type: string): boolean {
+  const normalized = type.trim().toLowerCase();
+  return normalized === "breathing"
+    || normalized === "daily"
+    || normalized === "recovery"
+    || normalized === "bonding-only"
+    || normalized === "bonding"
+    || normalized === "日常"
+    || normalized === "喘息"
+    || normalized === "休整"
+    || normalized === "恢复"
+    || normalized === "纯关系";
+}
+
+function normalizeChapterType(type: string): string {
+  const trimmed = type.trim();
+  if (!trimmed) return trimmed;
+
+  const normalized = trimmed.toLowerCase();
+  if (
+    normalized.includes("breathing")
+    || normalized.includes("daily")
+    || normalized.includes("recovery")
+    || normalized.includes("bonding")
+    || normalized.includes("喘息")
+    || normalized.includes("日常")
+    || normalized.includes("恢复")
+    || normalized.includes("温情")
+  ) {
+    return "breathing";
+  }
+
+  return trimmed;
 }

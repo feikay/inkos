@@ -84,4 +84,30 @@ describe("analyzeChapterCadence", () => {
     expect(analysis.moodPressure).toBeUndefined();
     expect(analysis.titlePressure).toBeUndefined();
   });
+
+  it("normalizes mixed breathing chapter-type labels before detecting breathing collapse", () => {
+    const analysis = analyzeChapterCadence({
+      language: "zh",
+      rows: [
+        {
+          chapter: 8,
+          title: "灰灯余温",
+          mood: "温和",
+          chapterType: "日常/喘息、温情",
+        },
+        {
+          chapter: 9,
+          title: "夜火暂歇",
+          mood: "柔缓",
+          chapterType: "日常/喘息、温情",
+        },
+      ],
+    });
+
+    expect(analysis.breathingCollapse).toEqual(expect.objectContaining({
+      pressure: "medium",
+      streak: 2,
+      recentTypes: ["breathing", "breathing"],
+    }));
+  });
 });

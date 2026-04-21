@@ -1055,6 +1055,80 @@ describe("PlannerAgent", () => {
     expect(result.intent.moodDirective).toContain("日常");
   });
 
+  it("forces escalation after two consecutive breathing chapters", async () => {
+    book = {
+      ...book,
+      genre: "other",
+      language: "en",
+    };
+
+    await Promise.all([
+      writeFile(
+        join(storyDir, "current_focus.md"),
+        [
+          "# Current Focus",
+          "",
+          "## Active Focus",
+          "",
+          "- Reveal what is hidden behind the archive seal before opening any new subplot.",
+          "",
+        ].join("\n"),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "volume_outline.md"),
+        [
+          "# Volume Outline",
+          "",
+          "## Chapter 10",
+          "Move the search toward the floodgate archive.",
+          "",
+        ].join("\n"),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "chapter_summaries.md"),
+        [
+          "# Chapter Summaries",
+          "",
+          "| chapter | title | characters | events | stateChanges | hookActivity | mood | chapterType |",
+          "| --- | --- | --- | --- | --- | --- | --- | --- |",
+          "| 5 | Cold Ferry | Taryn | Checks old clues | None | none | calm | investigation |",
+          "| 6 | Slow Rain | Taryn | Waits for a contact | None | none | muted | fallout |",
+          "| 7 | Quiet Dock | Taryn | Keeps watch by the gate | None | none | subdued | fallout |",
+          "| 8 | Lantern Break | Taryn | Takes a quiet meal and regroups | None | none | soft | 日常/喘息、温情 |",
+          "| 9 | Warm Ash | Taryn | Rests with the crew and tends bruises | None | none | warm | 日常/喘息、温情 |",
+          "",
+        ].join("\n"),
+        "utf-8",
+      ),
+    ]);
+
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await planner.planChapter({
+      book,
+      bookDir,
+      chapterNumber: 10,
+    });
+
+    expect(result.intent.sceneDirective).toContain("Force tension escalation this chapter.");
+    expect(result.intentMarkdown).toContain("Force tension escalation this chapter.");
+    expect(result.intentMarkdown).toContain("Do not produce a third consecutive breathing chapter.");
+    expect(result.intent.sceneDirective).toContain("Force chapter type: escalation / confrontation / discovery-under-threat.");
+    expect(result.intent.mustAvoid).toEqual(expect.arrayContaining([
+      "Do not produce a third consecutive breathing chapter.",
+      "Avoid another daily / recovery / bonding-only chapter shell.",
+    ]));
+    expect(result.intent.chapterGoal?.endingHookType).not.toBe("reveal");
+    expect(["danger", "pursuit", "breakthrough"]).toContain(result.intent.chapterGoal?.endingHookType);
+  });
+
   it("does not emit a mood directive when recent moods are varied", async () => {
     book = {
       ...book,

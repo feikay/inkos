@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { BaseAgent } from "./base.js";
 import type { BookConfig } from "../models/book.js";
 import { parseBookRules } from "../models/book-rules.js";
-import { ChapterIntentSchema, type ChapterConflict, type ChapterIntent } from "../models/input-governance.js";
+import { ChapterIntentSchema, type ChapterConflict, type ChapterGoal, type ChapterIntent } from "../models/input-governance.js";
 import type { StoredHook } from "../state/memory-db.js";
 import {
   parseChapterSummariesMarkdown,
@@ -184,7 +184,20 @@ export class PlannerAgent extends BaseAgent {
       chapterNumber: input.chapterNumber,
       hookAgenda,
     });
-    const chapterGoal = buildChapterGoal({
+    const recentSummaries = parseChapterSummariesMarkdown(chapterSummaries)
+      .filter((summary) => summary.chapter < input.chapterNumber)
+      .sort((left, right) => left.chapter - right.chapter)
+      .slice(-4);
+    const cadence = analyzeChapterCadence({
+      language: this.isChineseLanguage(input.book.language) ? "zh" : "en",
+      rows: recentSummaries.map((summary) => ({
+        chapter: summary.chapter,
+        title: summary.title,
+        mood: summary.mood,
+        chapterType: summary.chapterType,
+      })),
+    });
+    const rawChapterGoal = buildChapterGoal({
       language,
       chapterNumber: input.chapterNumber,
       goal,
@@ -200,16 +213,18 @@ export class PlannerAgent extends BaseAgent {
       genreProfile,
       powerSystem,
     });
+    const chapterGoal = this.applyCadenceChapterGoalOverrides(rawChapterGoal, cadence);
     const directives = this.buildStructuredDirectives({
       chapterNumber: input.chapterNumber,
       language: input.book.language,
       volumeOutline,
       outlineNode,
       matchedOutlineAnchor,
-      chapterSummaries,
+      cadence,
       arcMapDirective: arcMap.arcDirective,
     });
     const throttleConflicts = this.buildHookDebtThrottleConflicts(hookThrottle, chapterGoal.foreshadowToTouch);
+    const cadenceMustAvoid = this.buildCadenceMustAvoid(language, cadence);
 
     const intent = ChapterIntentSchema.parse({
       chapter: input.chapterNumber,
@@ -219,6 +234,7 @@ export class PlannerAgent extends BaseAgent {
       mustKeep,
       mustAvoid: this.unique([
         ...mustAvoid,
+        ...cadenceMustAvoid,
         ...this.buildHookDebtMustAvoid(hookThrottle, language),
       ]).slice(0, 8),
       styleEmphasis,
@@ -254,23 +270,9 @@ export class PlannerAgent extends BaseAgent {
     readonly volumeOutline: string;
     readonly outlineNode: string | undefined;
     readonly matchedOutlineAnchor: boolean;
-    readonly chapterSummaries: string;
+    readonly cadence: ReturnType<typeof analyzeChapterCadence>;
     readonly arcMapDirective?: string;
   }): Pick<ChapterIntent, "sceneDirective" | "arcDirective" | "moodDirective" | "titleDirective"> {
-    const recentSummaries = parseChapterSummariesMarkdown(input.chapterSummaries)
-      .filter((summary) => summary.chapter < input.chapterNumber)
-      .sort((left, right) => left.chapter - right.chapter)
-      .slice(-4);
-    const cadence = analyzeChapterCadence({
-      language: this.isChineseLanguage(input.language) ? "zh" : "en",
-      rows: recentSummaries.map((summary) => ({
-        chapter: summary.chapter,
-        title: summary.title,
-        mood: summary.mood,
-        chapterType: summary.chapterType,
-      })),
-    });
-
     return {
       arcDirective: this.buildArcDirective(
         input.language,
@@ -279,9 +281,9 @@ export class PlannerAgent extends BaseAgent {
         input.matchedOutlineAnchor,
         input.arcMapDirective,
       ),
-      sceneDirective: this.buildSceneDirective(input.language, cadence),
-      moodDirective: this.buildMoodDirective(input.language, cadence),
-      titleDirective: this.buildTitleDirective(input.language, cadence),
+      sceneDirective: this.buildSceneDirective(input.language, input.cadence),
+      moodDirective: this.buildMoodDirective(input.language, input.cadence),
+      titleDirective: this.buildTitleDirective(input.language, input.cadence),
     };
   }
 
@@ -489,14 +491,78 @@ export class PlannerAgent extends BaseAgent {
     language: string | undefined,
     cadence: ReturnType<typeof analyzeChapterCadence>,
   ): string | undefined {
-    if (cadence.scenePressure?.pressure !== "high") {
-      return undefined;
-    }
-    const repeatedType = cadence.scenePressure.repeatedType;
+    const directives: string[] = [];
 
-    return this.isChineseLanguage(language)
-      ? `最近章节连续停留在“${repeatedType}”，本章必须更换场景容器、地点或行动方式。`
-      : `Recent chapters are stuck in repeated ${repeatedType} beats. Change the scene container, location, or action pattern this chapter.`;
+    if (cadence.breathingCollapse) {
+      directives.push(
+        "Force tension escalation this chapter. Do not produce a third consecutive breathing chapter. Force chapter type: escalation / confrontation / discovery-under-threat.",
+      );
+    }
+
+    if (cadence.scenePressure?.pressure === "high") {
+      const repeatedType = cadence.scenePressure.repeatedType;
+      directives.push(
+        this.isChineseLanguage(language)
+          ? `最近章节连续停留在“${repeatedType}”，本章必须更换场景容器、地点或行动方式。`
+          : `Recent chapters are stuck in repeated ${repeatedType} beats. Change the scene container, location, or action pattern this chapter.`,
+      );
+    }
+
+    return directives.length > 0 ? directives.join(" ") : undefined;
+  }
+
+  private buildCadenceMustAvoid(
+    language: "zh" | "en",
+    cadence: ReturnType<typeof analyzeChapterCadence>,
+  ): string[] {
+    if (!cadence.breathingCollapse) {
+      return [];
+    }
+
+    return language === "zh"
+      ? [
+          "Do not produce a third consecutive breathing chapter.",
+          "Avoid another daily / recovery / bonding-only chapter shell.",
+        ]
+      : [
+          "Do not produce a third consecutive breathing chapter.",
+          "Avoid another daily / recovery / bonding-only chapter shell.",
+        ];
+  }
+
+  private applyCadenceChapterGoalOverrides(
+    chapterGoal: ChapterGoal,
+    cadence: ReturnType<typeof analyzeChapterCadence>,
+  ): ChapterGoal {
+    if (!cadence.breathingCollapse) {
+      return chapterGoal;
+    }
+
+    if (chapterGoal.endingHookType !== "reveal" && chapterGoal.endingHookType !== "choice") {
+      return chapterGoal;
+    }
+
+    return {
+      ...chapterGoal,
+      endingHookType: this.pickEscalationEndingHookType(chapterGoal),
+    };
+  }
+
+  private pickEscalationEndingHookType(chapterGoal: ChapterGoal): ChapterGoal["endingHookType"] {
+    const joined = [
+      chapterGoal.mainConflict,
+      chapterGoal.protagonistGoal,
+      chapterGoal.payoffToDeliver,
+      chapterGoal.nextChapterPull,
+    ].join(" ");
+
+    if (/追|逃|追兵|追杀|追踪|围堵|封锁|pursuit|chase|tracked|escape/i.test(joined)) {
+      return "pursuit";
+    }
+    if (/突破|破境|掌握|觉醒|晋阶|新能力|breakthrough|awaken|mastered|new ability/i.test(joined)) {
+      return "breakthrough";
+    }
+    return "danger";
   }
 
   private buildMoodDirective(
