@@ -6,6 +6,7 @@
  */
 
 import { analyzeChapterCadence } from "../utils/chapter-cadence.js";
+import { isInvalidTitleReplacement } from "../utils/chapter-title-engine.js";
 import type { BookRules } from "../models/book-rules.js";
 import type { GenreProfile } from "../models/genre-profile.js";
 import type { ChapterGoal, EndingHookType } from "../models/input-governance.js";
@@ -1132,6 +1133,7 @@ export function resolveDuplicateTitle(
   language: "zh" | "en" = "zh",
   options?: {
     readonly content?: string;
+    readonly chapterGoal?: ChapterGoal;
   },
 ): {
   readonly title: string;
@@ -1145,7 +1147,17 @@ export function resolveDuplicateTitle(
   const duplicateIssues = detectDuplicateTitle(trimmed, existingTitles);
   if (duplicateIssues.length > 0) {
     const regenerated = regenerateDuplicateTitle(trimmed, existingTitles, language, options?.content);
-    if (regenerated && detectDuplicateTitle(regenerated, existingTitles).length === 0) {
+    if (
+      regenerated
+      && !isInvalidTitleReplacement({
+        language,
+        currentTitle: trimmed,
+        replacementTitle: regenerated,
+        chapterGoal: options?.chapterGoal,
+        recentTitles: existingTitles,
+      })
+      && detectDuplicateTitle(regenerated, existingTitles).length === 0
+    ) {
       return { title: regenerated, issues: duplicateIssues };
     }
 
@@ -1171,6 +1183,13 @@ export function resolveDuplicateTitle(
   const regenerated = regenerateCollapsedTitle(trimmed, existingTitles, language, options?.content);
   if (
     regenerated
+    && !isInvalidTitleReplacement({
+      language,
+      currentTitle: trimmed,
+      replacementTitle: regenerated,
+      chapterGoal: options?.chapterGoal,
+      recentTitles: existingTitles,
+    })
     && detectDuplicateTitle(regenerated, existingTitles).length === 0
     && detectTitleCollapse(regenerated, existingTitles, language).length === 0
   ) {

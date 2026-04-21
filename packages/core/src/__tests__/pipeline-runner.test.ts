@@ -3980,6 +3980,86 @@ describe("PipelineRunner", () => {
     }
   });
 
+  it("does not let title finalization overwrite a strong writer title with a weaker regenerated name", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const storyDir = join(state.bookDir(bookId), "story");
+    const chaptersDir = join(state.bookDir(bookId), "chapters");
+    const now = "2026-03-19T00:00:00.000Z";
+
+    await Promise.all([
+      writeFile(join(chaptersDir, "0001_死局将至.md"), "# 第1章 死局将至\n\n旧章节。", "utf-8"),
+      writeFile(join(chaptersDir, "0002_死局再近.md"), "# 第2章 死局再近\n\n旧章节。", "utf-8"),
+      writeFile(join(chaptersDir, "0003_死局未解.md"), "# 第3章 死局未解\n\n旧章节。", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), createStateCard({
+        chapter: 3,
+        location: "Ashen ferry crossing",
+        protagonistState: "Lin Yue still hides the oath token.",
+        goal: "Break through the river choke point.",
+        conflict: "The deadlock at the dark-river mouth keeps tightening.",
+      }), "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+    ]);
+    await state.saveChapterIndex(bookId, [
+      {
+        number: 1,
+        title: "死局将至",
+        status: "ready-for-review",
+        wordCount: 12,
+        createdAt: now,
+        updatedAt: now,
+        auditIssues: [],
+        lengthWarnings: [],
+      },
+      {
+        number: 2,
+        title: "死局再近",
+        status: "ready-for-review",
+        wordCount: 12,
+        createdAt: now,
+        updatedAt: now,
+        auditIssues: [],
+        lengthWarnings: [],
+      },
+      {
+        number: 3,
+        title: "死局未解",
+        status: "ready-for-review",
+        wordCount: 12,
+        createdAt: now,
+        updatedAt: now,
+        auditIssues: [],
+        lengthWarnings: [],
+      },
+    ]);
+
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
+      createWriterOutput({
+        chapterNumber: 4,
+        title: "暗河尽头前的死局",
+        content: "云岚站在暗河边，没有回头。",
+        wordCount: "云岚站在暗河边，没有回头。".length,
+      }),
+    );
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(
+      createAuditResult({
+        passed: true,
+        issues: [],
+        summary: "clean",
+      }),
+    );
+
+    try {
+      const result = await runner.writeNextChapter(bookId, 120);
+      const index = await state.loadChapterIndex(bookId);
+
+      expect(result.title).toBe("暗河尽头前的死局");
+      expect(index.at(-1)?.title).toBe("暗河尽头前的死局");
+      expect(result.title).not.toBe("云岚");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("defaults manual reviseDraft to spot-fix when mode is omitted", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture();
     const storyDir = join(state.bookDir(bookId), "story");

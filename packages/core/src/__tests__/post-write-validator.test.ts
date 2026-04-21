@@ -281,6 +281,34 @@ describe("validatePostWrite", () => {
     expect(result.title).toContain("塔楼");
   });
 
+  it("keeps the current strong title when collapsed-title regeneration only finds a weak name replacement", () => {
+    const result = resolveDuplicateTitle(
+      "暗河尽头前的死局",
+      ["死局将至", "死局再近", "死局未解"],
+      "zh",
+      {
+        content: "云岚站在暗河边，没有回头。",
+      },
+    );
+
+    expect(result.issues.some((issue) => issue.rule === "title-collapse")).toBe(true);
+    expect(result.title).toBe("暗河尽头前的死局");
+  });
+
+  it("allows a replacement when the current title is weak and the regenerated title is more usable", () => {
+    const result = resolveDuplicateTitle(
+      "暗河尽头的灵气结晶和花草果实",
+      ["果实之前", "果实之后", "果实还在"],
+      "zh",
+      {
+        content: "塔楼钟影压了下来，追兵踩碎了最后一层浮苔。",
+      },
+    );
+
+    expect(result.title).toContain("塔楼");
+    expect(result.title).not.toBe("暗河尽头的灵气结晶和花草果实");
+  });
+
   it("matches ending hook signals against the ending region", () => {
     const checks = evaluateChapterGoalDiscipline(
       [
