@@ -4,18 +4,27 @@ import {
   detectParagraphLengthDrift,
   detectParagraphShapeWarnings,
   evaluateChapterGoalDiscipline,
+  evaluateHookEmergenceCompliance,
+  evaluateMoodCadenceCompliance,
   evaluateEndingIsomorphism,
   evaluateHookDebtThrottle,
   evaluateResourceLedgerDiscipline,
   resolveDuplicateTitle,
   toDisciplineWarnings,
   toEndingIsomorphismWarnings,
+  toHookEmergenceWarnings,
   toHookDebtWarnings,
   toResourceLedgerWarnings,
   validatePostWrite,
   type PostWriteViolation,
 } from "../agents/post-write-validator.js";
 import type { GenreProfile } from "../models/genre-profile.js";
+import {
+  detectCollapsedTitleAnchor,
+  enforceFinalTitleAnchorGuard,
+  extractTitleCoreAnchor,
+  hasInvalidTitleIntegrity,
+} from "../utils/chapter-title-engine.js";
 
 const baseProfile: GenreProfile = {
   id: "test",
@@ -278,7 +287,7 @@ describe("validatePostWrite", () => {
       },
     );
 
-    expect(result.issues.some((issue) => issue.rule === "title-collapse")).toBe(true);
+    expect(result.issues.some((issue) => issue.rule === "title-collapse-warning")).toBe(true);
     expect(result.title).not.toContain("名单");
     expect(result.title).toContain("塔楼");
   });
@@ -293,7 +302,7 @@ describe("validatePostWrite", () => {
       },
     );
 
-    expect(result.issues.some((issue) => issue.rule === "title-collapse")).toBe(true);
+    expect(result.issues.some((issue) => issue.rule === "title-collapse-warning")).toBe(true);
     expect(result.title).toBe("暗河尽头前的死局");
   });
 
@@ -309,6 +318,57 @@ describe("validatePostWrite", () => {
 
     expect(result.title).toBe("暗河尽头前的死局");
     expect(result.title).not.toBe("索并未因");
+  });
+
+  it("extracts the shared core anchor from collapsed recent titles", () => {
+    expect(extractTitleCoreAnchor("暗河尽头前的死局", "zh")).toBe("暗河尽头");
+    expect(extractTitleCoreAnchor("暗河尽头的秘密", "zh")).toBe("暗河尽头");
+    expect(detectCollapsedTitleAnchor(
+      "暗河尽头前的死局",
+      ["暗河尽头的秘密", "暗河尽头前的死局：探索并未", "暗河尽头前的死局：楚夜云岚击败"],
+      "zh",
+    )).toBe("暗河尽头");
+  });
+
+  it("rejects a collapsed anchor title and regenerates around a new anchor", () => {
+    const result = resolveDuplicateTitle(
+      "暗河尽头前的死局",
+      [
+        "暗河尽头的秘密",
+        "暗河尽头前的死局：探索并未",
+        "暗河尽头前的死局：楚夜云岚击败",
+        "暗河尽头前的死局：楚夜云岚站暗",
+      ],
+      "zh",
+      {
+        content: "黑袍人掀开兜帽，露出第二张脸。蚀骨碑后的活祭者也从石缝里走了出来。",
+      },
+    );
+
+    expect(result.issues.some((issue) => issue.rule === "title-collapse-warning")).toBe(true);
+    expect(result.title).not.toContain("暗河尽头");
+    expect(["黑袍人的第二张脸", "蚀骨碑后的活祭者"]).toContain(result.title);
+  });
+
+  it("treats fragment replacements like 楚夜云岚站暗 and 探索并未 as invalid", () => {
+    expect(hasInvalidTitleIntegrity("楚夜云岚站暗", "zh")).toBe(true);
+    expect(hasInvalidTitleIntegrity("探索并未", "zh")).toBe(true);
+  });
+
+  it("keeps the previous strong candidate when the final adjusted title still hits a collapsed anchor", () => {
+    const finalTitle = enforceFinalTitleAnchorGuard({
+      language: "zh",
+      finalTitle: "暗河尽头的古老祭坛",
+      fallbackTitle: "未知强敌威胁逼近之时",
+      recentTitles: [
+        "暗河尽头的秘密",
+        "暗河尽头前的死局：探索并未",
+        "暗河尽头前的死局：楚夜云岚击败",
+        "暗河尽头前的死局：楚夜云岚站暗",
+      ],
+    });
+
+    expect(finalTitle).toBe("未知强敌威胁逼近之时");
   });
 
   it("allows a replacement when the current title is weak and the regenerated title is more usable", () => {
@@ -378,6 +438,11 @@ describe("validatePostWrite", () => {
         activeCharacters: ["秦枭"],
         foreshadowToTouch: [],
         payoffToDeliver: "获得地图和补给",
+        payoffDirective: {
+          promisedPayoff: "获得地图和补给",
+          payoffType: "resource",
+          mandatoryByFinalAct: true,
+        },
         endingHookType: "danger",
         nextChapterPull: "下一章追兵会再次逼近。",
       },
@@ -386,7 +451,37 @@ describe("validatePostWrite", () => {
     const warnings = toDisciplineWarnings(checks, "zh");
     expect(checks.payoffCheck.matched).toBe(false);
     expect(checks.payoffCheck.matchLevel).toBe("none");
-    expect(warnings.some((warning) => warning.rule === "payoff-check")).toBe(true);
+    expect(warnings.some((warning) => warning.rule === "payoff-materialization-failure")).toBe(true);
+  });
+
+  it("fails vague mystery language and only passes when the promised reveal is concretely materialized", () => {
+    const chapterGoal = {
+      mainConflict: "古卷来历关系到葬渊一脉的真相。",
+      protagonistGoal: "揭开古卷来源。",
+      activeCharacters: ["楚夜"],
+      foreshadowToTouch: ["ancient-scroll"],
+      payoffToDeliver: "揭开古卷来源",
+      payoffDirective: {
+        promisedPayoff: "揭开古卷来源",
+        payoffType: "reveal" as const,
+        mandatoryByFinalAct: true,
+      },
+      endingHookType: "reveal" as const,
+      nextChapterPull: "这条来历会把祭司一脉拖出来。",
+    };
+
+    const failedChecks = evaluateChapterGoalDiscipline(
+      "楚夜只觉得古卷很神秘，隐约察觉它和旧日传说有关，却没人真正说破。",
+      chapterGoal,
+    );
+    const passedChecks = evaluateChapterGoalDiscipline(
+      "碑灵终于说破：古卷并非散修遗物，而是来自葬渊祭司一脉，缺失的三页正是用来封存祭火印记。",
+      chapterGoal,
+    );
+
+    expect(failedChecks.payoffCheck.matched).toBe(false);
+    expect(passedChecks.payoffCheck.matched).toBe(true);
+    expect(passedChecks.payoffCheck.evidence).toContain("来自葬渊祭司一脉");
   });
 
   it("treats escape progress as a partial payoff without raising a warning", () => {
@@ -554,5 +649,99 @@ describe("evaluateEndingIsomorphism", () => {
 
     expect(check?.matched).toBe(true);
     expect(warnings).toEqual([]);
+  });
+});
+
+describe("evaluateMoodCadenceCompliance", () => {
+  const breathDirective = [
+    "# Chapter Intent",
+    "",
+    "## Structured Directives",
+    "- mood:",
+    "  - targetMode: breath",
+    "  - requiredSceneQuota: 1",
+    "  - moodCoverageMin: 0.25",
+    "  - forbidDominantMode: combat-heavy",
+    "  - note: 本章必须降调。",
+  ].join("\n");
+
+  it("fails when breathing coverage is only a small slice of a combat-heavy chapter", () => {
+    const content = [
+      "楚夜草草包扎伤口，喝了口冷水。",
+      "",
+      "追兵再次扑来，刀光与杀机在甬道里来回轰击，楚夜提刀硬撞进封锁圈，和黑袍人狠狠干了一场。敌手一步不退，封锁线被震得四处爆开，他只能顶着反扑继续往前压。",
+      "",
+      "第二波围杀紧跟着压上来，厮杀、对轰、爆开的碎石几乎填满了整段甬道，长刀一次次撞上石壁，血战和封锁把去路彻底塞满。楚夜刚逼退左侧敌人，右侧杀机又顺着裂口压了回来。",
+      "",
+      "他刚退开半步，又被另一名敌手逼回去，血战一直拖到洞口塌陷为止。追兵借着碎石烟尘再度围杀，逼得他只能继续交锋，连喘口气的余地都没有。",
+    ].join("\n\n");
+
+    const check = evaluateMoodCadenceCompliance(content, breathDirective);
+
+    expect(check?.matched).toBe(false);
+    expect(check?.dominantMode).toBe("combat-heavy");
+    expect(check?.coverageRatio).toBeLessThan(0.25);
+  });
+
+  it("passes when breathing and relationship material covers roughly a third of the chapter", () => {
+    const content = [
+      "楚夜和云岚在乱石后扎营疗伤，先替彼此包扎伤口，又分配药材和热汤，顺着路途交谈把接下来的打算重新理顺。",
+      "",
+      "一阵短暂的轻松调侃过后，两人的信任明显松开了一层，连原本紧绷的呼吸也慢了下来。",
+      "",
+      "休整结束后，他们才重新上路，在甬道尽头追查那道新出现的刻痕，顺势把主线推进到石门前。",
+      "",
+      "石门后的杀机还在逼近，但这一次他们没有再被仓促卷进血战，而是先带着准备好的方案往前压了一步。",
+    ].join("\n\n");
+
+    const check = evaluateMoodCadenceCompliance(content, breathDirective);
+
+    expect(check?.matched).toBe(true);
+    expect(check?.coverageRatio).toBeGreaterThanOrEqual(0.25);
+  });
+});
+
+describe("evaluateHookEmergenceCompliance", () => {
+  const hookIntent = [
+    "# Chapter Intent",
+    "",
+    "## Hook Agenda",
+    "### Emergence Directive",
+    "- mustMaterializeHookNow: true",
+    "- targetHookId: H002",
+    "- targetHookState: overdue",
+    "- targetHookExpectedPayoff: 发现压制毒性新方法",
+    "- targetHookNotes: 噬魂草毒性仍在扩散",
+  ].join("\n");
+
+  it("fails when an overdue hook is only mentioned again without a state change", () => {
+    const content = "楚夜盯着噬魂草，只知道它仍危险，毒性依旧存在，却没有任何新进展。";
+
+    const check = evaluateHookEmergenceCompliance(content, hookIntent);
+    const warnings = toHookEmergenceWarnings(check, "zh");
+
+    expect(check?.matched).toBe(false);
+    expect(check?.targetHookId).toBe("H002");
+    expect(warnings.some((warning) => warning.rule === "hook-emergence-failure")).toBe(true);
+  });
+
+  it("passes when the chapter advances an overdue hook with a real new method", () => {
+    const content = "楚夜借着碑纹反推药性，终于发现一套压制噬魂草毒性的新方法，至少能先稳住扩散速度。";
+
+    const check = evaluateHookEmergenceCompliance(content, hookIntent);
+
+    expect(check?.matched).toBe(true);
+    expect(check?.movement).toBe("advance");
+    expect(check?.evidence).toContain("发现一套压制噬魂草毒性的新方法");
+  });
+
+  it("passes when the chapter fully resolves the overdue hook", () => {
+    const content = "楚夜顺着祭火残灰彻底解决了噬魂草，余毒被一并清除，这条旧患当场结束。";
+
+    const check = evaluateHookEmergenceCompliance(content, hookIntent);
+
+    expect(check?.matched).toBe(true);
+    expect(check?.movement).toBe("resolve");
+    expect(check?.evidence).toContain("彻底解决了噬魂草");
   });
 });

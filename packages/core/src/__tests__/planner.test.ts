@@ -192,6 +192,44 @@ describe("PlannerAgent", () => {
     expect(result.plannerInputs).toContain(join(storyDir, "power_system.yaml"));
   });
 
+  it("injects a structured mood downshift directive after three confrontation-heavy chapters", async () => {
+    await writeFile(
+      join(storyDir, "chapter_summaries.md"),
+      [
+        "# Chapter Summaries",
+        "",
+        "| 19 | 血门前夜 | 楚夜 | 正面强攻 | 紧张 | none | 冷硬 | confrontation |",
+        "| 20 | 裂谷交锋 | 楚夜 | 与追兵正面厮杀 | 压迫 | none | 凝重 | confrontation |",
+        "| 21 | 碑下血战 | 楚夜 | 继续高压对抗 | 焦灼 | none | 肃杀 | confrontation |",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await planner.planChapter({
+      book,
+      bookDir,
+      chapterNumber: 22,
+    });
+
+    expect(result.intent.moodDirective).toEqual(expect.objectContaining({
+      targetMode: "breath",
+      requiredSceneQuota: 1,
+      moodCoverageMin: 0.3,
+      forbidDominantMode: "combat-heavy",
+    }));
+    expect(result.intentMarkdown).toContain("targetMode: breath");
+    expect(result.intentMarkdown).toContain("requiredSceneQuota: 1");
+    expect(result.intentMarkdown).toContain("moodCoverageMin: 0.3");
+    expect(result.intentMarkdown).toContain("forbidDominantMode: combat-heavy");
+  });
+
   it("builds a structured chapter goal and writes it into the runtime intent", async () => {
     await writeFile(
       join(storyDir, "current_state.md"),
@@ -226,10 +264,15 @@ describe("PlannerAgent", () => {
       protagonistGoal: expect.stringContaining("answer"),
       foreshadowToTouch: expect.arrayContaining(["mentor-oath"]),
       payoffToDeliver: expect.stringContaining("mentor vanished"),
+      payoffDirective: expect.objectContaining({
+        promisedPayoff: expect.stringContaining("mentor vanished"),
+        mandatoryByFinalAct: true,
+      }),
       nextChapterPull: expect.any(String),
     }));
     expect(result.intentMarkdown).toContain("## Chapter Goal");
     expect(result.intentMarkdown).toContain("endingHookType");
+    expect(result.intentMarkdown).toContain("payoffDirective.promisedPayoff");
   });
 
   it("filters non-character fragments and rejects numeric payoff values in chapter goal output", async () => {
@@ -1050,9 +1093,14 @@ describe("PlannerAgent", () => {
       chapterNumber: 5,
     });
 
-    expect(result.intent.moodDirective).toBeDefined();
-    expect(result.intent.moodDirective).toContain("降调");
-    expect(result.intent.moodDirective).toContain("日常");
+    expect(result.intent.moodDirective).toEqual(expect.objectContaining({
+      targetMode: "breath",
+      requiredSceneQuota: 1,
+      moodCoverageMin: 0.3,
+      forbidDominantMode: "combat-heavy",
+      note: expect.stringContaining("降调"),
+    }));
+    expect(result.intent.moodDirective?.note).toContain("日常");
   });
 
   it("forces escalation after two consecutive breathing chapters", async () => {
@@ -2280,5 +2328,127 @@ describe("PlannerAgent", () => {
         expect.objectContaining({ type: "hook_debt_throttle" }),
       ]),
     );
+  });
+
+  it("marks overdue hooks as mustMaterializeHookNow in chapter intent markdown", async () => {
+    const stateDir = join(storyDir, "state");
+    await mkdir(stateDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(
+        join(storyDir, "foreshadow_registry.json"),
+        JSON.stringify([
+          {
+            hookId: "H002",
+            startChapter: 2,
+            type: "poison-mystery",
+            status: "open",
+            lastAdvancedChapter: 3,
+            expectedPayoff: "发现压制毒性新方法",
+            payoffTiming: "near-term",
+            notes: "噬魂草毒性仍在扩散",
+          },
+        ], null, 2),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "chapter_summaries.md"),
+        [
+          "# Chapter Summaries",
+          "",
+          "| 6 | 毒性未止 | 楚夜 | 噬魂草仍在侵蚀 | 毒性扩散 | H002 stalled | 紧张 | confrontation |",
+          "| 7 | 逼近的余毒 | 楚夜 | 噬魂草继续恶化 | 仍无解法 | H002 stalled | 压迫 | confrontation |",
+        ].join("\n"),
+        "utf-8",
+      ),
+      writeFile(
+        join(stateDir, "manifest.json"),
+        JSON.stringify({
+          schemaVersion: 2,
+          language: "zh",
+          lastAppliedChapter: 7,
+          projectionVersion: 1,
+          migrationWarnings: [],
+        }, null, 2),
+        "utf-8",
+      ),
+      writeFile(
+        join(stateDir, "current_state.json"),
+        JSON.stringify({
+          chapter: 7,
+          facts: [],
+        }, null, 2),
+        "utf-8",
+      ),
+      writeFile(
+        join(stateDir, "chapter_summaries.json"),
+        JSON.stringify({
+          rows: [
+            {
+              chapter: 6,
+              title: "毒性未止",
+              characters: "楚夜",
+              events: "噬魂草仍在侵蚀",
+              stateChanges: "毒性扩散",
+              hookActivity: "H002 stalled",
+              mood: "紧张",
+              chapterType: "confrontation",
+            },
+            {
+              chapter: 7,
+              title: "逼近的余毒",
+              characters: "楚夜",
+              events: "噬魂草继续恶化",
+              stateChanges: "仍无解法",
+              hookActivity: "H002 stalled",
+              mood: "压迫",
+              chapterType: "confrontation",
+            },
+          ],
+        }, null, 2),
+        "utf-8",
+      ),
+      writeFile(
+        join(stateDir, "hooks.json"),
+        JSON.stringify({
+          hooks: [
+            {
+              hookId: "H002",
+              startChapter: 2,
+              type: "poison-mystery",
+              status: "open",
+              lastAdvancedChapter: 3,
+              expectedPayoff: "发现压制毒性新方法",
+              payoffTiming: "near-term",
+              notes: "噬魂草毒性仍在扩散",
+            },
+          ],
+        }, null, 2),
+        "utf-8",
+      ),
+    ]);
+
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await planner.planChapter({
+      book,
+      bookDir,
+      chapterNumber: 8,
+    });
+
+    expect(result.intentMarkdown).toContain("### Hook Pressure States");
+    expect(result.intentMarkdown).toContain("H002: must-resolve-now");
+    expect(result.intentMarkdown).toContain("mustMaterializeHookNow: true");
+    expect(result.intentMarkdown).toContain("targetHookId: H002");
+    expect(result.intentMarkdown).toContain("targetHookState: must-resolve-now");
+    expect(result.intentMarkdown).toContain("targetHookExpectedPayoff: 发现压制毒性新方法");
+    expect(result.intent.mustAvoid).toEqual(expect.arrayContaining([
+      "不要再用“只提一嘴”的方式继续拖延 H002。",
+    ]));
   });
 });

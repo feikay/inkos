@@ -1,4 +1,4 @@
-import type { HookAgenda, ChapterGoal, EndingHookType } from "../models/input-governance.js";
+import type { HookAgenda, ChapterGoal, EndingHookType, PayoffDirective, PayoffType } from "../models/input-governance.js";
 import type { StoredHook } from "../state/memory-db.js";
 import { parseChapterSummariesMarkdown, parseCurrentStateFacts, parsePendingHooksMarkdown } from "./story-markdown.js";
 import type {
@@ -159,6 +159,16 @@ export function buildChapterGoal(input: BuildChapterGoalInput): ChapterGoal {
       input.currentState,
       input.chapterSummaries,
     ]),
+    payoffDirective: buildPayoffDirective(
+      sanitizeChapterGoalText(payoffToDeliver) ?? defaultConcretePayoff(input.language, [
+        protagonistGoal,
+        input.goal,
+        mainConflict,
+        input.outlineNode,
+        input.currentState,
+        input.chapterSummaries,
+      ]),
+    ),
     endingHookType,
     nextChapterPull: sanitizeChapterGoalText(nextChapterPull) ?? defaultSentence(
       input.language,
@@ -166,6 +176,30 @@ export function buildChapterGoal(input: BuildChapterGoalInput): ChapterGoal {
       "本章结尾要留下会立刻推到下章的压力。",
     ),
   };
+}
+
+function buildPayoffDirective(promisedPayoff: string): PayoffDirective {
+  return {
+    promisedPayoff,
+    payoffType: inferPayoffType(promisedPayoff),
+    mandatoryByFinalAct: true,
+  };
+}
+
+function inferPayoffType(payoff: string): PayoffType {
+  if (/真相|来历|来源|身份|揭开|揭示|发现|查明|线索|秘密|origin|source|truth|reveal|identity|clue/i.test(payoff)) {
+    return "reveal";
+  }
+  if (/获得|拿到|夺得|资源|地图|腰牌|卷轴|残卷|药材|灵石|resource|obtain|gain|map|token|scroll/i.test(payoff)) {
+    return "resource";
+  }
+  if (/突破|晋阶|掌握|觉醒|学会|压住|稳住|新能力|breakthrough|master|awaken|stabilize|new ability/i.test(payoff)) {
+    return "breakthrough";
+  }
+  if (/信任|和解|关系|告白|结盟|relationship|trust|bond|reconcile|alliance/i.test(payoff)) {
+    return "relationship";
+  }
+  return "reversal";
 }
 
 function resolveChapterGoalHooks(

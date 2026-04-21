@@ -116,6 +116,24 @@ export class ReviserAgent extends BaseAgent {
       : "";
 
     const isEnglish = (bookLanguage ?? gp.language) === "en";
+    const hasMoodCadenceViolation = mode === "spot-fix" && issues.some((issue) => issue.category === "mood-cadence-violation");
+    const moodInsertionModeBlock = hasMoodCadenceViolation
+      ? isEnglish
+        ? `
+11. SCENE INSERTION MODE is active for mood-cadence-violation.
+12. Do not merely polish the existing confrontation beats. Insert one brand-new breathing scene block into the middle of the chapter, preferably right after a combat-heavy beat.
+13. Choose exactly one insertion template: camp-rest healing / travel talk / relationship progression / light interaction.
+14. The insertion must add new paragraphs, not just soften the old ones. In PATCHES, keep TARGET_TEXT intact inside REPLACEMENT_TEXT and append the new scene after it.
+15. One small calming paragraph is not enough. The breathing-mode material should cover roughly 25%-35% of the final chapter.
+16. You may enlarge the inserted block and, if needed, replace part of a combat-heavy stretch with the calmer scene layer, but do not change chapter facts or outcomes.`
+        : `
+11. 当前启用 SCENE INSERTION MODE，专门处理 mood-cadence-violation。
+12. 不要只润色原有对抗段落，必须在正文中段插入一个全新的喘息场景，优先放在战斗/高压段之后。
+13. 插入场景只能从以下模板中选一种：扎营疗伤 / 路途交谈 / 人物关系推进 / 轻松互动。
+14. 必须新增段落，不能只软化旧段。输出 PATCHES 时，REPLACEMENT_TEXT 必须保留 TARGET_TEXT 原文，并在其后追加新场景段落。
+15. 只插一小段不够。喘息/关系/轻松内容在最终正文中的覆盖率应达到大约 25%-35%。
+16. 必要时允许扩大插入块，并替换部分战斗段来降低 combat density，但不得推翻章节事实或结局。`
+      : "";
     const resolvedLanguage = isEnglish ? "en" : "zh";
     const langPrefix = isEnglish
       ? mode === "spot-fix"
@@ -185,7 +203,7 @@ ${gp.numericalSystem ? "\n=== UPDATED_LEDGER ===\n(更新后的完整资源账�
 6. 保持原文的语言风格和节奏
 7. 修改后同步更新状态卡${gp.numericalSystem ? "、账本" : ""}、伏笔池
 ${lengthGuardrail}
-${mode === "spot-fix" ? "\n9. spot-fix 只能输出局部补丁，禁止输出整章改写；TARGET_TEXT 必须能在原文中唯一命中\n10. 如果需要大面积改写，说明无法安全 spot-fix，并让 PATCHES 留空" : ""}
+${mode === "spot-fix" ? "\n9. spot-fix 只能输出局部补丁，禁止输出整章改写；TARGET_TEXT 必须能在原文中唯一命中\n10. 如果需要大面积改写，说明无法安全 spot-fix，并让 PATCHES 留空" : ""}${moodInsertionModeBlock}
 
 输出格式：
 

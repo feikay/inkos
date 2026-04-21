@@ -1265,9 +1265,11 @@ export class PipelineRunner {
     this.logStage(stageLanguage, { zh: "生成最终真相文件", en: "rebuilding final truth files" });
     const chapterIndexBeforePersist = await this.state.loadChapterIndex(bookId);
     const { resolveDuplicateTitle } = await import("../agents/post-write-validator.js");
+    const { assertFinalTitleAllowed, enforceFinalTitleAnchorGuard } = await import("../utils/chapter-title-engine.js");
+    const existingChapterTitles = chapterIndexBeforePersist.map((chapter) => chapter.title);
     const initialTitleResolution = resolveDuplicateTitle(
       output.title,
-      chapterIndexBeforePersist.map((chapter) => chapter.title),
+      existingChapterTitles,
       pipelineLang,
       { content: finalContent },
     );
@@ -1283,22 +1285,36 @@ export class PipelineRunner {
       lengthSpec.countingMode,
       reducedControlInput,
     );
+    const preferredTitleBeforeFinalizer = persistenceOutput.title;
     const finalTitleResolution = resolveDuplicateTitle(
       persistenceOutput.title,
-      chapterIndexBeforePersist.map((chapter) => chapter.title),
+      existingChapterTitles,
       pipelineLang,
       { content: finalContent },
     );
-    if (finalTitleResolution.title !== persistenceOutput.title) {
-      persistenceOutput = {
-        ...persistenceOutput,
-        title: finalTitleResolution.title,
-      };
-    }
-    if (persistenceOutput.title !== output.title) {
+    const finalTitleCandidate = finalTitleResolution.title !== persistenceOutput.title
+      ? finalTitleResolution.title
+      : persistenceOutput.title;
+    const FINAL_TITLE = enforceFinalTitleAnchorGuard({
+      language: pipelineLang,
+      finalTitle: finalTitleCandidate,
+      fallbackTitle: preferredTitleBeforeFinalizer,
+      recentTitles: existingChapterTitles,
+    });
+    assertFinalTitleAllowed({
+      language: pipelineLang,
+      finalTitle: FINAL_TITLE,
+      recentTitles: existingChapterTitles,
+    });
+    const frozenFinalTitle = Object.freeze({ title: FINAL_TITLE });
+    persistenceOutput = {
+      ...persistenceOutput,
+      title: frozenFinalTitle.title,
+    };
+    if (frozenFinalTitle.title !== output.title) {
       const description = pipelineLang === "en"
-        ? `Chapter title "${output.title}" was auto-adjusted to "${persistenceOutput.title}".`
-        : `章节标题"${output.title}"已自动调整为"${persistenceOutput.title}"。`;
+        ? `Chapter title "${output.title}" was auto-adjusted to "${frozenFinalTitle.title}".`
+        : `章节标题"${output.title}"已自动调整为"${frozenFinalTitle.title}"。`;
       this.config.logger?.warn(`[title] ${description}`);
       auditResult = {
         ...auditResult,
@@ -1359,7 +1375,7 @@ export class PipelineRunner {
       book,
       bookDir,
       chapterNumber,
-      title: persistenceOutput.title,
+      title: frozenFinalTitle.title,
       content: finalContent,
       persistenceOutput,
       auditResult,
@@ -1375,8 +1391,23 @@ export class PipelineRunner {
     });
     let chapterStatus: ChapterPipelineResult["status"] | null = truthValidation.chapterStatus;
     let degradedIssues: ReadonlyArray<AuditIssue> = truthValidation.degradedIssues;
-    persistenceOutput = truthValidation.persistenceOutput;
+    if (truthValidation.persistenceOutput.title !== frozenFinalTitle.title) {
+      throw new Error(
+        pipelineLang === "en"
+          ? `FINAL_TITLE mutated after freeze: expected "${frozenFinalTitle.title}", received "${truthValidation.persistenceOutput.title}"`
+          : `FINAL_TITLE 在 freeze 后被改写：期望“${frozenFinalTitle.title}”，实际得到“${truthValidation.persistenceOutput.title}”`,
+      );
+    }
+    persistenceOutput = {
+      ...truthValidation.persistenceOutput,
+      title: frozenFinalTitle.title,
+    };
     auditResult = truthValidation.auditResult;
+    assertFinalTitleAllowed({
+      language: pipelineLang,
+      finalTitle: frozenFinalTitle.title,
+      recentTitles: existingChapterTitles,
+    });
 
     // 4.2 Final paragraph shape check on persisted content (post-normalize, post-revise)
     {
@@ -1415,7 +1446,7 @@ export class PipelineRunner {
     const resolvedStatus = chapterStatus ?? (auditResult.passed ? "ready-for-review" : "audit-failed");
     await persistChapterArtifacts({
       chapterNumber,
-      chapterTitle: persistenceOutput.title,
+      chapterTitle: frozenFinalTitle.title,
       status: resolvedStatus,
       auditResult,
       finalWordCount,
@@ -1424,10 +1455,11 @@ export class PipelineRunner {
       degradedIssues,
       tokenUsage: totalUsage,
       loadChapterIndex: () => this.state.loadChapterIndex(bookId),
-      saveChapter: () => writer.saveChapter(bookDir, persistenceOutput, gp.numericalSystem, pipelineLang),
+      saveChapter: () => writer.saveChapter(bookDir, { ...persistenceOutput, title: frozenFinalTitle.title }, gp.numericalSystem, pipelineLang),
       saveTruthFiles: async () => {
-        await writer.saveNewTruthFiles(bookDir, persistenceOutput, pipelineLang);
-        await this.syncLegacyStructuredStateFromMarkdown(bookDir, chapterNumber, persistenceOutput);
+        const frozenPersistenceOutput = { ...persistenceOutput, title: frozenFinalTitle.title };
+        await writer.saveNewTruthFiles(bookDir, frozenPersistenceOutput, pipelineLang);
+        await this.syncLegacyStructuredStateFromMarkdown(bookDir, chapterNumber, frozenPersistenceOutput);
         this.logStage(stageLanguage, { zh: "同步记忆索引", en: "syncing memory indexes" });
         await this.syncNarrativeMemoryIndex(bookId);
       },
@@ -1454,7 +1486,7 @@ export class PipelineRunner {
       await dispatchNotification(this.config.notifyChannels, {
         title: `${statusEmoji} ${book.title} 第${chapterNumber}章`,
         body: [
-          `**${persistenceOutput.title}** | ${chapterLength}`,
+          `**${frozenFinalTitle.title}** | ${chapterLength}`,
           revised ? "📝 已自动修正" : "",
           resolvedStatus === "state-degraded"
             ? "状态结算: 已降级保存，需先修复 state 再继续"
@@ -1469,7 +1501,7 @@ export class PipelineRunner {
     }
 
     await this.emitWebhook("pipeline-complete", bookId, chapterNumber, {
-      title: persistenceOutput.title,
+      title: frozenFinalTitle.title,
       wordCount: finalWordCount,
       passed: auditResult.passed,
       revised,
@@ -1478,7 +1510,7 @@ export class PipelineRunner {
 
     return {
       chapterNumber,
-      title: persistenceOutput.title,
+      title: frozenFinalTitle.title,
       wordCount: finalWordCount,
       auditResult,
       revised,

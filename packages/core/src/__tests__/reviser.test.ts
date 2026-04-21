@@ -300,6 +300,79 @@ describe("ReviserAgent", () => {
     }
   });
 
+  it("switches spot-fix into breathing scene insertion mode for mood-cadence violations", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-reviser-mood-insert-test-"));
+    const bookDir = join(root, "book");
+    await mkdir(join(bookDir, "story"), { recursive: true });
+
+    const agent = new ReviserAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    const chatSpy = vi.spyOn(ReviserAgent.prototype as never, "chat" as never).mockResolvedValue({
+      content: [
+        "=== FIXED_ISSUES ===",
+        "- 插入了扎营疗伤场景，降低了战斗密度。",
+        "",
+        "=== PATCHES ===",
+        "--- PATCH 1 ---",
+        "TARGET_TEXT:",
+        "楚夜一刀劈开追兵的封锁。",
+        "REPLACEMENT_TEXT:",
+        "楚夜一刀劈开追兵的封锁。",
+        "",
+        "他和云岚暂时退到石壁后扎营疗伤，又借着热汤交换了一轮路上见闻。",
+        "--- END PATCH ---",
+        "",
+        "=== UPDATED_STATE ===",
+        "状态卡",
+        "",
+        "=== UPDATED_HOOKS ===",
+        "伏笔池",
+      ].join("\n"),
+      usage: ZERO_USAGE,
+    });
+
+    try {
+      await agent.reviseChapter(
+        bookDir,
+        "楚夜一刀劈开追兵的封锁。\n\n追兵再次扑上来。",
+        22,
+        [{
+          severity: "critical",
+          category: "mood-cadence-violation",
+          description: "本章没有兑现降调 mood directive。",
+          suggestion: "只重写局部场景层，保留章节事实；补入至少 1 段扎营、疗伤、路途交谈、轻松互动或人物关系推进场景，并降低战斗密度。",
+        }],
+        "spot-fix",
+        "xuanhuan",
+      );
+
+      const messages = chatSpy.mock.calls[0]?.[0] as ReadonlyArray<{ content: string }> | undefined;
+      const systemPrompt = messages?.[0]?.content ?? "";
+
+      expect(systemPrompt).toContain("SCENE INSERTION MODE");
+      expect(systemPrompt).toContain("必须新增段落");
+      expect(systemPrompt).toContain("扎营疗伤 / 路途交谈 / 人物关系推进 / 轻松互动");
+      expect(systemPrompt).toContain("25%-35%");
+      expect(systemPrompt).toContain("替换部分战斗段");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("uses selected summary and hook evidence instead of full long-history markdown in governed mode", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-reviser-governed-test-"));
     const bookDir = join(root, "book");

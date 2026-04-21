@@ -93,7 +93,10 @@ export async function runChapterReviewCycle(params: {
   let revised = false;
 
   const cadenceSpotFixWarnings = params.initialOutput.postWriteWarnings
-    .filter((warning) => warning.rule === "cadence-directive-violation" || warning.rule === "ending-isomorphism");
+    .filter((warning) =>
+      warning.rule === "cadence-directive-violation"
+      || warning.rule === "ending-isomorphism"
+      || warning.rule === "mood-cadence-violation");
   const preAuditSpotFixIssues = [
     ...params.initialOutput.postWriteErrors.map((violation) => ({
       severity: "critical" as const,
@@ -132,6 +135,22 @@ export async function runChapterReviewCycle(params: {
       finalContent = fixResult.revisedContent;
       finalWordCount = fixResult.wordCount;
       revised = true;
+      if (
+        params.reducedControlInput?.chapterIntent
+        && preAuditSpotFixIssues.some((issue) => issue.category === "mood-cadence-violation")
+      ) {
+        const { evaluateMoodCadenceCompliance } = await import("../agents/post-write-validator.js");
+        const moodCheck = evaluateMoodCadenceCompliance(
+          finalContent,
+          params.reducedControlInput.chapterIntent,
+        );
+        if (!moodCheck?.matched) {
+          params.logWarn({
+            zh: "mood-cadence spot-fix 后仍未满足降调要求",
+            en: "Mood-cadence spot-fix still does not satisfy the downshift requirement",
+          });
+        }
+      }
     }
   }
 

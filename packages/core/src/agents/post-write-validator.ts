@@ -6,10 +6,15 @@
  */
 
 import { analyzeChapterCadence } from "../utils/chapter-cadence.js";
-import { hasInvalidTitleIntegrity, isInvalidTitleReplacement } from "../utils/chapter-title-engine.js";
+import {
+  detectCollapsedTitleAnchor,
+  findCollapsedTitleAnchors,
+  hasInvalidTitleIntegrity,
+  isInvalidTitleReplacement,
+} from "../utils/chapter-title-engine.js";
 import type { BookRules } from "../models/book-rules.js";
 import type { GenreProfile } from "../models/genre-profile.js";
-import type { ChapterGoal, EndingHookType } from "../models/input-governance.js";
+import type { ChapterGoal, EndingHookType, MoodDirective, PayoffDirective } from "../models/input-governance.js";
 import type { RuntimeStateDelta } from "../models/runtime-state.js";
 import type { RuntimeStateSnapshot } from "../state/state-reducer.js";
 
@@ -30,6 +35,7 @@ export interface PayoffCheck {
   readonly expectedPayoff: string;
   readonly matched: boolean;
   readonly matchLevel: "none" | "partial" | "full";
+  readonly payoffType?: PayoffDirective["payoffType"];
   readonly evidence?: string;
 }
 
@@ -42,6 +48,14 @@ export interface CadenceDirectiveCheck {
   readonly expectedTypes: ReadonlyArray<"escalation" | "confrontation" | "discovery-under-threat">;
   readonly matched: boolean;
   readonly evidence?: string;
+}
+
+export interface MoodCadenceCheck {
+  readonly expectedMode: MoodDirective["targetMode"];
+  readonly matched: boolean;
+  readonly evidence?: string;
+  readonly coverageRatio?: number;
+  readonly dominantMode?: "combat-heavy" | "mixed";
 }
 
 export interface EndingIsomorphismCheck {
@@ -75,6 +89,14 @@ export interface HookDebtCheck {
   readonly warnings: ReadonlyArray<string>;
 }
 
+export interface HookEmergenceCheck {
+  readonly matched: boolean;
+  readonly targetHookId?: string;
+  readonly targetHookState?: string;
+  readonly movement?: "advance" | "partial-resolve" | "resolve";
+  readonly evidence?: string;
+}
+
 interface ParagraphShape {
   readonly paragraphs: ReadonlyArray<string>;
   readonly shortThreshold: number;
@@ -106,6 +128,16 @@ const ENDING_HOOK_PATTERNS: Record<EndingHookType, ReadonlyArray<RegExp>> = {
     /breakthrough|ascend|advanced|awakened|mastered|new ability|leveled up/i,
   ],
 };
+
+const MOOD_CALM_PATTERNS = [
+  /疗伤|包扎|扎营|吃东西|吃肉|喝汤|休整|歇息|路途交谈|交换情报|谈笑|调侃|玩笑|信任加深|并肩而行|关系缓和|平静|喘息|合作|恢复|资源整理|分配药材|讨论计划|结伴深入|慢慢推进|暂时安全|探索环境/u,
+  /healed|bandaged|made camp|shared food|ate|rested|travel talk|traded information|teased|joked|trust deepened|calm|breathing room|recovery|lighter banter|relationship beat/i,
+] as const;
+
+const MOOD_COMBAT_PATTERNS = [
+  /交锋|厮杀|搏杀|刀光|剑光|轰击|爆开|追兵扑来|封锁|围杀|杀机|血战|对轰/u,
+  /clash|combat|battle|lunged|struck|ambush|sealed|fight|trading blows|blood fight/i,
+] as const;
 
 const ENDING_ISOMORPHISM_PHRASES: ReadonlyArray<{
   readonly label: string;
@@ -171,6 +203,26 @@ const ENDING_MODE_PATTERNS: ReadonlyArray<{
     ],
   },
 ];
+
+const HOOK_EMERGENCE_ADVANCE_PATTERNS = [
+  /发现|找到|查明|试出|摸清|掌握|压制|缓解|稳住|新方法|线索|转机|破解|定位|拆出/u,
+  /discover|found|figured out|worked out|stabilized|suppressed|new method|clue|breakthrough|identified/i,
+] as const;
+
+const HOOK_EMERGENCE_PARTIAL_RESOLVE_PATTERNS = [
+  /暂时压住|暂时解除|部分解除|初步解决|先稳住|先控制住|partial(?:ly)? resolve|partly neutralized|temporarily contained/i,
+  /暂时压制|暂时化解|压住毒性|止住扩散|堵住缺口/u,
+] as const;
+
+const HOOK_EMERGENCE_RESOLVE_PATTERNS = [
+  /彻底解决|根除|清除|结束|解掉|拔除|回收|兑现|真相大白|彻底压住|完全化解/u,
+  /resolved|fully resolved|ended|cured|removed|eliminated|fully neutralized|truth laid bare/i,
+] as const;
+
+const HOOK_EMERGENCE_STALL_PATTERNS = [
+  /仍危险|依旧危险|还是危险|仍存在|依旧存在|依然存在|还没解决|尚未解决|没有进展|依旧神秘|只是更神秘/u,
+  /still dangerous|still there|still unresolved|no progress|remains a threat|still mysterious/i,
+] as const;
 
 const RESOURCE_SIGNAL_RULES: ReadonlyArray<{
   readonly kind: ResourceLedgerFinding["kind"];
@@ -1009,7 +1061,18 @@ function findRegexEvidence(content: string, patterns: ReadonlyArray<RegExp>): st
   return undefined;
 }
 
-function findPayoffEvidence(content: string, expectedPayoff: string): { evidence?: string; matchLevel: "none" | "partial" | "full" } {
+function findPayoffEvidence(
+  content: string,
+  expectedPayoff: string,
+  payoffDirective?: Pick<PayoffDirective, "payoffType" | "promisedPayoff">,
+): { evidence?: string; matchLevel: "none" | "partial" | "full" } {
+  const materializedEvidence = payoffDirective
+    ? findMaterializedPayoffEvidence(content, payoffDirective)
+    : undefined;
+  if (materializedEvidence) {
+    return { evidence: materializedEvidence, matchLevel: "full" };
+  }
+
   const normalizedExpected = normalizeLooseText(expectedPayoff);
   const normalizedContent = normalizeLooseText(content);
   if (normalizedExpected && normalizedContent.includes(normalizedExpected)) {
@@ -1041,6 +1104,44 @@ function findPayoffEvidence(content: string, expectedPayoff: string): { evidence
     evidence: rawIndex >= 0 ? snippetAround(content, rawIndex, lead.length) : matched.join(" / "),
     matchLevel: "full",
   };
+}
+
+function findMaterializedPayoffEvidence(
+  content: string,
+  payoffDirective: Pick<PayoffDirective, "payoffType" | "promisedPayoff">,
+): string | undefined {
+  const snippets = content.split(/[\n。！？!?]/u).map((line) => line.trim()).filter(Boolean);
+  const promiseKeywords = extractPayoffKeywords(payoffDirective.promisedPayoff);
+  const materializationPatterns = getPayoffMaterializationPatterns(payoffDirective.payoffType);
+
+  return snippets.find((snippet) => {
+    if (isNegatedSnippet(snippet)) {
+      return false;
+    }
+    const hasMaterialization = materializationPatterns.some((pattern) => pattern.test(snippet));
+    if (!hasMaterialization) {
+      return false;
+    }
+    return promiseKeywords.length === 0 || promiseKeywords.some((keyword) => snippet.includes(keyword));
+  });
+}
+
+function getPayoffMaterializationPatterns(
+  payoffType: PayoffDirective["payoffType"],
+): ReadonlyArray<RegExp> {
+  switch (payoffType) {
+    case "reveal":
+      return [/来自|源于|原来是|真正来源|真实来源|缺失三页|revealed|came from|origin|source|truth|identity/i];
+    case "resource":
+      return [/拿到|获得|夺得|到手|交给|搜出|got|gained|obtained|secured|claimed/i];
+    case "breakthrough":
+      return [/突破|晋阶|掌握|学会|压住|稳住|觉醒|broke through|mastered|awakened|stabilized/i];
+    case "relationship":
+      return [/信任|和解|结盟|坦白|承认|trust|reconcile|alliance|confessed|bond/i];
+    case "reversal":
+    default:
+      return [/反杀|逆转|调头|反转|逼退|turned the tables|reversal|countered|drove back/i];
+  }
 }
 
 function extractPayoffKeywords(text: string): string[] {
@@ -1222,6 +1323,44 @@ export function resolveDuplicateTitle(
     return { title: newTitle, issues: [] };
   }
 
+  const finalizeResolvedTitle = (
+    candidateTitle: string,
+    issues: ReadonlyArray<PostWriteViolation>,
+  ): {
+    readonly title: string;
+    readonly issues: ReadonlyArray<PostWriteViolation>;
+  } => {
+    const collapsedAnchor = detectCollapsedTitleAnchor(candidateTitle, existingTitles, language);
+    if (!collapsedAnchor) {
+      return { title: candidateTitle, issues };
+    }
+
+    const fallbackAnchor = detectCollapsedTitleAnchor(trimmed, existingTitles, language);
+    if (!fallbackAnchor) {
+      const mergedIssues = issues.some((issue) => issue.rule === "title-collapse-warning")
+        ? issues
+        : [
+            ...issues,
+            language === "en"
+              ? {
+                  rule: "title-collapse-warning",
+                  severity: "warning" as const,
+                  description: `Chapter title "${candidateTitle}" still leans on the collapsed "${collapsedAnchor}" anchor shell.`,
+                  suggestion: "Keep the strongest non-collapsed candidate instead of reusing the banned anchor.",
+                }
+              : {
+                  rule: "title-collapse-warning",
+                  severity: "warning" as const,
+                  description: `章节标题"${candidateTitle}"仍踩中已坍缩的“${collapsedAnchor}”命名锚。`,
+                  suggestion: "保留上一个未命中禁锚的强标题，不要回退到这个锚。",
+                },
+          ];
+      return { title: trimmed, issues: mergedIssues };
+    }
+
+    return { title: candidateTitle, issues };
+  };
+
   const duplicateIssues = detectDuplicateTitle(trimmed, existingTitles);
   if (duplicateIssues.length > 0) {
     const regenerated = regenerateDuplicateTitle(trimmed, existingTitles, language, options?.content);
@@ -1236,7 +1375,7 @@ export function resolveDuplicateTitle(
       })
       && detectDuplicateTitle(regenerated, existingTitles).length === 0
     ) {
-      return { title: regenerated, issues: duplicateIssues };
+      return finalizeResolvedTitle(regenerated, duplicateIssues);
     }
 
     let counter = 2;
@@ -1245,17 +1384,17 @@ export function resolveDuplicateTitle(
         ? `${trimmed} (${counter})`
         : `${trimmed}（${counter}）`;
       if (detectDuplicateTitle(candidate, existingTitles).length === 0) {
-        return { title: candidate, issues: duplicateIssues };
+        return finalizeResolvedTitle(candidate, duplicateIssues);
       }
       counter++;
     }
 
-    return { title: trimmed, issues: duplicateIssues };
+    return finalizeResolvedTitle(trimmed, duplicateIssues);
   }
 
   const collapseIssues = detectTitleCollapse(trimmed, existingTitles, language);
   if (collapseIssues.length === 0) {
-    return { title: trimmed, issues: [] };
+    return finalizeResolvedTitle(trimmed, []);
   }
 
   const regenerated = regenerateCollapsedTitle(trimmed, existingTitles, language, options?.content);
@@ -1266,15 +1405,15 @@ export function resolveDuplicateTitle(
       currentTitle: trimmed,
       replacementTitle: regenerated,
       chapterGoal: options?.chapterGoal,
-      recentTitles: existingTitles,
-    })
-    && detectDuplicateTitle(regenerated, existingTitles).length === 0
-    && detectTitleCollapse(regenerated, existingTitles, language).length === 0
+        recentTitles: existingTitles,
+      })
+      && detectDuplicateTitle(regenerated, existingTitles).length === 0
+      && detectTitleCollapse(regenerated, existingTitles, language).length === 0
   ) {
-    return { title: regenerated, issues: collapseIssues };
+    return finalizeResolvedTitle(regenerated, collapseIssues);
   }
 
-  return { title: trimmed, issues: collapseIssues };
+  return finalizeResolvedTitle(trimmed, collapseIssues);
 }
 
 export function evaluateChapterGoalDiscipline(
@@ -1283,7 +1422,12 @@ export function evaluateChapterGoalDiscipline(
 ): PostWriteDisciplineChecks {
   const endingRegion = extractEndingRegion(content);
   const endingEvidence = findRegexEvidence(endingRegion, ENDING_HOOK_PATTERNS[chapterGoal.endingHookType]);
-  const payoffMatch = findPayoffEvidence(content, chapterGoal.payoffToDeliver);
+  const payoffDirective = chapterGoal.payoffDirective ?? {
+    promisedPayoff: chapterGoal.payoffToDeliver,
+    payoffType: inferPayoffTypeFromPromise(chapterGoal.payoffToDeliver),
+    mandatoryByFinalAct: false,
+  };
+  const payoffMatch = findPayoffEvidence(content, chapterGoal.payoffToDeliver, payoffDirective);
 
   return {
     endingHookCheck: {
@@ -1292,9 +1436,10 @@ export function evaluateChapterGoalDiscipline(
       ...(endingEvidence ? { evidence: endingEvidence } : {}),
     },
     payoffCheck: {
-      expectedPayoff: chapterGoal.payoffToDeliver,
+      expectedPayoff: payoffDirective.promisedPayoff,
       matched: payoffMatch.matchLevel !== "none",
       matchLevel: payoffMatch.matchLevel,
+      payoffType: payoffDirective.payoffType,
       ...(payoffMatch.evidence ? { evidence: payoffMatch.evidence } : {}),
     },
   };
@@ -1321,14 +1466,14 @@ export function toDisciplineWarnings(
 
   if (!checks.payoffCheck.matched) {
     warnings.push({
-      rule: "payoff-check",
+      rule: checks.payoffCheck.payoffType ? "payoff-materialization-failure" : "payoff-check",
       severity: "warning",
       description: language === "en"
-        ? `The chapter does not clearly deliver the planned payoff: ${checks.payoffCheck.expectedPayoff}.`
-        : `本章没有明显兑现预期即时回报：${checks.payoffCheck.expectedPayoff}。`,
+        ? `The chapter does not truly materialize the promised payoff: ${checks.payoffCheck.expectedPayoff}.`
+        : `本章没有真正兑现 promised payoff：${checks.payoffCheck.expectedPayoff}。`,
       suggestion: language === "en"
-        ? "Add one visible payoff beat, clue, win, or resource before the chapter closes."
-        : "在本章中补一个读者能明确感知到的回报节点。",
+        ? "Insert one concrete payoff scene in the final act so the promised object produces new information, a new resource, a breakthrough, a relationship shift, or a reversal."
+        : "在 Act3 插入一个具体 payoff scene，让承诺对象真正产出新信息、新资源、新突破、关系变化或反转结果。",
     });
   }
 
@@ -1380,6 +1525,173 @@ export function toCadenceDirectiveWarnings(
     suggestion: language === "en"
       ? "Rewrite the scene skeleton toward escalation, confrontation, or discovery under threat while keeping the chapter facts."
       : "优先重写场景骨架，把本章拉回升压、对抗或带威胁的信息发现，但保留既有事实。",
+  }];
+}
+
+export function evaluateMoodCadenceCompliance(
+  content: string,
+  chapterIntent: string | undefined,
+): MoodCadenceCheck | undefined {
+  const moodDirective = extractMoodDirective(chapterIntent);
+  if (!moodDirective) {
+    return undefined;
+  }
+
+  const warmthEvidence = findRegexEvidence(content, MOOD_CALM_PATTERNS);
+  const combatHits = countPatternHits(content, MOOD_COMBAT_PATTERNS);
+  const calmHits = countPatternHits(content, MOOD_CALM_PATTERNS);
+  const coverageRatio = measureMoodCoverage(content, MOOD_CALM_PATTERNS);
+
+  const dominantMode = combatHits >= Math.max(3, calmHits + 2) ? "combat-heavy" : "mixed";
+  const matched = Boolean(warmthEvidence)
+    && coverageRatio >= moodDirective.moodCoverageMin
+    && dominantMode !== moodDirective.forbidDominantMode;
+
+  return {
+    expectedMode: moodDirective.targetMode,
+    matched,
+    ...(warmthEvidence ? { evidence: warmthEvidence } : {}),
+    coverageRatio,
+    dominantMode,
+  };
+}
+
+export function toMoodCadenceWarnings(
+  check: MoodCadenceCheck | undefined,
+  language: "zh" | "en",
+): ReadonlyArray<PostWriteViolation> {
+  if (!check || check.matched) {
+    return [];
+  }
+
+  return [{
+    rule: "mood-cadence-violation",
+    severity: "warning",
+    description: language === "en"
+      ? `The chapter ignores the required mood downshift and still reads as ${check.dominantMode ?? "combat-heavy"} with only ${Math.round((check.coverageRatio ?? 0) * 100)}% mood coverage.`
+      : `本章没有兑现降调 mood directive，整体仍然更像${check.dominantMode === "combat-heavy" ? "高压对抗/战斗主导" : "高压章"}，降调内容占比仅约 ${Math.round((check.coverageRatio ?? 0) * 100)}%。`,
+    suggestion: language === "en"
+      ? "Only rewrite the local scene layer, keep chapter facts intact, expand or insert breathing material so it covers roughly 25%-35% of the chapter, and reduce combat density so combat-heavy action no longer dominates."
+      : "只重写局部场景层，保留章节事实；把扎营、疗伤、路途交谈、轻松互动或人物关系推进内容扩到约 25%-35% 篇幅，并降低战斗密度，避免让高压对抗继续主导整章。",
+  }];
+}
+
+export function evaluateHookEmergenceCompliance(
+  content: string,
+  chapterIntent: string | undefined,
+): HookEmergenceCheck | undefined {
+  const directive = extractHookEmergenceDirective(chapterIntent);
+  if (!directive?.mustMaterializeHookNow || !directive.targetHookId) {
+    return undefined;
+  }
+
+  const globalResolveEvidence = findRegexEvidence(content, HOOK_EMERGENCE_RESOLVE_PATTERNS);
+  if (globalResolveEvidence) {
+    return {
+      matched: true,
+      targetHookId: directive.targetHookId,
+      targetHookState: directive.targetHookState,
+      movement: "resolve",
+      evidence: globalResolveEvidence,
+    };
+  }
+
+  const focusKeywords = buildHookEmergenceFocusKeywords(directive);
+  const lines = content
+    .split(/[\n。！？!?]/u)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  let sawFocusOnlyMention = false;
+  for (const line of lines) {
+    if (!focusKeywords.some((keyword) => keyword && line.includes(keyword))) {
+      continue;
+    }
+
+    sawFocusOnlyMention = true;
+    if (matchesAny(line, HOOK_EMERGENCE_RESOLVE_PATTERNS)) {
+      return {
+        matched: true,
+        targetHookId: directive.targetHookId,
+        targetHookState: directive.targetHookState,
+        movement: "resolve",
+        evidence: line,
+      };
+    }
+    if (matchesAny(line, HOOK_EMERGENCE_ADVANCE_PATTERNS) && !matchesAny(line, HOOK_EMERGENCE_STALL_PATTERNS)) {
+      return {
+        matched: true,
+        targetHookId: directive.targetHookId,
+        targetHookState: directive.targetHookState,
+        movement: "advance",
+        evidence: line,
+      };
+    }
+    if (matchesAny(line, HOOK_EMERGENCE_PARTIAL_RESOLVE_PATTERNS)) {
+      return {
+        matched: true,
+        targetHookId: directive.targetHookId,
+        targetHookState: directive.targetHookState,
+        movement: "partial-resolve",
+        evidence: line,
+      };
+    }
+  }
+
+  if (focusKeywords.some((keyword) => keyword && content.includes(keyword))) {
+    const resolveEvidence = findRegexEvidence(content, HOOK_EMERGENCE_RESOLVE_PATTERNS);
+    if (resolveEvidence) {
+      return {
+        matched: true,
+        targetHookId: directive.targetHookId,
+        targetHookState: directive.targetHookState,
+        movement: "resolve",
+        evidence: resolveEvidence,
+      };
+    }
+    const advanceEvidence = findRegexEvidence(content, HOOK_EMERGENCE_ADVANCE_PATTERNS);
+    if (advanceEvidence && !matchesAny(advanceEvidence, HOOK_EMERGENCE_STALL_PATTERNS)) {
+      return {
+        matched: true,
+        targetHookId: directive.targetHookId,
+        targetHookState: directive.targetHookState,
+        movement: matchesAny(advanceEvidence, HOOK_EMERGENCE_PARTIAL_RESOLVE_PATTERNS)
+          ? "partial-resolve"
+          : "advance",
+        evidence: advanceEvidence,
+      };
+    }
+  }
+
+  const fallbackSnippet = sawFocusOnlyMention
+    ? findFirstFocusSnippet(content, focusKeywords)
+    : undefined;
+
+  return {
+    matched: false,
+    targetHookId: directive.targetHookId,
+    targetHookState: directive.targetHookState,
+    ...(fallbackSnippet ? { evidence: fallbackSnippet } : {}),
+  };
+}
+
+export function toHookEmergenceWarnings(
+  check: HookEmergenceCheck | undefined,
+  language: "zh" | "en",
+): ReadonlyArray<PostWriteViolation> {
+  if (!check || check.matched) {
+    return [];
+  }
+
+  return [{
+    rule: "hook-emergence-failure",
+    severity: "warning",
+    description: language === "en"
+      ? `Overdue hook ${check.targetHookId ?? "unknown"} still has no real state change this chapter.`
+      : `逾期 hook ${check.targetHookId ?? "unknown"} 本章仍然没有发生真正的状态变化。`,
+    suggestion: language === "en"
+      ? "Advance it with a new clue, method, state shift, partial payoff, or full resolution instead of repeating the same danger."
+      : "不要只重复旧危险；请给它一个新线索、新方法、新状态变化、部分兑现或直接回收。",
   }];
 }
 
@@ -1476,10 +1788,141 @@ function findPartialEscapeProgressEvidence(
   };
 }
 
+function inferPayoffTypeFromPromise(payoff: string): PayoffDirective["payoffType"] {
+  if (/真相|来历|来源|身份|揭开|揭示|发现|查明|线索|秘密|origin|source|truth|reveal|identity|clue/i.test(payoff)) {
+    return "reveal";
+  }
+  if (/获得|拿到|夺得|资源|地图|腰牌|卷轴|残卷|药材|灵石|resource|obtain|gain|map|token|scroll/i.test(payoff)) {
+    return "resource";
+  }
+  if (/突破|晋阶|掌握|觉醒|学会|压住|稳住|新能力|breakthrough|master|awaken|stabilize|new ability/i.test(payoff)) {
+    return "breakthrough";
+  }
+  if (/信任|和解|关系|告白|结盟|relationship|trust|bond|reconcile|alliance/i.test(payoff)) {
+    return "relationship";
+  }
+  return "reversal";
+}
+
 function extractSceneDirective(chapterIntent: string | undefined): string | undefined {
   if (!chapterIntent) return undefined;
   const match = chapterIntent.match(/## Structured Directives[\s\S]*?- scene:\s*(.+)/i);
   return match?.[1]?.trim();
+}
+
+function extractMoodDirective(chapterIntent: string | undefined): MoodDirective | undefined {
+  if (!chapterIntent) return undefined;
+  const section = chapterIntent.match(/## Structured Directives[\s\S]*?- mood:\s*[\r\n]+((?:\s+- .+\r?\n?)+)/i)?.[1];
+  if (!section) {
+    return undefined;
+  }
+
+  const targetMode = section.match(/targetMode:\s*(calm|breath|warmth|humor)/i)?.[1]?.toLowerCase();
+  const quotaRaw = section.match(/requiredSceneQuota:\s*(\d+)/i)?.[1];
+  const coverageRaw = section.match(/moodCoverageMin:\s*(0(?:\.\d+)?|1(?:\.0+)?)/i)?.[1];
+  const forbidDominantMode = section.match(/forbidDominantMode:\s*(combat-heavy)/i)?.[1];
+  const note = section.match(/note:\s*(.+)/i)?.[1]?.trim();
+  if (!targetMode || !forbidDominantMode) {
+    return undefined;
+  }
+
+  return {
+    targetMode: targetMode as MoodDirective["targetMode"],
+    requiredSceneQuota: quotaRaw ? Number.parseInt(quotaRaw, 10) : 1,
+    moodCoverageMin: coverageRaw ? Number.parseFloat(coverageRaw) : 0.3,
+    forbidDominantMode: forbidDominantMode as MoodDirective["forbidDominantMode"],
+    ...(note ? { note } : {}),
+  };
+}
+
+function extractHookEmergenceDirective(chapterIntent: string | undefined): {
+  readonly mustMaterializeHookNow: boolean;
+  readonly targetHookId?: string;
+  readonly targetHookState?: string;
+  readonly targetHookExpectedPayoff?: string;
+  readonly targetHookNotes?: string;
+} | undefined {
+  if (!chapterIntent) {
+    return undefined;
+  }
+  const section = chapterIntent.match(/## Hook Agenda([\s\S]*?)(?:\n## |\n# |$)/i)?.[1];
+  if (!section || !/mustMaterializeHookNow:\s*true/i.test(section)) {
+    return undefined;
+  }
+
+  const capture = (label: string): string | undefined =>
+    section.match(new RegExp(`${label}:\\s*(.+)`, "i"))?.[1]?.trim();
+
+  return {
+    mustMaterializeHookNow: true,
+    ...(capture("targetHookId") ? { targetHookId: capture("targetHookId") } : {}),
+    ...(capture("targetHookState") ? { targetHookState: capture("targetHookState") } : {}),
+    ...(capture("targetHookExpectedPayoff") ? { targetHookExpectedPayoff: capture("targetHookExpectedPayoff") } : {}),
+    ...(capture("targetHookNotes") ? { targetHookNotes: capture("targetHookNotes") } : {}),
+  };
+}
+
+function buildHookEmergenceFocusKeywords(directive: NonNullable<ReturnType<typeof extractHookEmergenceDirective>>): string[] {
+  const rawCandidates = [
+    directive.targetHookId,
+    directive.targetHookExpectedPayoff,
+    directive.targetHookNotes,
+  ].filter((value): value is string => Boolean(value && value.trim()));
+
+  const candidates = rawCandidates.flatMap((value) => {
+    const splitTokens = value
+      .split(/[\s,，、:：()（）\[\]【】"“”'‘’\-]+/u)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    const chineseChunks = (value.match(/[\u4e00-\u9fff]{2,}/gu) ?? []).flatMap((chunk) => {
+      const pieces = new Set<string>();
+      for (let length = 2; length <= Math.min(4, chunk.length); length += 1) {
+        for (let index = 0; index <= chunk.length - length; index += 1) {
+          pieces.add(chunk.slice(index, index + length));
+        }
+      }
+      return [...pieces];
+    });
+    const englishWords = value.match(/[A-Za-z][A-Za-z0-9-]{2,}/g) ?? [];
+    return [...splitTokens, ...chineseChunks, ...englishWords];
+  })
+    .map((value) => value.trim())
+    .filter((value) => value.length >= 2)
+    .filter((value) => !/^(hook|target|overdue|must|true|none|chapter|this|advance|resolve)$/i.test(value));
+
+  return [...new Set(candidates)].slice(0, 16);
+}
+
+function findFirstFocusSnippet(content: string, keywords: ReadonlyArray<string>): string | undefined {
+  if (keywords.length === 0) {
+    return undefined;
+  }
+  const snippets = content.split(/[\n。！？!?]/u).map((line) => line.trim()).filter(Boolean);
+  return snippets.find((snippet) => keywords.some((keyword) => keyword && snippet.includes(keyword)));
+}
+
+function matchesAny(content: string, patterns: ReadonlyArray<RegExp>): boolean {
+  return patterns.some((pattern) => pattern.test(content));
+}
+
+function measureMoodCoverage(content: string, patterns: ReadonlyArray<RegExp>): number {
+  const paragraphs = extractParagraphs(content);
+  if (paragraphs.length === 0) {
+    return 0;
+  }
+
+  const totalChars = paragraphs.reduce((sum, paragraph) => sum + paragraph.length, 0);
+  if (totalChars === 0) {
+    return 0;
+  }
+
+  const moodChars = paragraphs.reduce((sum, paragraph) => (
+    patterns.some((pattern) => pattern.test(paragraph))
+      ? sum + paragraph.length
+      : sum
+  ), 0);
+
+  return moodChars / totalChars;
 }
 
 function parseForcedCadenceTypes(
@@ -1795,6 +2238,28 @@ function detectTitleCollapse(
   existingTitles: ReadonlyArray<string>,
   language: "zh" | "en",
 ): ReadonlyArray<PostWriteViolation> {
+  const collapsedAnchor = detectCollapsedTitleAnchor(newTitle, existingTitles, language);
+  if (collapsedAnchor) {
+    const anchorPressure = findCollapsedTitleAnchors(existingTitles, language)
+      .find((entry) => entry.anchor === collapsedAnchor);
+
+    return [
+      language === "en"
+        ? {
+            rule: "title-collapse-warning",
+            severity: "warning",
+            description: `Chapter title "${newTitle}" keeps leaning on the recent "${collapsedAnchor}" anchor shell${anchorPressure ? ` (${anchorPressure.count} in a row)` : ""}.`,
+            suggestion: "Rename the chapter around a new threat, artifact, enemy, action, cost, or revelation anchor.",
+          }
+        : {
+            rule: "title-collapse-warning",
+            severity: "warning",
+            description: `章节标题"${newTitle}"仍在沿用近期围绕“${collapsedAnchor}”的命名锚${anchorPressure ? `（已连续 ${anchorPressure.count} 章）` : ""}。`,
+            suggestion: "换一个新的 threat、artifact、enemy、action、cost 或 revelation 锚来命名。",
+          },
+    ];
+  }
+
   const recentTitles = existingTitles
     .map((title) => title.trim())
     .filter(Boolean)
@@ -1823,16 +2288,16 @@ function detectTitleCollapse(
   return [
     language === "en"
       ? {
-          rule: "title-collapse",
+          rule: "title-collapse-warning",
           severity: "warning",
           description: `Chapter title "${newTitle}" keeps leaning on the recent "${titlePressure.repeatedToken}" title shell.`,
-          suggestion: "Rename the chapter around a new image, action, consequence, or character focus.",
+          suggestion: "Rename the chapter around a new threat, artifact, enemy, action, cost, or revelation anchor.",
         }
       : {
-          rule: "title-collapse",
+          rule: "title-collapse-warning",
           severity: "warning",
           description: `章节标题"${newTitle}"仍在沿用近期围绕“${titlePressure.repeatedToken}”的命名壳。`,
-          suggestion: "换一个新的意象、动作、后果或人物焦点来命名。",
+          suggestion: "换一个新的 threat、artifact、enemy、action、cost 或 revelation 锚来命名。",
         },
   ];
 }
@@ -1906,6 +2371,24 @@ function extractChineseTitleQualifier(
   content: string,
 ): string | undefined {
   const blocked = new Set(extractChineseTitleTerms([baseTitle, ...existingTitles].join("")));
+  const strongPatterns = [
+    /([\u4e00-\u9fff]{2,8}人的第二张脸)/u,
+    /([\u4e00-\u9fff]{2,8}裂开的代价)/u,
+    /([\u4e00-\u9fff]{2,8}开始失控)/u,
+    /([\u4e00-\u9fff]{2,8}背后的代价)/u,
+    /([\u4e00-\u9fff]{2,8}后的活祭者)/u,
+    /([\u4e00-\u9fff]{2,8}逼近之时)/u,
+  ];
+
+  for (const pattern of strongPatterns) {
+    const candidate = content.match(pattern)?.[1]?.trim();
+    if (!candidate) continue;
+    if (CHINESE_TITLE_STOP_WORDS.has(candidate)) continue;
+    if (blocked.has(candidate)) continue;
+    if (hasInvalidTitleIntegrity(candidate, "zh")) continue;
+    return candidate;
+  }
+
   const segments = content.match(/[\u4e00-\u9fff]+/g) ?? [];
 
   for (const segment of segments) {

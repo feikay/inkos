@@ -2462,6 +2462,80 @@ describe("PipelineRunner", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("throws when a post-freeze recovery path mutates FINAL_TITLE into a collapsed anchor title", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({
+      inputGovernanceMode: "legacy",
+    });
+    const bookDir = state.bookDir(bookId);
+    const storyDir = join(bookDir, "story");
+    const chaptersDir = join(bookDir, "chapters");
+    const now = "2026-04-21T00:00:00.000Z";
+
+    await Promise.all([
+      writeFile(join(storyDir, "current_state.md"), "stable state", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "stable hooks", "utf-8"),
+      writeFile(join(storyDir, "particle_ledger.md"), "stable ledger", "utf-8"),
+      writeFile(join(chaptersDir, "0001_暗河尽头的秘密.md"), "# 第1章 暗河尽头的秘密\n\n旧章节。", "utf-8"),
+      writeFile(join(chaptersDir, "0002_暗河尽头前的死局_探索并未.md"), "# 第2章 暗河尽头前的死局：探索并未\n\n旧章节。", "utf-8"),
+      writeFile(join(chaptersDir, "0003_暗河尽头前的死局_楚夜云岚击败.md"), "# 第3章 暗河尽头前的死局：楚夜云岚击败\n\n旧章节。", "utf-8"),
+      writeFile(join(chaptersDir, "0004_暗河尽头前的死局_楚夜云岚站暗.md"), "# 第4章 暗河尽头前的死局：楚夜云岚站暗\n\n旧章节。", "utf-8"),
+    ]);
+    await state.saveChapterIndex(bookId, [
+      { number: 1, title: "暗河尽头的秘密", status: "ready-for-review", wordCount: 12, createdAt: now, updatedAt: now, auditIssues: [], lengthWarnings: [] },
+      { number: 2, title: "暗河尽头前的死局：探索并未", status: "ready-for-review", wordCount: 12, createdAt: now, updatedAt: now, auditIssues: [], lengthWarnings: [] },
+      { number: 3, title: "暗河尽头前的死局：楚夜云岚击败", status: "ready-for-review", wordCount: 12, createdAt: now, updatedAt: now, auditIssues: [], lengthWarnings: [] },
+      { number: 4, title: "暗河尽头前的死局：楚夜云岚站暗", status: "ready-for-review", wordCount: 12, createdAt: now, updatedAt: now, auditIssues: [], lengthWarnings: [] },
+    ]);
+
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
+      createWriterOutput({
+        chapterNumber: 5,
+        title: "未知强敌威胁逼近之时",
+        content: "Healthy chapter body with a clear threat beat.",
+        wordCount: "Healthy chapter body with a clear threat beat.".length,
+      }),
+    );
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(
+      createAuditResult({
+        passed: true,
+        issues: [],
+        summary: "clean",
+      }),
+    );
+    vi.spyOn(StateValidatorAgent.prototype, "validate")
+      .mockResolvedValueOnce({
+        passed: false,
+        warnings: [{
+          category: "unsupported_change",
+          description: "state retry needed",
+        }],
+      })
+      .mockResolvedValueOnce({
+        passed: true,
+        warnings: [],
+      });
+    vi.spyOn(
+      WriterAgent.prototype as unknown as {
+        settleChapterState: (input: Record<string, unknown>) => Promise<WriteChapterOutput>;
+      },
+      "settleChapterState",
+    ).mockResolvedValue(
+      createWriterOutput({
+        chapterNumber: 5,
+        title: "暗河尽头的古老祭坛",
+        content: "Healthy chapter body with a clear threat beat.",
+        wordCount: "Healthy chapter body with a clear threat beat.".length,
+        updatedState: "fixed state",
+        updatedHooks: "fixed hooks",
+        updatedLedger: "fixed ledger",
+      }),
+    );
+
+    await expect(runner.writeNextChapter(bookId)).rejects.toThrow(/FINAL_TITLE/);
+
+    await rm(root, { recursive: true, force: true });
+  });
+
   it("blocks writing a new chapter when the latest persisted chapter is state-degraded", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture({
       inputGovernanceMode: "legacy",

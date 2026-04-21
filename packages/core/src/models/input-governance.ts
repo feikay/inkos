@@ -67,17 +67,49 @@ export const EndingHookTypeSchema = z.enum([
 
 export type EndingHookType = z.infer<typeof EndingHookTypeSchema>;
 
+export const PayoffTypeSchema = z.enum([
+  "reveal",
+  "resource",
+  "breakthrough",
+  "relationship",
+  "reversal",
+]);
+
+export type PayoffType = z.infer<typeof PayoffTypeSchema>;
+
+export const PayoffDirectiveSchema = z.object({
+  promisedPayoff: z.string().min(1),
+  payoffType: PayoffTypeSchema,
+  mandatoryByFinalAct: z.boolean().default(true),
+});
+
+export type PayoffDirective = z.infer<typeof PayoffDirectiveSchema>;
+
 export const ChapterGoalSchema = z.object({
   mainConflict: z.string().min(1),
   protagonistGoal: z.string().min(1),
   activeCharacters: z.array(z.string().min(1)).max(4).default([]),
   foreshadowToTouch: z.array(z.string().min(1)).max(2).default([]),
   payoffToDeliver: z.string().min(1),
+  payoffDirective: PayoffDirectiveSchema.optional(),
   endingHookType: EndingHookTypeSchema,
   nextChapterPull: z.string().min(1),
 });
 
 export type ChapterGoal = z.infer<typeof ChapterGoalSchema>;
+
+export const MoodDirectiveTargetModeSchema = z.enum(["calm", "breath", "warmth", "humor"]);
+export type MoodDirectiveTargetMode = z.infer<typeof MoodDirectiveTargetModeSchema>;
+
+export const MoodDirectiveSchema = z.object({
+  targetMode: MoodDirectiveTargetModeSchema,
+  requiredSceneQuota: z.number().int().min(1).default(1),
+  moodCoverageMin: z.number().min(0.1).max(0.8).default(0.3),
+  forbidDominantMode: z.literal("combat-heavy").default("combat-heavy"),
+  note: z.string().min(1).optional(),
+});
+
+export type MoodDirective = z.infer<typeof MoodDirectiveSchema>;
 
 export const ChapterIntentSchema = z.object({
   chapter: z.number().int().min(1),
@@ -85,7 +117,7 @@ export const ChapterIntentSchema = z.object({
   outlineNode: z.string().optional(),
   sceneDirective: z.string().min(1).optional(),
   arcDirective: z.string().min(1).optional(),
-  moodDirective: z.string().min(1).optional(),
+  moodDirective: MoodDirectiveSchema.optional(),
   titleDirective: z.string().min(1).optional(),
   mustKeep: z.array(z.string()).default([]),
   mustAvoid: z.array(z.string()).default([]),

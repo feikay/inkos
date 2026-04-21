@@ -3,7 +3,13 @@ import { join } from "node:path";
 import { BaseAgent } from "./base.js";
 import type { BookConfig } from "../models/book.js";
 import { parseBookRules } from "../models/book-rules.js";
-import { ChapterIntentSchema, type ChapterConflict, type ChapterGoal, type ChapterIntent } from "../models/input-governance.js";
+import {
+  ChapterIntentSchema,
+  type ChapterConflict,
+  type ChapterGoal,
+  type ChapterIntent,
+  type MoodDirective,
+} from "../models/input-governance.js";
 import type { StoredHook } from "../state/memory-db.js";
 import {
   parseChapterSummariesMarkdown,
@@ -19,6 +25,7 @@ import {
   summarizeGenreProfile,
   summarizePowerSystem,
 } from "../utils/webnovel-inputs.js";
+import { describeHookLifecycle, resolveHookPayoffTiming } from "../utils/hook-lifecycle.js";
 
 export interface PlanChapterInput {
   readonly book: BookConfig;
@@ -54,6 +61,21 @@ interface PlannerHookThrottle {
   readonly shouldThrottle: boolean;
   readonly recentOpenBias: boolean;
   readonly pressuredHookIds: ReadonlyArray<string>;
+}
+
+interface HookPressureStateEntry {
+  readonly hookId: string;
+  readonly state: "normal" | "due" | "overdue" | "must-resolve-now";
+  readonly timing: string;
+  readonly type: string;
+  readonly expectedPayoff: string;
+  readonly notes: string;
+}
+
+interface HookEmergenceDirective {
+  readonly pressureStates: ReadonlyArray<HookPressureStateEntry>;
+  readonly mustMaterializeHookNow: boolean;
+  readonly targetHook?: HookPressureStateEntry;
 }
 
 export class PlannerAgent extends BaseAgent {
@@ -141,11 +163,11 @@ export class PlannerAgent extends BaseAgent {
       input.chapterNumber,
     );
     const parsedRules = parseBookRules(bookRulesRaw);
-    const mustKeep = this.unique([
+    const mustKeepBase = this.unique([
       ...this.collectMustKeep(currentState, storyBible),
       ...powerSystem.mustKeep,
     ]).slice(0, 6);
-    const mustAvoid = this.unique([
+    const mustAvoidBase = this.unique([
       ...this.collectMustAvoid(currentFocus, parsedRules.rules.prohibitions),
       ...genreProfile.mustAvoid,
       ...powerSystem.mustAvoid,
@@ -167,7 +189,7 @@ export class PlannerAgent extends BaseAgent {
       chapterNumber: input.chapterNumber,
       goal,
       outlineNode: planningAnchor,
-      mustKeep,
+      mustKeep: mustKeepBase,
     });
     const activeHookCount = memorySelection.activeHooks.filter(
       (hook) => hook.status !== "resolved" && hook.status !== "deferred",
@@ -184,6 +206,19 @@ export class PlannerAgent extends BaseAgent {
       chapterNumber: input.chapterNumber,
       hookAgenda,
     });
+    const hookEmergence = this.buildHookEmergenceDirective({
+      hooks: memorySelection.activeHooks,
+      chapterNumber: input.chapterNumber,
+      targetChapters: input.book.targetChapters,
+    });
+    const mustKeep = this.unique([
+      ...mustKeepBase,
+      ...this.buildHookEmergenceMustKeep(hookEmergence, language),
+    ]).slice(0, 6);
+    const mustAvoid = this.unique([
+      ...mustAvoidBase,
+      ...this.buildHookEmergenceMustAvoid(hookEmergence, language),
+    ]).slice(0, 8);
     const recentSummaries = parseChapterSummariesMarkdown(chapterSummaries)
       .filter((summary) => summary.chapter < input.chapterNumber)
       .sort((left, right) => left.chapter - right.chapter)
@@ -250,6 +285,7 @@ export class PlannerAgent extends BaseAgent {
       renderHookSnapshot(memorySelection.hooks, input.book.language ?? "zh"),
       renderSummarySnapshot(memorySelection.summaries, input.book.language ?? "zh"),
       activeHookCount,
+      hookEmergence,
     );
     await writeFile(runtimePath, intentMarkdown, "utf-8");
 
@@ -568,15 +604,38 @@ export class PlannerAgent extends BaseAgent {
   private buildMoodDirective(
     language: string | undefined,
     cadence: ReturnType<typeof analyzeChapterCadence>,
-  ): string | undefined {
-    if (cadence.moodPressure?.pressure !== "high") {
+  ): MoodDirective | undefined {
+    if (!this.shouldForceMoodDownshift(cadence)) {
       return undefined;
     }
-    const moods = cadence.moodPressure.recentMoods;
+    const moods = cadence.moodPressure?.recentMoods ?? [];
 
-    return this.isChineseLanguage(language)
-      ? `最近${moods.length}章情绪持续高压（${moods.slice(0, 3).join("、")}），本章必须降调——安排日常/喘息/温情/幽默场景，让读者呼吸。`
-      : `The last ${moods.length} chapters have been relentlessly tense (${moods.slice(0, 3).join(", ")}). This chapter must downshift — write a quieter scene with warmth, humor, or breathing room.`;
+    return {
+      targetMode: "breath",
+      requiredSceneQuota: 1,
+      moodCoverageMin: 0.3,
+      forbidDominantMode: "combat-heavy",
+      note: this.isChineseLanguage(language)
+        ? moods.length > 0
+          ? `最近${moods.length}章情绪持续高压（${moods.slice(0, 3).join("、")}），本章必须降调——至少安排 1 段日常/喘息/温情/幽默场景，且相关内容至少覆盖正文约 30%。`
+          : "最近连续数章都在高压对抗，本章必须降调——至少安排 1 段日常/喘息/温情/幽默场景，且相关内容至少覆盖正文约 30%。"
+        : moods.length > 0
+          ? `The last ${moods.length} chapters have stayed relentlessly tense (${moods.slice(0, 3).join(", ")}). This chapter must downshift, include at least one breathing / warm / humorous scene, and keep that mode over roughly 30% of the chapter.`
+          : "Recent chapters have stayed confrontation-heavy. This chapter must downshift, include at least one breathing / warm / humorous scene, and keep that mode over roughly 30% of the chapter.",
+    };
+  }
+
+  private shouldForceMoodDownshift(
+    cadence: ReturnType<typeof analyzeChapterCadence>,
+  ): boolean {
+    if (cadence.moodPressure?.pressure === "high") {
+      return true;
+    }
+
+    const repeatedType = cadence.scenePressure?.repeatedType?.toLowerCase() ?? "";
+    return cadence.scenePressure?.pressure === "high"
+      && /(confront|combat|battle|action|对抗|冲突|战斗|厮杀)/i.test(repeatedType)
+      && (cadence.scenePressure?.streak ?? 0) >= 3;
   }
 
   private buildTitleDirective(
@@ -1049,6 +1108,7 @@ export class PlannerAgent extends BaseAgent {
     pendingHooks: string,
     chapterSummaries: string,
     activeHookCount: number,
+    hookEmergence: HookEmergenceDirective,
   ): string {
     const conflictLines = intent.conflicts.length > 0
       ? intent.conflicts.map((conflict) => `- ${conflict.type}: ${conflict.resolution}`).join("\n")
@@ -1068,7 +1128,16 @@ export class PlannerAgent extends BaseAgent {
     const directives = [
       intent.arcDirective ? `- arc: ${intent.arcDirective}` : undefined,
       intent.sceneDirective ? `- scene: ${intent.sceneDirective}` : undefined,
-      intent.moodDirective ? `- mood: ${intent.moodDirective}` : undefined,
+      intent.moodDirective
+        ? [
+          "- mood:",
+          `  - targetMode: ${intent.moodDirective.targetMode}`,
+          `  - requiredSceneQuota: ${intent.moodDirective.requiredSceneQuota}`,
+          `  - moodCoverageMin: ${intent.moodDirective.moodCoverageMin}`,
+          `  - forbidDominantMode: ${intent.moodDirective.forbidDominantMode}`,
+          intent.moodDirective.note ? `  - note: ${intent.moodDirective.note}` : undefined,
+        ].filter(Boolean).join("\n")
+        : undefined,
       intent.titleDirective ? `- title: ${intent.titleDirective}` : undefined,
     ].filter(Boolean).join("\n") || "- none";
     const chapterGoal = intent.chapterGoal
@@ -1078,6 +1147,13 @@ export class PlannerAgent extends BaseAgent {
         `- activeCharacters: ${intent.chapterGoal.activeCharacters.join(", ") || "none"}`,
         `- foreshadowToTouch: ${intent.chapterGoal.foreshadowToTouch.join(", ") || "none"}`,
         `- payoffToDeliver: ${intent.chapterGoal.payoffToDeliver}`,
+        intent.chapterGoal.payoffDirective
+          ? [
+            `- payoffDirective.promisedPayoff: ${intent.chapterGoal.payoffDirective.promisedPayoff}`,
+            `- payoffDirective.payoffType: ${intent.chapterGoal.payoffDirective.payoffType}`,
+            `- payoffDirective.mandatoryByFinalAct: ${intent.chapterGoal.payoffDirective.mandatoryByFinalAct}`,
+          ].join("\n")
+          : undefined,
         `- endingHookType: ${intent.chapterGoal.endingHookType}`,
         `- nextChapterPull: ${intent.chapterGoal.nextChapterPull}`,
       ].join("\n")
@@ -1103,8 +1179,28 @@ export class PlannerAgent extends BaseAgent {
         ? intent.hookAgenda.avoidNewHookFamilies.map((item) => `- ${item}`).join("\n")
         : "- none",
       "",
+      "### Hook Pressure States",
+      hookEmergence.pressureStates.length > 0
+        ? hookEmergence.pressureStates
+          .map((entry) => `- ${entry.hookId}: ${entry.state} (${entry.timing})`)
+          .join("\n")
+        : "- none",
+      "",
+      "### Emergence Directive",
+      `- mustMaterializeHookNow: ${hookEmergence.mustMaterializeHookNow}`,
+      hookEmergence.targetHook ? `- targetHookId: ${hookEmergence.targetHook.hookId}` : undefined,
+      hookEmergence.targetHook ? `- targetHookState: ${hookEmergence.targetHook.state}` : undefined,
+      hookEmergence.targetHook ? `- targetHookType: ${hookEmergence.targetHook.type}` : undefined,
+      hookEmergence.targetHook ? `- targetHookExpectedPayoff: ${hookEmergence.targetHook.expectedPayoff || "none"}` : undefined,
+      hookEmergence.targetHook ? `- targetHookNotes: ${hookEmergence.targetHook.notes || "none"}` : undefined,
+      hookEmergence.targetHook
+        ? (language === "en"
+          ? "- antiStall: Mentioning the hook name or repeating old danger does not count. The hook must gain a new state change this chapter."
+          : "- antiStall: 仅仅再次提到 hook 名字、重复旧信息、或只说危险仍在，不算推进；本章必须让这个 hook 产生新状态变化。")
+        : undefined,
+      "",
       this.renderHookBudget(activeHookCount, language),
-    ].join("\n");
+    ].filter(Boolean).join("\n");
 
     return [
       "# Chapter Intent",
@@ -1147,6 +1243,112 @@ export class PlannerAgent extends BaseAgent {
 
   private unique(values: ReadonlyArray<string>): string[] {
     return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+  }
+
+  private buildHookEmergenceDirective(input: {
+    readonly hooks: ReadonlyArray<StoredHook>;
+    readonly chapterNumber: number;
+    readonly targetChapters?: number;
+  }): HookEmergenceDirective {
+    const pressureStates = input.hooks
+      .filter((hook) => !/^(resolved|closed|done|已回收|已解决)$/i.test(hook.status.trim()))
+      .map((hook) => {
+        const lifecycle = describeHookLifecycle({
+          payoffTiming: hook.payoffTiming,
+          expectedPayoff: hook.expectedPayoff,
+          notes: hook.notes,
+          startChapter: hook.startChapter,
+          lastAdvancedChapter: hook.lastAdvancedChapter,
+          status: hook.status,
+          chapterNumber: input.chapterNumber,
+          targetChapters: input.targetChapters,
+        });
+        return {
+          hookId: hook.hookId,
+          state: this.resolveHookPressureState(lifecycle),
+          timing: resolveHookPayoffTiming(hook),
+          type: hook.type,
+          expectedPayoff: hook.expectedPayoff,
+          notes: hook.notes,
+          dormancy: lifecycle.dormancy,
+        };
+      });
+
+    const target = pressureStates
+      .filter((hook) => hook.state === "must-resolve-now" || hook.state === "overdue")
+      .sort((left, right) => (
+        this.hookStateWeight(right.state) - this.hookStateWeight(left.state)
+        || right.dormancy - left.dormancy
+        || left.hookId.localeCompare(right.hookId)
+      ))[0];
+
+    return {
+      pressureStates: pressureStates.map(({ dormancy: _dormancy, ...entry }) => entry),
+      mustMaterializeHookNow: Boolean(target),
+      ...(target
+        ? {
+          targetHook: {
+            hookId: target.hookId,
+            state: target.state,
+            timing: target.timing,
+            type: target.type,
+            expectedPayoff: target.expectedPayoff,
+            notes: target.notes,
+          },
+        }
+        : {}),
+    };
+  }
+
+  private resolveHookPressureState(lifecycle: ReturnType<typeof describeHookLifecycle>): HookPressureStateEntry["state"] {
+    if (lifecycle.overdue && (lifecycle.readyToResolve || lifecycle.dormancy >= 2)) {
+      return "must-resolve-now";
+    }
+    if (lifecycle.overdue) {
+      return "overdue";
+    }
+    if (lifecycle.stale || lifecycle.readyToResolve || lifecycle.dormancy >= 4) {
+      return "due";
+    }
+    return "normal";
+  }
+
+  private hookStateWeight(state: HookPressureStateEntry["state"]): number {
+    switch (state) {
+      case "must-resolve-now":
+        return 4;
+      case "overdue":
+        return 3;
+      case "due":
+        return 2;
+      case "normal":
+      default:
+        return 1;
+    }
+  }
+
+  private buildHookEmergenceMustKeep(
+    hookEmergence: HookEmergenceDirective,
+    language: "zh" | "en",
+  ): string[] {
+    if (!hookEmergence.mustMaterializeHookNow || !hookEmergence.targetHook) {
+      return [];
+    }
+    return [language === "en"
+      ? `Hook ${hookEmergence.targetHook.hookId} must change state this chapter.`
+      : `Hook ${hookEmergence.targetHook.hookId} 本章必须发生状态变化。`];
+  }
+
+  private buildHookEmergenceMustAvoid(
+    hookEmergence: HookEmergenceDirective,
+    language: "zh" | "en",
+  ): string[] {
+    if (!hookEmergence.mustMaterializeHookNow || !hookEmergence.targetHook) {
+      return [];
+    }
+    return [language === "en"
+      ? `Do not leave ${hookEmergence.targetHook.hookId} suspended again through a mention-only beat.`
+      : `不要再用“只提一嘴”的方式继续拖延 ${hookEmergence.targetHook.hookId}。`];
   }
 
   private isChineseLanguage(language: string | undefined): boolean {

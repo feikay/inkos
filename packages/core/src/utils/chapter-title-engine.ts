@@ -21,6 +21,11 @@ export interface TitleReplacementDecisionInput {
   readonly recentTitles?: ReadonlyArray<string>;
 }
 
+export interface TitleAnchorPressure {
+  readonly anchor: string;
+  readonly count: number;
+}
+
 const ZH_STOP_WORDS = /^(先|再|还没|尚未|必须|需要|试图|开始|继续|赶在|暂时|仍在|正在|主角|他|她|他们|她们)/u;
 const ZH_PLACEHOLDER = /(current focus|todo|tbd|placeholder|none|null|待补充|未定义|状态未同步|推进主线|推进剧情)/iu;
 const ZH_TITLE_PATTERN_RULES: ReadonlyArray<{
@@ -135,6 +140,14 @@ export function hasInvalidTitleIntegrity(
     return true;
   }
 
+  if (cleaned.length <= 8 && /(并未|站暗|击败|探索并未|楚夜云岚站暗|楚夜云岚击败)$/u.test(cleaned)) {
+    return true;
+  }
+
+  if (/^[\u4e00-\u9fff]{4,8}(并未|击败|站暗|探索)$/u.test(cleaned)) {
+    return true;
+  }
+
   if (isLikelyChineseTitleFragment(cleaned)) {
     return true;
   }
@@ -148,6 +161,11 @@ export function isInvalidTitleReplacement(input: TitleReplacementDecisionInput):
   if (!replacement) return true;
   if (!current) return false;
   if (isHardBannedWeakTitle(replacement, input.language, input.chapterGoal)) {
+    return true;
+  }
+
+  const bannedAnchor = detectCollapsedTitleAnchor(replacement, input.recentTitles ?? [], input.language);
+  if (bannedAnchor) {
     return true;
   }
 
@@ -166,6 +184,7 @@ export function isInvalidTitleReplacement(input: TitleReplacementDecisionInput):
 function buildChineseTitleCandidates(input: ChapterTitleEngineInput): ReadonlyArray<ChapterTitleCandidate> {
   const recentTitles = normalizeRecentTitles(input.recentTitles);
   const seenPatterns = new Set(recentTitles.map((title) => detectTitlePattern(title, "zh")).filter(Boolean));
+  const bannedAnchors = new Set(findCollapsedTitleAnchors(recentTitles, "zh").map((entry) => entry.anchor));
   const ctx = buildZhTitleContext(input.chapterGoal, input.keyEvents);
   const styleOrder = getZhStyleOrder(input.chapterGoal?.endingHookType);
   const rules = [...ZH_TITLE_PATTERN_RULES].sort((left, right) =>
@@ -179,6 +198,7 @@ function buildChineseTitleCandidates(input: ChapterTitleEngineInput): ReadonlyAr
     const built = sanitizeCandidateTitle(rule.build(ctx), "zh");
     if (!built) continue;
     if (isWeakTitle(built, "zh", input.chapterGoal, recentTitles)) continue;
+    if (hasBannedTitleAnchor(built, bannedAnchors, "zh")) continue;
     if (seenTitles.has(built)) continue;
     candidates.push({ style: rule.style, title: built });
     seenTitles.add(built);
@@ -186,10 +206,11 @@ function buildChineseTitleCandidates(input: ChapterTitleEngineInput): ReadonlyAr
   }
 
   if (candidates.length < 3) {
-    for (const fallback of buildZhFallbackTitles(ctx)) {
+    for (const fallback of buildZhFallbackTitles(ctx, bannedAnchors)) {
       const built = sanitizeCandidateTitle(fallback, "zh");
       if (!built) continue;
       if (isWeakTitle(built, "zh", input.chapterGoal, recentTitles)) continue;
+      if (hasBannedTitleAnchor(built, bannedAnchors, "zh")) continue;
       if (seenTitles.has(built)) continue;
       candidates.push({ style: "suspense", title: built });
       seenTitles.add(built);
@@ -287,15 +308,23 @@ function buildZhActionPhrase(text: string | undefined): string | undefined {
   return undefined;
 }
 
-function buildZhFallbackTitles(ctx: ZhTitleContext): ReadonlyArray<string> {
+function buildZhFallbackTitles(
+  ctx: ZhTitleContext,
+  bannedAnchors: ReadonlySet<string>,
+): ReadonlyArray<string> {
   const object = ctx.payoffObject ?? "线索";
   const conflict = ctx.conflictFocus ?? "压制";
   const place = ctx.placeSeed ?? "暗河尽头";
-  return [
+  const pool = [
     `${place}的${object}`,
-    `暂时脱身后的${object}`,
+    `${object}背后的代价`,
     `${conflict}下的${object}`,
+    `${object}之后的反扑`,
+    `${conflict}逼近之时`,
+    `黑袍人的第二张脸`,
+    `石碑裂开的代价`,
   ];
+  return pool.filter((title) => !hasBannedTitleAnchor(title, bannedAnchors, "zh"));
 }
 
 function extractZhObjectPhrase(text: string | undefined): string | undefined {
@@ -486,6 +515,7 @@ function isWeakTitle(
   const normalized = title.trim();
   if (!normalized) return true;
   if (recentTitles.includes(normalized)) return true;
+  if (detectCollapsedTitleAnchor(normalized, recentTitles, language)) return true;
 
   if (language === "en") {
     const words = normalized.split(/\s+/u).filter(Boolean);
@@ -564,7 +594,141 @@ function normalizeRecentTitles(titles: ReadonlyArray<string> | undefined): Reado
   return (titles ?? [])
     .map((title) => title.trim())
     .filter(Boolean)
-    .slice(-3);
+    .slice(-5);
+}
+
+export function extractTitleCoreAnchor(
+  title: string,
+  language: "zh" | "en",
+): string | undefined {
+  const cleaned = sanitizeCandidateTitle(title, language);
+  if (!cleaned) return undefined;
+
+  if (language === "en") {
+    const anchor = cleaned.split(/[:,-]/u)[0]?.trim();
+    return anchor && anchor.split(/\s+/u).length >= 2 ? anchor : undefined;
+  }
+
+  const base = cleaned.split(/[：:]/u)[0]?.trim() ?? cleaned;
+  const explicit = base.match(/([\u4e00-\u9fff]{2,8}(?:尽头|入口|深处|古碑碎片|古碑|碎片))/u);
+  if (explicit?.[1]) {
+    return explicit[1];
+  }
+
+  const seeded = extractZhPlaceSeed([base]);
+  if (seeded) {
+    return seeded;
+  }
+
+  const nounAnchor = base.match(/^([\u4e00-\u9fff]{2,8})(?:的秘密|前的死局|背后的代价|逼近之时|之后)$/u);
+  if (nounAnchor?.[1]) {
+    return nounAnchor[1];
+  }
+
+  return undefined;
+}
+
+export function findCollapsedTitleAnchors(
+  recentTitles: ReadonlyArray<string>,
+  language: "zh" | "en",
+): ReadonlyArray<TitleAnchorPressure> {
+  const recent = recentTitles
+    .map((title) => title.trim())
+    .filter(Boolean)
+    .slice(-5);
+  if (recent.length < 3) {
+    return [];
+  }
+
+  const sequence: string[] = [];
+  for (let index = recent.length - 1; index >= 0; index -= 1) {
+    const anchor = extractTitleCoreAnchor(recent[index]!, language);
+    if (!anchor) {
+      break;
+    }
+    if (sequence.length === 0 || sequence[0] === anchor) {
+      sequence.unshift(anchor);
+      continue;
+    }
+    break;
+  }
+
+  const anchor = sequence[0];
+  return anchor && sequence.length >= 3
+    ? [{ anchor, count: sequence.length }]
+    : [];
+}
+
+export function detectCollapsedTitleAnchor(
+  title: string,
+  recentTitles: ReadonlyArray<string>,
+  language: "zh" | "en",
+): string | undefined {
+  const anchor = extractTitleCoreAnchor(title, language);
+  if (!anchor) {
+    return undefined;
+  }
+
+  return findCollapsedTitleAnchors(recentTitles, language)
+    .find((entry) => entry.anchor === anchor)?.anchor;
+}
+
+export function enforceFinalTitleAnchorGuard(params: {
+  readonly language: "zh" | "en";
+  readonly finalTitle: string;
+  readonly fallbackTitle?: string;
+  readonly recentTitles: ReadonlyArray<string>;
+}): string {
+  const finalCollapsedAnchor = detectCollapsedTitleAnchor(
+    params.finalTitle,
+    params.recentTitles,
+    params.language,
+  );
+  if (!finalCollapsedAnchor) {
+    return params.finalTitle;
+  }
+
+  const fallback = params.fallbackTitle?.trim();
+  if (!fallback) {
+    return params.finalTitle;
+  }
+
+  const fallbackCollapsedAnchor = detectCollapsedTitleAnchor(
+    fallback,
+    params.recentTitles,
+    params.language,
+  );
+  return fallbackCollapsedAnchor ? params.finalTitle : fallback;
+}
+
+export function assertFinalTitleAllowed(params: {
+  readonly language: "zh" | "en";
+  readonly finalTitle: string;
+  readonly recentTitles: ReadonlyArray<string>;
+}): void {
+  const collapsedAnchor = detectCollapsedTitleAnchor(
+    params.finalTitle,
+    params.recentTitles,
+    params.language,
+  );
+  if (!collapsedAnchor) {
+    return;
+  }
+
+  throw new Error(
+    params.language === "en"
+      ? `FINAL_TITLE still uses collapsed anchor "${collapsedAnchor}": ${params.finalTitle}`
+      : `FINAL_TITLE 仍命中已坍缩锚“${collapsedAnchor}”：${params.finalTitle}`,
+  );
+}
+
+function hasBannedTitleAnchor(
+  title: string,
+  bannedAnchors: ReadonlySet<string>,
+  language: "zh" | "en",
+): boolean {
+  const anchor = extractTitleCoreAnchor(title, language);
+  return Boolean(anchor && bannedAnchors.has(anchor));
 }
 
 function getZhStyleOrder(

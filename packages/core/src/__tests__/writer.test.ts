@@ -1423,7 +1423,7 @@ describe("WriterAgent", () => {
         matched: false,
       }));
       expect(output.postWriteWarnings.some((warning) => warning.rule === "ending-hook-check")).toBe(true);
-      expect(output.postWriteWarnings.some((warning) => warning.rule === "payoff-check")).toBe(true);
+      expect(output.postWriteWarnings.some((warning) => warning.rule === "payoff-materialization-failure")).toBe(true);
       expect(output.postWriteErrors).toEqual([]);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -2333,6 +2333,725 @@ describe("WriterAgent", () => {
       });
 
       expect(output.postWriteWarnings.some((warning) => warning.rule === "ending-isomorphism")).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rewrites once when a breath directive is present but the first draft stays combat-heavy", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-mood-downshift-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 22\nDownshift after the bloodbath.\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# 当前状态\n\n- 楚夜刚结束一场血战。\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# 伏笔池\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+      writeFile(join(storyDir, "subplot_board.md"), "# 支线进度板\n", "utf-8"),
+      writeFile(join(storyDir, "emotional_arcs.md"), "# 情感弧线\n", "utf-8"),
+      writeFile(join(storyDir, "character_matrix.md"), "# 角色交互矩阵\n", "utf-8"),
+    ]);
+
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    const chatSpy = vi.spyOn(WriterAgent.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "碑下血战",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "楚夜提刀正面撞进敌阵，刀光爆开，追兵又一次围杀上来。两人当场交锋，轰击和血战几乎贯穿整章，没有片刻休整。",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- ok",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "火堆后的短歇",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "楚夜先在碎石背后扎营疗伤，替云岚包扎伤口，又分了干粮和热汤。两人借着路途交谈重新梳理黑袍人的去向，几句调侃之后，原本绷紧的气氛终于缓下来。休整完毕，他们才继续提防追兵，往更深处摸去。",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- revised after local mood self-check",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== POST_SETTLEMENT ===",
+          "- settled",
+          "",
+          "=== UPDATED_STATE ===",
+          "# 当前状态",
+          "",
+          "=== UPDATED_HOOKS ===",
+          "# 伏笔池",
+          "",
+          "=== CHAPTER_SUMMARY ===",
+          "| 22 | 碑下血战 | 楚夜 | 血战继续 | 焦灼 | none | 冷硬 | confrontation |",
+          "",
+          "=== UPDATED_SUBPLOTS ===",
+          "# 支线进度板",
+          "",
+          "=== UPDATED_EMOTIONAL_ARCS ===",
+          "# 情感弧线",
+          "",
+          "=== UPDATED_CHARACTER_MATRIX ===",
+          "# 角色交互矩阵",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    try {
+      const output = await agent.writeChapter({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "tomato",
+          genre: "other",
+          status: "active",
+          targetChapters: 30,
+          chapterWordCount: 2200,
+          language: "zh",
+          createdAt: "2026-04-21T00:00:00.000Z",
+          updatedAt: "2026-04-21T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 22,
+        chapterIntent: [
+          "# Chapter Intent",
+          "",
+          "## Structured Directives",
+          "- mood:",
+          "  - targetMode: breath",
+          "  - requiredSceneQuota: 1",
+          "  - moodCoverageMin: 0.3",
+          "  - forbidDominantMode: combat-heavy",
+          "  - note: 最近连续数章都在高压对抗，本章必须降调——至少安排 1 段日常/喘息/温情/幽默场景。",
+        ].join("\n"),
+        lengthSpec: buildLengthSpec(220, "zh"),
+      });
+
+      expect(chatSpy).toHaveBeenCalledTimes(4);
+      expect((chatSpy.mock.calls[0]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("Breath 章骨架：Act1=余波/ regroup，Act2=完整喘息场景，Act3=小步前推 + 低强度尾钩。");
+      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[0]?.content ?? "").toContain("REWRITE MODE");
+      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("PRIMARY STRUCTURAL REQUIREMENT");
+      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("目标 coverage>=30%");
+      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("必须替换部分主导性的战斗推进");
+      expect(output.content).toContain("扎营疗伤");
+      expect(output.content).toContain("路途交谈");
+      expect(output.moodCadenceCheck?.matched).toBe(true);
+      expect(output.postWriteWarnings.some((warning) => warning.rule === "mood-cadence-violation")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps rewriting until breath coverage crosses the target instead of stopping at a near-miss", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-mood-rewrite-loop-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 22\nDownshift after the bloodbath.\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# 当前状态\n\n- 楚夜刚结束一场血战。\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# 伏笔池\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+      writeFile(join(storyDir, "subplot_board.md"), "# 支线进度板\n", "utf-8"),
+      writeFile(join(storyDir, "emotional_arcs.md"), "# 情感弧线\n", "utf-8"),
+      writeFile(join(storyDir, "character_matrix.md"), "# 角色交互矩阵\n", "utf-8"),
+    ]);
+
+    const { logger, warnings } = createCaptureLogger();
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+      logger,
+    });
+
+    const chatSpy = vi.spyOn(WriterAgent.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "碑下血战",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "楚夜提刀正面撞进敌阵，刀光爆开，追兵围杀上来。两人当场交锋，轰击和血战贯穿整章，只有极短的一瞬停顿。",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- ok",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "碑下鏖战",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "楚夜继续和黑袍人交锋，刀光、杀机、围杀和轰击一波接一波压上来，甬道里没有真正的喘息余地。只有一句带过的包扎和一句催促继续赶路，马上又重新跌回血战与封锁。",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- rewrite 1 still near zero",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "乱石后的喘息",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "楚夜先在碎石背后简单包扎，和云岚低声交换了两句情报，分了几口干粮，气氛略微缓下来。\n\n但他们很快又被追兵逼得提刀迎上，甬道里再次被轰击、杀机和围杀塞满。后半章依旧以高压追逐和交锋推进，没有真正把篇幅让给休整与关系推进。",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- rewrite 2 reaches 24% but still under target",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "火光后的短歇",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "楚夜先在碎石背后扎营疗伤，替云岚包扎伤口，又分了干粮和热汤。两人借着路途交谈重新梳理黑袍人的去向，顺手把药材、符纸和接下来的路线重新整理了一遍，几句调侃之后，原本绷紧的气氛终于缓下来。\n\n这段真正的休整之后，他们才继续提防追兵，往更深处摸去。前方仍有威胁，但这一章的主段已经从纯粹的战斗推进，换成了 regroup、交谈与低强度前推。",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- rewrite 3 finally crosses 30%",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== POST_SETTLEMENT ===",
+          "- settled",
+          "",
+          "=== UPDATED_STATE ===",
+          "# 当前状态",
+          "",
+          "=== UPDATED_HOOKS ===",
+          "# 伏笔池",
+          "",
+          "=== CHAPTER_SUMMARY ===",
+          "| 22 | 火光后的短歇 | 楚夜,云岚 | 疗伤休整后继续深入 | 缓和 | none | 温暖 | breathing |",
+          "",
+          "=== UPDATED_SUBPLOTS ===",
+          "# 支线进度板",
+          "",
+          "=== UPDATED_EMOTIONAL_ARCS ===",
+          "# 情感弧线",
+          "",
+          "=== UPDATED_CHARACTER_MATRIX ===",
+          "# 角色交互矩阵",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    try {
+      const output = await agent.writeChapter({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "tomato",
+          genre: "other",
+          status: "active",
+          targetChapters: 30,
+          chapterWordCount: 2200,
+          language: "zh",
+          createdAt: "2026-04-21T00:00:00.000Z",
+          updatedAt: "2026-04-21T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 22,
+        chapterIntent: [
+          "# Chapter Intent",
+          "",
+          "## Structured Directives",
+          "- mood:",
+          "  - targetMode: breath",
+          "  - requiredSceneQuota: 1",
+          "  - moodCoverageMin: 0.3",
+          "  - forbidDominantMode: combat-heavy",
+          "  - note: 最近连续数章都在高压对抗，本章必须降调。",
+        ].join("\n"),
+        lengthSpec: buildLengthSpec(220, "zh"),
+      });
+
+      expect(chatSpy).toHaveBeenCalledTimes(6);
+      expect((chatSpy.mock.calls[1]?.[0] as Array<{ role: string; content: string }>)[0]?.content ?? "").toContain("REWRITE MODE");
+      expect((chatSpy.mock.calls[1]?.[0] as Array<{ role: string; content: string }>)[1]?.content ?? "").toContain("当前 coverage=0%");
+      expect((chatSpy.mock.calls[2]?.[0] as Array<{ role: string; content: string }>)[1]?.content ?? "").toContain("rewrite attempt 2");
+      expect((chatSpy.mock.calls[2]?.[0] as Array<{ role: string; content: string }>)[1]?.content ?? "").toContain("目标 coverage>=30%");
+      expect((chatSpy.mock.calls[3]?.[0] as Array<{ role: string; content: string }>)[1]?.content ?? "").toContain("rewrite attempt 3");
+      expect((chatSpy.mock.calls[3]?.[0] as Array<{ role: string; content: string }>)[1]?.content ?? "").toContain("如果只是追加一小段喘息而主体仍是 combat-heavy，这次 rewrite 仍算失败。");
+      expect(warnings.some((message) => message.includes("rewrite attempt 1"))).toBe(true);
+      expect(warnings.some((message) => message.includes("rewrite attempt 2"))).toBe(true);
+      expect(warnings.some((message) => message.includes("rewrite attempt 3"))).toBe(true);
+      expect(output.content).toContain("扎营疗伤");
+      expect(output.content).toContain("整理了一遍");
+      expect(output.moodCadenceCheck?.matched).toBe(true);
+      expect(output.postWriteWarnings.some((warning) => warning.rule === "mood-cadence-violation")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("passes mood cadence when the draft includes a breathing beat and relationship progression", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-mood-pass-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 22\nDownshift after the bloodbath.\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# 当前状态\n\n- 楚夜刚结束一场血战。\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# 伏笔池\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+      writeFile(join(storyDir, "subplot_board.md"), "# 支线进度板\n", "utf-8"),
+      writeFile(join(storyDir, "emotional_arcs.md"), "# 情感弧线\n", "utf-8"),
+      writeFile(join(storyDir, "character_matrix.md"), "# 角色交互矩阵\n", "utf-8"),
+    ]);
+
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    vi.spyOn(WriterAgent.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "火堆边的短歇",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "楚夜和云岚在乱石后扎营疗伤，先包扎伤口，又分了干粮和热汤。两人借着路途交谈把前路重新捋顺，几句调侃之后，原先绷紧的信任也松开了一点。",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- ok",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== POST_SETTLEMENT ===",
+          "- settled",
+          "",
+          "=== UPDATED_STATE ===",
+          "# 当前状态",
+          "",
+          "=== UPDATED_HOOKS ===",
+          "# 伏笔池",
+          "",
+          "=== CHAPTER_SUMMARY ===",
+          "| 22 | 火堆边的短歇 | 楚夜,云岚 | 扎营疗伤并推进关系 | 缓和 | none | 温暖 | breathing |",
+          "",
+          "=== UPDATED_SUBPLOTS ===",
+          "# 支线进度板",
+          "",
+          "=== UPDATED_EMOTIONAL_ARCS ===",
+          "# 情感弧线",
+          "",
+          "=== UPDATED_CHARACTER_MATRIX ===",
+          "# 角色交互矩阵",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    try {
+      const output = await agent.writeChapter({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "tomato",
+          genre: "other",
+          status: "active",
+          targetChapters: 30,
+          chapterWordCount: 2200,
+          language: "zh",
+          createdAt: "2026-04-21T00:00:00.000Z",
+          updatedAt: "2026-04-21T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 22,
+        chapterIntent: [
+          "# Chapter Intent",
+          "",
+          "## Structured Directives",
+          "- mood:",
+          "  - targetMode: breath",
+          "  - requiredSceneQuota: 1",
+          "  - moodCoverageMin: 0.3",
+          "  - forbidDominantMode: combat-heavy",
+          "  - note: 最近连续数章都在高压对抗，本章必须降调——至少安排 1 段日常/喘息/温情/幽默场景。",
+        ].join("\n"),
+        lengthSpec: buildLengthSpec(220, "zh"),
+      });
+
+      expect(output.postWriteWarnings.some((warning) => warning.rule === "mood-cadence-violation")).toBe(false);
+      expect(output.moodCadenceCheck?.matched).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses Payoff Realization Mode to turn a vague promised reveal into an actual reveal scene", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-payoff-realization-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 12\nReveal the origin of the ancient scroll.\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# 当前状态\n\n- 楚夜已经拿到古卷，但还不知道来源。\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# 伏笔池\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+      writeFile(join(storyDir, "subplot_board.md"), "# 支线进度板\n", "utf-8"),
+      writeFile(join(storyDir, "emotional_arcs.md"), "# 情感弧线\n", "utf-8"),
+      writeFile(join(storyDir, "character_matrix.md"), "# 角色交互矩阵\n", "utf-8"),
+    ]);
+
+    const { logger, warnings } = createCaptureLogger();
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+      logger,
+    });
+
+    const chatSpy = vi.spyOn(WriterAgent.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "古卷前的疑云",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "楚夜反复端详古卷，只觉得它愈发神秘，似乎和深处的旧传说有关，却没人真正说破来历。",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- ok",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "祭司一脉的古卷",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "楚夜逼问碑灵时，对方终于吐出真相：这卷古卷并非无主之物，而是来自葬渊祭司一脉，缺失的三页原本就是用来封存祭火印记的钥匙。\n\n真相落下后，楚夜才明白自己手里的不是残破古物，而是会把整条祭司旧案重新掀开的引子。",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- payoff realized in final act",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== POST_SETTLEMENT ===",
+          "- settled",
+          "",
+          "=== UPDATED_STATE ===",
+          "# 当前状态",
+          "",
+          "=== UPDATED_HOOKS ===",
+          "# 伏笔池",
+          "",
+          "=== CHAPTER_SUMMARY ===",
+          "| 12 | 祭司一脉的古卷 | 楚夜, 碑灵 | 揭示古卷来源 | 紧张 | ancient-scroll advanced | 冷硬 | reveal |",
+          "",
+          "=== UPDATED_SUBPLOTS ===",
+          "# 支线进度板",
+          "",
+          "=== UPDATED_EMOTIONAL_ARCS ===",
+          "# 情感弧线",
+          "",
+          "=== UPDATED_CHARACTER_MATRIX ===",
+          "# 角色交互矩阵",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    try {
+      const output = await agent.writeChapter({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "tomato",
+          genre: "xuanhuan",
+          status: "active",
+          targetChapters: 20,
+          chapterWordCount: 2200,
+          language: "zh",
+          createdAt: "2026-04-20T00:00:00.000Z",
+          updatedAt: "2026-04-20T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 12,
+        chapterIntent: [
+          "# Chapter Intent",
+          "",
+          "## Chapter Goal",
+          "- mainConflict: 古卷来源关系到葬渊旧案。",
+          "- protagonistGoal: 揭开古卷来源。",
+          "- activeCharacters: 楚夜, 碑灵",
+          "- foreshadowToTouch: ancient-scroll",
+          "- payoffToDeliver: 揭开古卷来源",
+          "- payoffDirective.promisedPayoff: 揭开古卷来源",
+          "- payoffDirective.payoffType: reveal",
+          "- payoffDirective.mandatoryByFinalAct: true",
+          "- endingHookType: reveal",
+          "- nextChapterPull: 古卷来源会把祭司旧案拖出来。",
+        ].join("\n"),
+        contextPackage: {
+          chapter: 12,
+          selectedContext: [],
+          chapterGoal: {
+            mainConflict: "古卷来源关系到葬渊旧案。",
+            protagonistGoal: "揭开古卷来源。",
+            activeCharacters: ["楚夜", "碑灵"],
+            foreshadowToTouch: ["ancient-scroll"],
+            payoffToDeliver: "揭开古卷来源",
+            payoffDirective: {
+              promisedPayoff: "揭开古卷来源",
+              payoffType: "reveal",
+              mandatoryByFinalAct: true,
+            },
+            endingHookType: "reveal",
+            nextChapterPull: "古卷来源会把祭司旧案拖出来。",
+          },
+        },
+        ruleStack: {
+          layers: [{ id: "L4", name: "current_task", precedence: 70, scope: "local" }],
+          sections: { hard: [], soft: [], diagnostic: [] },
+          overrideEdges: [],
+          activeOverrides: [],
+        },
+        lengthSpec: buildLengthSpec(220, "zh"),
+      });
+
+      expect((chatSpy.mock.calls[0]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("Payoff Realization Directive");
+      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[0]?.content ?? "").toContain("PAYOFF REALIZATION MODE");
+      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("必须在 Act3 插入或替换一个具体的 payoff scene");
+      expect(warnings.some((message) => message.includes("PAYOFF MODE"))).toBe(true);
+      expect(output.content).toContain("来自葬渊祭司一脉");
+      expect(output.payoffCheck?.matched).toBe(true);
+      expect(output.postWriteWarnings.some((warning) => warning.rule === "payoff-materialization-failure")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses Hook Emergence Mode to force an overdue hook into real advancement instead of repeating the old danger", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-hook-emergence-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 9\nForce the poison debt to move.\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# 当前状态\n\n- 噬魂草毒性仍在扩散。\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# 伏笔池\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+      writeFile(join(storyDir, "subplot_board.md"), "# 支线进度板\n", "utf-8"),
+      writeFile(join(storyDir, "emotional_arcs.md"), "# 情感弧线\n", "utf-8"),
+      writeFile(join(storyDir, "character_matrix.md"), "# 角色交互矩阵\n", "utf-8"),
+    ]);
+
+    const { logger, warnings } = createCaptureLogger();
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+      logger,
+    });
+
+    const chatSpy = vi.spyOn(WriterAgent.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "毒潮未散",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "楚夜盯着噬魂草，只知道它仍危险，毒性依旧存在，却还是没有任何新进展。",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- ok",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "逆毒之法",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "楚夜借着碑纹反推药性，终于发现一套压制噬魂草毒性的新方法，至少先稳住了扩散速度。虽然旧患还没彻底根除，但这条线第一次真正往前迈了一步。",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- hook emergence realized",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== POST_SETTLEMENT ===",
+          "- settled",
+          "",
+          "=== UPDATED_STATE ===",
+          "# 当前状态",
+          "",
+          "- 楚夜暂时稳住了噬魂草扩散。",
+          "",
+          "=== UPDATED_HOOKS ===",
+          "# 伏笔池",
+          "",
+          "=== CHAPTER_SUMMARY ===",
+          "| 9 | 逆毒之法 | 楚夜 | 找到压制噬魂草毒性的新方法 | 毒性暂稳 | H002 advanced | 紧张 | discovery |",
+          "",
+          "=== UPDATED_SUBPLOTS ===",
+          "# 支线进度板",
+          "",
+          "=== UPDATED_EMOTIONAL_ARCS ===",
+          "# 情感弧线",
+          "",
+          "=== UPDATED_CHARACTER_MATRIX ===",
+          "# 角色交互矩阵",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    try {
+      const output = await agent.writeChapter({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "tomato",
+          genre: "xuanhuan",
+          status: "active",
+          targetChapters: 20,
+          chapterWordCount: 2200,
+          language: "zh",
+          createdAt: "2026-04-20T00:00:00.000Z",
+          updatedAt: "2026-04-20T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 9,
+        chapterIntent: [
+          "# Chapter Intent",
+          "",
+          "## Hook Agenda",
+          "### Emergence Directive",
+          "- mustMaterializeHookNow: true",
+          "- targetHookId: H002",
+          "- targetHookState: overdue",
+          "- targetHookExpectedPayoff: 发现压制毒性新方法",
+          "- targetHookNotes: 噬魂草毒性仍在扩散",
+        ].join("\n"),
+        lengthSpec: buildLengthSpec(220, "zh"),
+      });
+
+      expect(chatSpy).toHaveBeenCalledTimes(4);
+      expect((chatSpy.mock.calls[0]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("## Hook Emergence Directive");
+      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[0]?.content ?? "").toContain("HOOK EMERGENCE MODE");
+      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("合格结果：推进 / 部分兑现 / 完全回收。");
+      expect(warnings.some((message) => message.includes("HOOK EMERGENCE MODE"))).toBe(true);
+      expect(output.content).toContain("发现一套压制噬魂草毒性的新方法");
+      expect(output.postWriteWarnings.some((warning) => warning.rule === "hook-emergence-failure")).toBe(false);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

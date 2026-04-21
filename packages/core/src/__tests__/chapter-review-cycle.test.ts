@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { runChapterReviewCycle } from "../pipeline/chapter-review-cycle.js";
 import type { AuditResult, AuditIssue } from "../agents/continuity.js";
 import type { LengthSpec } from "../models/length-governance.js";
+import { evaluateMoodCadenceCompliance } from "../agents/post-write-validator.js";
 
 const LENGTH_SPEC: LengthSpec = {
   target: 220,
@@ -314,5 +315,168 @@ describe("runChapterReviewCycle", () => {
     );
     expect(result.finalContent).toBe("reframed ending draft");
     expect(result.revised).toBe(true);
+  });
+
+  it("routes mood-cadence-violation warnings into the existing pre-audit spot-fix", async () => {
+    const auditChapter = vi.fn()
+      .mockResolvedValue(createAuditResult());
+    const reviseChapter = vi.fn().mockResolvedValue({
+      revisedContent: "camp-rest draft with healing and road talk",
+      wordCount: 21,
+      fixedIssues: ["inserted a breathing beat and reduced combat density"],
+      updatedState: "",
+      updatedLedger: "",
+      updatedHooks: "",
+      tokenUsage: ZERO_USAGE,
+    });
+    const normalizeDraftLengthIfNeeded = vi.fn()
+      .mockResolvedValue({
+        content: "camp-rest draft with healing and road talk",
+        wordCount: 21,
+        applied: false,
+        tokenUsage: ZERO_USAGE,
+      });
+
+    const result = await runChapterReviewCycle({
+      book: { genre: "xuanhuan" },
+      bookDir: "/tmp/book",
+      chapterNumber: 22,
+      initialOutput: {
+        content: "combat-heavy draft",
+        wordCount: 20,
+        postWriteErrors: [],
+        postWriteWarnings: [{
+          rule: "mood-cadence-violation",
+          description: "本章没有兑现降调 mood directive，整体仍然更像高压对抗/战斗主导。",
+          suggestion: "只重写局部场景层，保留章节事实；补入至少 1 段扎营、疗伤、路途交谈、轻松互动或人物关系推进场景，并降低战斗密度，避免让高压对抗继续主导整章。",
+          severity: "warning",
+        }],
+      },
+      lengthSpec: LENGTH_SPEC,
+      reducedControlInput: undefined,
+      initialUsage: ZERO_USAGE,
+      createReviser: () => ({ reviseChapter }),
+      auditor: { auditChapter },
+      normalizeDraftLengthIfNeeded,
+      assertChapterContentNotEmpty: () => undefined,
+      addUsage: (left, right) => ({
+        promptTokens: left.promptTokens + (right?.promptTokens ?? 0),
+        completionTokens: left.completionTokens + (right?.completionTokens ?? 0),
+        totalTokens: left.totalTokens + (right?.totalTokens ?? 0),
+      }),
+      restoreLostAuditIssues: (_previous, next) => next,
+      analyzeAITells: () => ({ issues: [] as AuditIssue[] }),
+      analyzeSensitiveWords: () => ({ found: [] as Array<{ severity: "warn" | "block" }>, issues: [] as AuditIssue[] }),
+      logWarn: () => undefined,
+      logStage: () => undefined,
+    });
+
+    expect(reviseChapter).toHaveBeenCalledTimes(1);
+    expect(reviseChapter.mock.calls[0]?.[3]).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        category: "mood-cadence-violation",
+        suggestion: expect.stringContaining("疗伤"),
+      }),
+    ]));
+    expect(auditChapter).toHaveBeenCalledWith(
+      "/tmp/book",
+      "camp-rest draft with healing and road talk",
+      22,
+      "xuanhuan",
+      undefined,
+    );
+    expect(result.finalContent).toBe("camp-rest draft with healing and road talk");
+    expect(result.revised).toBe(true);
+  });
+
+  it("rechecks mood cadence after spot-fix and the inserted breathing scene clears the violation", async () => {
+    const chapterIntent = [
+      "# Chapter Intent",
+      "",
+      "## Structured Directives",
+      "- mood:",
+      "  - targetMode: breath",
+      "  - requiredSceneQuota: 1",
+      "  - forbidDominantMode: combat-heavy",
+      "  - note: 最近连续数章都在高压对抗，本章必须降调——至少安排 1 段日常/喘息/温情/幽默场景。",
+    ].join("\n");
+    const auditChapter = vi.fn()
+      .mockResolvedValue(createAuditResult());
+    const reviseChapter = vi.fn().mockResolvedValue({
+      revisedContent: [
+        "楚夜一刀逼退追兵，才和云岚退到断壁后。",
+        "",
+        "两人先扎营疗伤，又分了热汤和干粮，顺手把接下来的路途计划重新说透。",
+        "",
+        "云岚难得接了一句玩笑，气氛总算从先前的血腥里缓下来。",
+      ].join("\n"),
+      wordCount: 57,
+      fixedIssues: ["inserted a breathing beat"],
+      updatedState: "",
+      updatedLedger: "",
+      updatedHooks: "",
+      tokenUsage: ZERO_USAGE,
+    });
+    const normalizeDraftLengthIfNeeded = vi.fn()
+      .mockResolvedValue({
+        content: [
+          "楚夜一刀逼退追兵，才和云岚退到断壁后。",
+          "",
+          "两人先扎营疗伤，又分了热汤和干粮，顺手把接下来的路途计划重新说透。",
+          "",
+          "云岚难得接了一句玩笑，气氛总算从先前的血腥里缓下来。",
+        ].join("\n"),
+        wordCount: 57,
+        applied: false,
+        tokenUsage: ZERO_USAGE,
+      });
+
+    const result = await runChapterReviewCycle({
+      book: { genre: "xuanhuan" },
+      bookDir: "/tmp/book",
+      chapterNumber: 22,
+      initialOutput: {
+        content: "楚夜和追兵持续血战，整章都在高压对抗。",
+        wordCount: 20,
+        postWriteErrors: [],
+        postWriteWarnings: [{
+          rule: "mood-cadence-violation",
+          description: "本章没有兑现降调 mood directive，整体仍然更像高压对抗/战斗主导。",
+          suggestion: "只重写局部场景层，保留章节事实；补入至少 1 段扎营、疗伤、路途交谈、轻松互动或人物关系推进场景，并降低战斗密度，避免让高压对抗继续主导整章。",
+          severity: "warning",
+        }],
+      },
+      lengthSpec: LENGTH_SPEC,
+      reducedControlInput: {
+        chapterIntent,
+        contextPackage: { chapter: 22, selectedContext: [] },
+        ruleStack: {
+          layers: [{ id: "L4", name: "current_task", precedence: 70, scope: "local" }],
+          sections: { hard: [], soft: [], diagnostic: [] },
+          overrideEdges: [],
+          activeOverrides: [],
+        },
+      },
+      initialUsage: ZERO_USAGE,
+      createReviser: () => ({ reviseChapter }),
+      auditor: { auditChapter },
+      normalizeDraftLengthIfNeeded,
+      assertChapterContentNotEmpty: () => undefined,
+      addUsage: (left, right) => ({
+        promptTokens: left.promptTokens + (right?.promptTokens ?? 0),
+        completionTokens: left.completionTokens + (right?.completionTokens ?? 0),
+        totalTokens: left.totalTokens + (right?.totalTokens ?? 0),
+      }),
+      restoreLostAuditIssues: (_previous, next) => next,
+      analyzeAITells: () => ({ issues: [] as AuditIssue[] }),
+      analyzeSensitiveWords: () => ({ found: [] as Array<{ severity: "warn" | "block" }>, issues: [] as AuditIssue[] }),
+      logWarn: () => undefined,
+      logStage: () => undefined,
+    });
+
+    const moodCheck = evaluateMoodCadenceCompliance(result.finalContent, chapterIntent);
+    expect(result.finalContent).toContain("扎营疗伤");
+    expect(result.finalContent).toContain("玩笑");
+    expect(moodCheck?.matched).toBe(true);
   });
 });
