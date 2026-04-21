@@ -44,6 +44,7 @@ import type { RuntimeStateSnapshot } from "../state/state-reducer.js";
 import { parsePendingHooksMarkdown } from "../utils/memory-retrieval.js";
 import { analyzeHookHealth } from "../utils/hook-health.js";
 import { buildEnglishVarianceBrief } from "../utils/long-span-fatigue.js";
+import { buildChapterTitleCandidates, resolveChapterTitle } from "../utils/chapter-title-engine.js";
 import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -176,6 +177,20 @@ export class WriterAgent extends BaseAgent {
     const governedMemoryBlocks = input.contextPackage
       ? buildGovernedMemoryEvidenceBlocks(input.contextPackage, resolvedLanguage)
       : undefined;
+    const chapterGoal = input.contextPackage?.chapterGoal ?? this.readChapterGoalFromIntentMarkdown(input.chapterIntent);
+    const recentTitles = this.extractRecentTitles(recentChapters, resolvedLanguage);
+    const titleCandidates = buildChapterTitleCandidates({
+      language: resolvedLanguage,
+      chapterGoal,
+      keyEvents: this.buildTitleKeyEvents({
+        chapterGoal,
+        contextPackage: input.contextPackage,
+        currentState,
+        relevantSummaries,
+        externalContext: input.externalContext,
+      }),
+      recentTitles,
+    });
     const englishVarianceBrief = resolvedLanguage === "en"
       ? await buildEnglishVarianceBrief({
           bookDir,
@@ -211,6 +226,7 @@ export class WriterAgent extends BaseAgent {
           language: book.language ?? genreProfile.language,
           varianceBrief: englishVarianceBrief?.text,
           selectedEvidenceBlock: this.joinGovernedEvidenceBlocks(governedMemoryBlocks),
+          titleCandidates,
         })
       : (() => {
           // Smart context filtering: inject only relevant parts of truth files
@@ -247,6 +263,7 @@ export class WriterAgent extends BaseAgent {
             relevantSummaries,
             parentCanon: hasParentCanon ? parentCanon : undefined,
             language: book.language ?? genreProfile.language,
+            titleCandidates,
           });
         })();
 
@@ -270,6 +287,19 @@ export class WriterAgent extends BaseAgent {
     const creativeUsage = creativeResponse.usage;
 
     const creative = parseCreativeOutput(chapterNumber, creativeResponse.content, resolvedLengthSpec.countingMode);
+    const resolvedTitle = resolveChapterTitle({
+      language: resolvedLanguage,
+      rawTitle: creative.title,
+      chapterGoal,
+      keyEvents: this.buildTitleKeyEvents({
+        chapterGoal,
+        contextPackage: input.contextPackage,
+        currentState,
+        relevantSummaries,
+        externalContext: input.externalContext,
+      }),
+      recentTitles,
+    }) ?? creative.title;
 
     // ── Phase 2: State settlement (temperature 0.3) ──
     this.logInfo(resolvedLanguage, {
@@ -306,7 +336,7 @@ export class WriterAgent extends BaseAgent {
       genreProfile,
       bookRules,
       chapterNumber,
-      title: creative.title,
+      title: resolvedTitle,
       content: creative.content,
       currentState,
       ledger: genreProfile.numericalSystem ? ledger : "",
@@ -356,7 +386,6 @@ export class WriterAgent extends BaseAgent {
       ...detectCrossChapterRepetition(creative.content, fingerprintChapters, resolvedLanguage),
       ...detectParagraphLengthDrift(creative.content, fingerprintChapters, resolvedLanguage),
     ];
-    const chapterGoal = input.contextPackage?.chapterGoal ?? this.readChapterGoalFromIntentMarkdown(input.chapterIntent);
     const disciplineChecks = chapterGoal
       ? evaluateChapterGoalDiscipline(creative.content, chapterGoal)
       : undefined;
@@ -422,7 +451,7 @@ export class WriterAgent extends BaseAgent {
 
     return {
       chapterNumber,
-      title: creative.title,
+      title: resolvedTitle,
       content: creative.content,
       wordCount: creative.wordCount,
       preWriteCheck: creative.preWriteCheck,
@@ -823,6 +852,7 @@ export class WriterAgent extends BaseAgent {
     readonly relevantSummaries?: string;
     readonly parentCanon?: string;
     readonly language?: "zh" | "en";
+    readonly titleCandidates?: ReadonlyArray<{ readonly style: string; readonly title: string }>;
   }): string {
     const contextBlock = params.externalContext
       ? `\n## 外部指令\n以下是来自外部系统的创作指令，请在本章中融入：\n\n${params.externalContext}\n`
@@ -861,6 +891,7 @@ export class WriterAgent extends BaseAgent {
 本书是番外作品。以下正典约束不可违反，角色不得引用超出其信息边界的信息。
 ${params.parentCanon}\n`
       : "";
+    const titleBlock = this.buildTitleCandidatesBlock(params.titleCandidates, params.language ?? "zh");
     const lengthRequirementBlock = this.buildLengthRequirementBlock(params.lengthSpec, params.language ?? "zh");
 
     if (params.language === "en") {
@@ -872,6 +903,7 @@ ${ledgerBlock}
 ## Plot Threads
 ${params.hooks}
 ${summariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${fingerprintBlock}${relevantBlock}${canonBlock}
+${titleBlock}
 ## Recent Chapters
 ${params.recentChapters || "(This is the first chapter, no previous text)"}
 
@@ -900,6 +932,7 @@ ${ledgerBlock}
 ## 伏笔池
 ${params.hooks}
 ${summariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${fingerprintBlock}${relevantBlock}${canonBlock}
+${titleBlock}
 ## 最近章节
 ${params.recentChapters || "(这是第一章，无前文)"}
 
@@ -930,6 +963,7 @@ ${lengthRequirementBlock}
     readonly language?: "zh" | "en";
     readonly varianceBrief?: string;
     readonly selectedEvidenceBlock?: string;
+    readonly titleCandidates?: ReadonlyArray<{ readonly style: string; readonly title: string }>;
   }): string {
     const contextSections = params.contextPackage.selectedContext
       .map((entry) => [
@@ -959,6 +993,7 @@ ${lengthRequirementBlock}
     const selectedEvidenceBlock = params.selectedEvidenceBlock
       ? `\n${params.selectedEvidenceBlock}\n`
       : "";
+    const titleBlock = this.buildTitleCandidatesBlock(params.titleCandidates, params.language ?? "zh");
     const explicitHookAgenda = this.extractMarkdownSection(params.chapterIntent, "## Hook Agenda");
     const hookAgendaBlock = explicitHookAgenda
       ? params.language === "en"
@@ -976,6 +1011,7 @@ ${params.chapterIntent}
 ${contextSections || "(none)"}
 ${selectedEvidenceBlock}
 ${hookAgendaBlock}
+${titleBlock}
 
 ## Rule Stack
 - Hard: ${params.ruleStack.sections.hard.join(", ") || "(none)"}
@@ -1003,6 +1039,7 @@ ${params.chapterIntent}
 ${contextSections || "(无)"}
 ${selectedEvidenceBlock}
 ${hookAgendaBlock}
+${titleBlock}
 
 ## 规则栈
 - 硬护栏：${params.ruleStack.sections.hard.join("、") || "(无)"}
@@ -1041,6 +1078,35 @@ ${lengthRequirementBlock}
     return joined || undefined;
   }
 
+  private buildTitleCandidatesBlock(
+    candidates: ReadonlyArray<{ readonly style: string; readonly title: string }> | undefined,
+    language: "zh" | "en",
+  ): string {
+    if (!candidates || candidates.length === 0) {
+      return "";
+    }
+
+    const label = language === "en" ? "## Title Candidates" : "## 标题候选";
+    const guidance = language === "en"
+      ? "- Use these as preferred title directions. Keep the final chapter title between 2-6 words, avoid single-word titles, and do not reuse the recent title pattern."
+      : "- 优先从这些候选里择优，或写出同等级别的标题。标题尽量控制在 6-18 字，避免单词标题、纯人名标题，以及和近三章同模版。";
+    const lines = candidates
+      .slice(0, 3)
+      .map((candidate) => {
+        const styleLabel = language === "en"
+          ? candidate.style
+          : candidate.style === "crisis"
+            ? "危机型"
+            : candidate.style === "payoff"
+              ? "爽点型"
+              : "悬念型";
+        return `- ${styleLabel}: ${candidate.title}`;
+      })
+      .join("\n");
+
+    return `\n${label}\n${guidance}\n${lines}\n`;
+  }
+
   private extractMarkdownSection(content: string, heading: string): string | undefined {
     const lines = content.split("\n");
     let buffer: string[] | null = null;
@@ -1062,6 +1128,52 @@ ${lengthRequirementBlock}
 
     const section = buffer?.join("\n").trim();
     return section && section.length > 0 ? section : undefined;
+  }
+
+  private extractRecentTitles(recentChapters: string, language: "zh" | "en"): string[] {
+    if (!recentChapters) {
+      return [];
+    }
+
+    const pattern = language === "en"
+      ? /^#\s*Chapter\s+\d+(?::|\s+)(.+)$/gim
+      : /^#\s*第\d+章\s+(.+)$/gmu;
+    return [...recentChapters.matchAll(pattern)]
+      .map((match) => match[1]?.trim() ?? "")
+      .filter(Boolean)
+      .slice(-3);
+  }
+
+  private buildTitleKeyEvents(params: {
+    readonly chapterGoal?: ChapterGoal;
+    readonly contextPackage?: ContextPackage;
+    readonly currentState: string;
+    readonly relevantSummaries?: string;
+    readonly externalContext?: string;
+  }): string[] {
+    const contextExcerpts = params.contextPackage?.selectedContext
+      .map((entry) => entry.excerpt?.trim() ?? "")
+      .filter(Boolean)
+      .slice(0, 4) ?? [];
+    const goalEvents = params.chapterGoal
+      ? [
+          params.chapterGoal.mainConflict,
+          params.chapterGoal.protagonistGoal,
+          params.chapterGoal.payoffToDeliver,
+          params.chapterGoal.nextChapterPull,
+        ]
+      : [];
+
+    return [
+      ...goalEvents,
+      ...contextExcerpts,
+      params.relevantSummaries ?? "",
+      params.currentState,
+      params.externalContext ?? "",
+    ]
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .slice(0, 8);
   }
 
   private buildSettlerGovernedControlBlock(

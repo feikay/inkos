@@ -1747,4 +1747,158 @@ describe("WriterAgent", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("injects structured title candidates into governed prompts and replaces weak one-word titles", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-title-engine-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    const chaptersDir = join(bookDir, "chapters");
+    await mkdir(storyDir, { recursive: true });
+    await mkdir(chaptersDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(join(chaptersDir, "0001_腐骨夜雨.md"), "# 第1章 腐骨夜雨\n\n前文一。\n", "utf-8"),
+      writeFile(join(chaptersDir, "0002_裂谷回声.md"), "# 第2章 裂谷回声\n\n前文二。\n", "utf-8"),
+      writeFile(join(chaptersDir, "0003_黑市门前.md"), "# 第3章 黑市门前\n\n前文三。\n", "utf-8"),
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n\n- 暗河尽头藏着血色果实。\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 4\n楚夜在暗河尽头拿到血色果实。\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n\n- 保持强钩子章节标题。\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# 当前状态\n\n- 楚夜已逼近暗河尽头。\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# 伏笔池\n\n- 果实代价尚未揭开。\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+      writeFile(join(storyDir, "subplot_board.md"), "# 支线进度板\n", "utf-8"),
+      writeFile(join(storyDir, "emotional_arcs.md"), "# 情感弧线\n", "utf-8"),
+      writeFile(join(storyDir, "character_matrix.md"), "# 角色交互矩阵\n", "utf-8"),
+    ]);
+
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    const chatSpy = vi.spyOn(WriterAgent.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "水流",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "楚夜冲到暗河尽头，拿到了血色果实。",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- ok",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== POST_SETTLEMENT ===",
+          "- settled",
+          "",
+          "=== UPDATED_STATE ===",
+          "# 当前状态",
+          "",
+          "=== UPDATED_HOOKS ===",
+          "# 伏笔池",
+          "",
+          "=== CHAPTER_SUMMARY ===",
+          "| 4 | 暗河尽头的血色果实 | 楚夜 | 拿到果实 | 压力升级 | 果实代价未解 | 紧张 | mainline |",
+          "",
+          "=== UPDATED_SUBPLOTS ===",
+          "# 支线进度板",
+          "",
+          "=== UPDATED_EMOTIONAL_ARCS ===",
+          "# 情感弧线",
+          "",
+          "=== UPDATED_CHARACTER_MATRIX ===",
+          "# 角色交互矩阵",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    try {
+      const output = await agent.writeChapter({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "tomato",
+          genre: "xuanhuan",
+          status: "active",
+          targetChapters: 20,
+          chapterWordCount: 2200,
+          language: "zh",
+          createdAt: "2026-04-21T00:00:00.000Z",
+          updatedAt: "2026-04-21T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 4,
+        chapterIntent: [
+          "# Chapter Intent",
+          "",
+          "## Chapter Goal",
+          "- mainConflict: 追兵已经摸到暗河尽头。",
+          "- protagonistGoal: 冲出暗河尽头，拿到血色果实。",
+          "- activeCharacters: 楚夜",
+          "- foreshadowToTouch: blood-fruit",
+          "- payoffToDeliver: 拿到血色果实",
+          "- endingHookType: reveal",
+          "- nextChapterPull: 吞下果实后，寿元开始燃烧。",
+        ].join("\n"),
+        contextPackage: {
+          chapter: 4,
+          selectedContext: [
+            {
+              source: "story/chapter_summaries.md#recent_titles",
+              reason: "Avoid repeating the recent shell.",
+              excerpt: "1: 腐骨夜雨 | 2: 裂谷回声 | 3: 黑市门前",
+            },
+            {
+              source: "story/volume_outline.md#4",
+              reason: "Anchor the chapter payoff.",
+              excerpt: "暗河尽头藏着血色果实，楚夜必须先拿到它。",
+            },
+          ],
+          chapterGoal: {
+            mainConflict: "追兵已经摸到暗河尽头。",
+            protagonistGoal: "冲出暗河尽头，拿到血色果实。",
+            activeCharacters: ["楚夜"],
+            foreshadowToTouch: ["blood-fruit"],
+            payoffToDeliver: "拿到血色果实",
+            endingHookType: "reveal",
+            nextChapterPull: "吞下果实后，寿元开始燃烧。",
+          },
+        },
+        ruleStack: {
+          layers: [{ id: "L4", name: "current_task", precedence: 70, scope: "local" }],
+          sections: { hard: [], soft: [], diagnostic: [] },
+          overrideEdges: [],
+          activeOverrides: [],
+        },
+        lengthSpec: buildLengthSpec(220, "zh"),
+      });
+
+      const creativePrompt = (chatSpy.mock.calls[0]?.[0] as ReadonlyArray<{ content: string }> | undefined)?.[1]?.content ?? "";
+      expect(creativePrompt).toContain("## 标题候选");
+      expect(creativePrompt).toContain("暗河尽头的血色果实");
+      expect(output.title).toBe("暗河尽头的血色果实");
+      expect(output.title).not.toBe("水流");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
