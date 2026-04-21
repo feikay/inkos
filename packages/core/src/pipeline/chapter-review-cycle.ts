@@ -93,7 +93,7 @@ export async function runChapterReviewCycle(params: {
   let revised = false;
 
   const cadenceSpotFixWarnings = params.initialOutput.postWriteWarnings
-    .filter((warning) => warning.rule === "cadence-directive-violation");
+    .filter((warning) => warning.rule === "cadence-directive-violation" || warning.rule === "ending-isomorphism");
   const preAuditSpotFixIssues = [
     ...params.initialOutput.postWriteErrors.map((violation) => ({
       severity: "critical" as const,

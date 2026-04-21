@@ -11,14 +11,16 @@ import { readGenreProfile, readBookRules } from "./rules-reader.js";
 import {
   detectCrossChapterRepetition,
   detectParagraphLengthDrift,
-  evaluateChapterGoalDiscipline,
   evaluateCadenceDirectiveCompliance,
+  evaluateChapterGoalDiscipline,
+  evaluateEndingIsomorphism,
   evaluateHookDebtThrottle,
   evaluateResourceLedgerDiscipline,
+  toCadenceDirectiveWarnings,
+  toDisciplineWarnings,
+  toEndingIsomorphismWarnings,
   toHookDebtWarnings,
   toResourceLedgerWarnings,
-  toDisciplineWarnings,
-  toCadenceDirectiveWarnings,
   validatePostWrite,
   type EndingHookCheck,
   type HookDebtCheck,
@@ -156,6 +158,7 @@ export class WriterAgent extends BaseAgent {
       ]);
 
     const recentChapters = await this.loadRecentChapters(bookDir, chapterNumber);
+    const recentEndingChapters = await this.loadRecentChapters(bookDir, chapterNumber, 3);
     // Load more chapters for dialogue fingerprint extraction (voice consistency over longer span)
     const fingerprintChapters = await this.loadRecentChapters(bookDir, chapterNumber, 5);
 
@@ -399,6 +402,11 @@ export class WriterAgent extends BaseAgent {
       input.chapterIntent,
     );
     const cadenceDirectiveWarnings = toCadenceDirectiveWarnings(cadenceDirectiveCheck, resolvedLanguage);
+    const endingIsomorphismCheck = evaluateEndingIsomorphism(
+      creative.content,
+      recentEndingChapters,
+    );
+    const endingIsomorphismWarnings = toEndingIsomorphismWarnings(endingIsomorphismCheck, resolvedLanguage);
     const resourceLedgerCheck = evaluateResourceLedgerDiscipline({
       content: creative.content,
       currentState,
@@ -419,6 +427,7 @@ export class WriterAgent extends BaseAgent {
       ...ruleViolations,
       ...disciplineWarnings,
       ...cadenceDirectiveWarnings,
+      ...endingIsomorphismWarnings,
       ...resourceLedgerWarnings,
       ...hookDebtWarnings,
     ];

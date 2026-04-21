@@ -2229,4 +2229,112 @@ describe("WriterAgent", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("emits ending-isomorphism when the chapter closes with the same templated shell as the recent endings", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-ending-iso-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    const chaptersDir = join(bookDir, "chapters");
+    await mkdir(storyDir, { recursive: true });
+    await mkdir(chaptersDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(join(chaptersDir, "0001_旧影.md"), "火光熄下去。随着他们的身影消失在黑暗中，众人都意识到这不过只是冰山一角，真正的秘密还在前方，等待着他们去揭开。", "utf-8"),
+      writeFile(join(chaptersDir, "0002_暗缝.md"), "风声贴着石壁掠过。随着他们的身影消失在黑暗中，他们知道更大的秘密还在前方，等待着他们去揭开。", "utf-8"),
+      writeFile(join(chaptersDir, "0003_潜流.md"), "队伍越走越深。随着他们的身影消失在黑暗中，他们终于明白今日所见也只是冰山一角。", "utf-8"),
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 4\nPush deeper into the cavern.\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# 当前状态\n\n- 楚夜刚带人踏入暗河深处。\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# 伏笔池\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+      writeFile(join(storyDir, "subplot_board.md"), "# 支线进度板\n", "utf-8"),
+      writeFile(join(storyDir, "emotional_arcs.md"), "# 情感弧线\n", "utf-8"),
+      writeFile(join(storyDir, "character_matrix.md"), "# 角色交互矩阵\n", "utf-8"),
+    ]);
+
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    vi.spyOn(WriterAgent.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "暗河深处",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "楚夜收起火折子，带着众人没入更深的甬道。\n\n随着他们的身影消失在黑暗中，他知道眼前的一切也许仍只是冰山一角，更大的秘密还在前方，等待着他们去揭开。",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- ok",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== POST_SETTLEMENT ===",
+          "- settled",
+          "",
+          "=== UPDATED_STATE ===",
+          "# 当前状态",
+          "",
+          "=== UPDATED_HOOKS ===",
+          "# 伏笔池",
+          "",
+          "=== CHAPTER_SUMMARY ===",
+          "| 4 | 暗河深处 | 楚夜 | 深入甬道 | 发现更大秘密 | none | 紧绷 | discovery |",
+          "",
+          "=== UPDATED_SUBPLOTS ===",
+          "# 支线进度板",
+          "",
+          "=== UPDATED_EMOTIONAL_ARCS ===",
+          "# 情感弧线",
+          "",
+          "=== UPDATED_CHARACTER_MATRIX ===",
+          "# 角色交互矩阵",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    try {
+      const output = await agent.writeChapter({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "tomato",
+          genre: "other",
+          status: "active",
+          targetChapters: 20,
+          chapterWordCount: 2200,
+          language: "zh",
+          createdAt: "2026-04-21T00:00:00.000Z",
+          updatedAt: "2026-04-21T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 4,
+        lengthSpec: buildLengthSpec(220, "zh"),
+      });
+
+      expect(output.postWriteWarnings.some((warning) => warning.rule === "ending-isomorphism")).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

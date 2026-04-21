@@ -244,4 +244,75 @@ describe("runChapterReviewCycle", () => {
     expect(result.finalContent).toBe("escalated draft");
     expect(result.revised).toBe(true);
   });
+
+  it("routes ending-isomorphism warnings into the existing pre-audit spot-fix", async () => {
+    const auditChapter = vi.fn()
+      .mockResolvedValue(createAuditResult());
+    const reviseChapter = vi.fn().mockResolvedValue({
+      revisedContent: "reframed ending draft",
+      wordCount: 16,
+      fixedIssues: ["rewrote the closing beat"],
+      updatedState: "",
+      updatedLedger: "",
+      updatedHooks: "",
+      tokenUsage: ZERO_USAGE,
+    });
+    const normalizeDraftLengthIfNeeded = vi.fn()
+      .mockResolvedValue({
+        content: "reframed ending draft",
+        wordCount: 16,
+        applied: false,
+        tokenUsage: ZERO_USAGE,
+      });
+
+    const result = await runChapterReviewCycle({
+      book: { genre: "xuanhuan" },
+      bookDir: "/tmp/book",
+      chapterNumber: 16,
+      initialOutput: {
+        content: "templated ending draft",
+        wordCount: 24,
+        postWriteErrors: [],
+        postWriteWarnings: [{
+          rule: "ending-isomorphism",
+          description: "章尾收束方式与最近章节过于同构。",
+          suggestion: "只重写结尾段，保留章节事实，并轮换结尾模式。",
+          severity: "warning",
+        }],
+      },
+      lengthSpec: LENGTH_SPEC,
+      reducedControlInput: undefined,
+      initialUsage: ZERO_USAGE,
+      createReviser: () => ({ reviseChapter }),
+      auditor: { auditChapter },
+      normalizeDraftLengthIfNeeded,
+      assertChapterContentNotEmpty: () => undefined,
+      addUsage: (left, right) => ({
+        promptTokens: left.promptTokens + (right?.promptTokens ?? 0),
+        completionTokens: left.completionTokens + (right?.completionTokens ?? 0),
+        totalTokens: left.totalTokens + (right?.totalTokens ?? 0),
+      }),
+      restoreLostAuditIssues: (_previous, next) => next,
+      analyzeAITells: () => ({ issues: [] as AuditIssue[] }),
+      analyzeSensitiveWords: () => ({ found: [] as Array<{ severity: "warn" | "block" }>, issues: [] as AuditIssue[] }),
+      logWarn: () => undefined,
+      logStage: () => undefined,
+    });
+
+    expect(reviseChapter).toHaveBeenCalledTimes(1);
+    expect(reviseChapter.mock.calls[0]?.[3]).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        category: "ending-isomorphism",
+      }),
+    ]));
+    expect(auditChapter).toHaveBeenCalledWith(
+      "/tmp/book",
+      "reframed ending draft",
+      16,
+      "xuanhuan",
+      undefined,
+    );
+    expect(result.finalContent).toBe("reframed ending draft");
+    expect(result.revised).toBe(true);
+  });
 });

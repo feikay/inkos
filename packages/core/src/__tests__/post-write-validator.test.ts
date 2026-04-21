@@ -4,10 +4,12 @@ import {
   detectParagraphLengthDrift,
   detectParagraphShapeWarnings,
   evaluateChapterGoalDiscipline,
+  evaluateEndingIsomorphism,
   evaluateHookDebtThrottle,
   evaluateResourceLedgerDiscipline,
   resolveDuplicateTitle,
   toDisciplineWarnings,
+  toEndingIsomorphismWarnings,
   toHookDebtWarnings,
   toResourceLedgerWarnings,
   validatePostWrite,
@@ -507,5 +509,50 @@ describe("validatePostWrite", () => {
       "hook-debt-throttle-violation",
     ]));
     expect(warnings.some((warning) => warning.rule === "hook-debt-throttle-violation")).toBe(true);
+  });
+});
+
+describe("evaluateEndingIsomorphism", () => {
+  it("warns when the current ending repeats recent blacklisted ending shells", () => {
+    const recentChapters = [
+      "众人穿过裂谷，脚步声终于沉进黑暗。随着他们的身影消失在黑暗中，所有人都明白，这一切只是冰山一角，真正的秘密还在前方，等待着他们去揭开。",
+      "风声贴着石壁刮过去。随着他们的身影消失在黑暗中，楚夜忽然意识到，今日见到的不过只是冰山一角，更大的秘密还在前方，等待着他们去揭开。",
+      "队伍越走越深，火光也被吞没。随着他们的身影消失在黑暗中，他们谁都没再开口，因为真正的秘密还在前方，等待着他们去揭开。",
+    ].join("\n\n---\n\n");
+    const current = [
+      "楚夜收起火折子，带着众人没入暗河后的甬道。",
+      "",
+      "随着他们的身影消失在黑暗中，他知道眼前的一切也许仍只是冰山一角，更大的秘密还在前方，等待着他们去揭开。",
+    ].join("\n");
+
+    const check = evaluateEndingIsomorphism(current, recentChapters);
+    const warnings = toEndingIsomorphismWarnings(check, "zh");
+
+    expect(check?.matched).toBe(false);
+    expect(check?.repeatedPhrases).toEqual(expect.arrayContaining([
+      "随着他们的身影消失在黑暗中",
+      "只是冰山一角",
+      "等待着他们去揭开",
+    ]));
+    expect(warnings[0]?.rule).toBe("ending-isomorphism");
+  });
+
+  it("drops the warning when the ending rotates to a different closing mode", () => {
+    const recentChapters = [
+      "随着他们的身影消失在黑暗中，众人都意识到这不过只是冰山一角，真正的秘密仍在前方。",
+      "火光熄下去时，他们谁都没有说话，因为更大的秘密还在前方，等待着他们去揭开。",
+      "甬道把人吞进去，所有答案仿佛都在前方，真正的秘密仍未揭晓。",
+    ].join("\n\n---\n\n");
+    const revisedCurrent = [
+      "楚夜把断刃压低。",
+      "",
+      "石门后忽然传来第一声爪痕，下一瞬，整面岩壁都开始往里塌，他只来得及喝出一句撤开。",
+    ].join("\n");
+
+    const check = evaluateEndingIsomorphism(revisedCurrent, recentChapters);
+    const warnings = toEndingIsomorphismWarnings(check, "zh");
+
+    expect(check?.matched).toBe(true);
+    expect(warnings).toEqual([]);
   });
 });

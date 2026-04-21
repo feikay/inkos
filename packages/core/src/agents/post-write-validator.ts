@@ -44,6 +44,13 @@ export interface CadenceDirectiveCheck {
   readonly evidence?: string;
 }
 
+export interface EndingIsomorphismCheck {
+  readonly matched: boolean;
+  readonly evidence?: string;
+  readonly repeatedPhrases: ReadonlyArray<string>;
+  readonly repeatedModes: ReadonlyArray<string>;
+}
+
 export interface ResourceLedgerFinding {
   readonly kind: "consumption" | "recovery" | "growth" | "injury";
   readonly signal: string;
@@ -99,6 +106,71 @@ const ENDING_HOOK_PATTERNS: Record<EndingHookType, ReadonlyArray<RegExp>> = {
     /breakthrough|ascend|advanced|awakened|mastered|new ability|leveled up/i,
   ],
 };
+
+const ENDING_ISOMORPHISM_PHRASES: ReadonlyArray<{
+  readonly label: string;
+  readonly patterns: ReadonlyArray<RegExp>;
+}> = [
+  {
+    label: "随着他们的身影消失在黑暗中",
+    patterns: [/随着[^。！？\n]{0,16}身影消失在黑暗中/u, /figures?\s+(faded|disappeared)\s+into\s+the\s+dark/i],
+  },
+  {
+    label: "只是冰山一角",
+    patterns: [/只是冰山一角/u, /only the tip of the iceberg/i],
+  },
+  {
+    label: "真正的秘密",
+    patterns: [/真正的秘密/u, /the real secret/i],
+  },
+  {
+    label: "等待着他们去揭开",
+    patterns: [/等待着?他们?去揭开/u, /waiting for them to uncover/i],
+  },
+  {
+    label: "向着未知的未来迈进",
+    patterns: [/向着未知的未来迈进/u, /step(?:ped)? toward the unknown future/i],
+  },
+  {
+    label: "一切答案都在前方",
+    patterns: [/一切答案都在前方/u, /all the answers (?:lay|wait) ahead/i],
+  },
+  {
+    label: "更大的秘密还在前方",
+    patterns: [/更大的秘密还在前方/u, /greater secrets? still lay ahead/i],
+  },
+  {
+    label: "心中充满了希望/信心/勇气",
+    patterns: [/心中充满了?(希望|信心|勇气)/u, /(hearts?|minds?)\s+(?:full of|filled with)\s+(hope|confidence|courage)/i],
+  },
+];
+
+const ENDING_MODE_PATTERNS: ReadonlyArray<{
+  readonly mode: string;
+  readonly patterns: ReadonlyArray<RegExp>;
+}> = [
+  {
+    mode: "far-horizon-secret",
+    patterns: [
+      /冰山一角|真正的秘密|等待着?.{0,8}(揭开|揭晓)|一切答案都在前方|更大的秘密还在前方/u,
+      /tip of the iceberg|real secret|waiting .* uncover|answers .* ahead|greater secret.* ahead/i,
+    ],
+  },
+  {
+    mode: "shadow-fade-exit",
+    patterns: [
+      /身影消失在黑暗中|走向前方|迈向前方|消失在夜色里/u,
+      /figures?.*(disappeared|faded).*(dark|night)|walked toward what lay ahead/i,
+    ],
+  },
+  {
+    mode: "hopeful-future-lift",
+    patterns: [
+      /未知的未来|心中充满了?(希望|信心|勇气)|未来仍在前方/u,
+      /unknown future|filled with (hope|confidence|courage)|future still lay ahead/i,
+    ],
+  },
+];
 
 const RESOURCE_SIGNAL_RULES: ReadonlyArray<{
   readonly kind: ResourceLedgerFinding["kind"];
@@ -1311,6 +1383,76 @@ export function toCadenceDirectiveWarnings(
   }];
 }
 
+export function evaluateEndingIsomorphism(
+  content: string,
+  recentChapters: string,
+): EndingIsomorphismCheck | undefined {
+  const recentEndingRegions = extractRecentEndingRegions(recentChapters);
+  if (recentEndingRegions.length === 0) {
+    return undefined;
+  }
+
+  const currentEnding = extractEndingRegion(content);
+  if (!currentEnding.trim()) {
+    return undefined;
+  }
+
+  const repeatedPhrases = ENDING_ISOMORPHISM_PHRASES
+    .filter((candidate) => {
+      const currentMatched = candidate.patterns.some((pattern) => pattern.test(currentEnding));
+      if (!currentMatched) {
+        return false;
+      }
+      const priorHits = recentEndingRegions.filter((ending) =>
+        candidate.patterns.some((pattern) => pattern.test(ending))
+      ).length;
+      return priorHits >= 2;
+    })
+    .map((candidate) => candidate.label);
+
+  const currentModes = detectEndingModes(currentEnding);
+  const repeatedModes = [...new Set(currentModes.filter((mode) => {
+    const priorHits = recentEndingRegions.filter((ending) => detectEndingModes(ending).includes(mode)).length;
+    return priorHits >= 2;
+  }))];
+
+  const matched = repeatedPhrases.length > 0 || repeatedModes.length > 0;
+  const evidence = matched
+    ? snippetAround(currentEnding, 0, Math.min(currentEnding.length, 80))
+    : undefined;
+
+  return {
+    matched: !matched,
+    repeatedPhrases,
+    repeatedModes,
+    ...(evidence ? { evidence } : {}),
+  };
+}
+
+export function toEndingIsomorphismWarnings(
+  check: EndingIsomorphismCheck | undefined,
+  language: "zh" | "en",
+): ReadonlyArray<PostWriteViolation> {
+  if (!check || check.matched) {
+    return [];
+  }
+
+  const repeatedSignals = [
+    ...check.repeatedPhrases,
+    ...check.repeatedModes.map((mode) => `mode:${mode}`),
+  ].slice(0, 3).join(" / ");
+  return [{
+    rule: "ending-isomorphism",
+    severity: "warning",
+    description: language === "en"
+      ? `The closing beat is too close to the recent ending shell${repeatedSignals ? ` (${repeatedSignals})` : ""}.`
+      : `章尾收束方式与最近章节过于同构${repeatedSignals ? `（${repeatedSignals}）` : ""}。`,
+    suggestion: language === "en"
+      ? "Rewrite only the closing paragraphs and rotate the ending mode toward danger cliff, reveal sting, emotional beat, hard decision, short aftermath twist, or unfinished action beat while keeping chapter facts."
+      : "只重写结尾段，保留章节事实，并优先轮换到 danger cliff、reveal sting、emotional beat、hard decision、short aftermath twist 或 unfinished action beat 这类不同收束模式。",
+  }];
+}
+
 function findPartialEscapeProgressEvidence(
   content: string,
   expectedPayoff: string,
@@ -1469,6 +1611,25 @@ function countPatternHits(content: string, patterns: ReadonlyArray<RegExp>): num
 function countRegexMatches(content: string, pattern: RegExp): number {
   const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
   return [...content.matchAll(new RegExp(pattern.source, flags))].length;
+}
+
+function extractRecentEndingRegions(recentChapters: string): ReadonlyArray<string> {
+  if (!recentChapters.trim()) {
+    return [];
+  }
+
+  return recentChapters
+    .split(/\n\s*---\s*\n/u)
+    .map((chapter) => extractEndingRegion(chapter))
+    .map((ending) => ending.trim())
+    .filter(Boolean)
+    .slice(-3);
+}
+
+function detectEndingModes(endingRegion: string): ReadonlyArray<string> {
+  return ENDING_MODE_PATTERNS
+    .filter((candidate) => candidate.patterns.some((pattern) => pattern.test(endingRegion)))
+    .map((candidate) => candidate.mode);
 }
 
 function isEscapePayoff(expectedPayoff: string): boolean {
