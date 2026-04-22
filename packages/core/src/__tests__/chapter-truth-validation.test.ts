@@ -250,4 +250,93 @@ describe("validateChapterTruthPersistence", () => {
       }),
     ]);
   });
+
+  it("auto-reconciles unsupported settlement gaps before invoking settlement retry", async () => {
+    const validator = {
+      validate: vi.fn()
+        .mockResolvedValueOnce(createValidationResult({
+          passed: false,
+          warnings: [{
+            category: "unsupported_change",
+            description: "正文写进入东侧裂缝，但 state 未更新位置。",
+          }],
+        }))
+        .mockResolvedValueOnce(createValidationResult({
+          passed: true,
+          warnings: [],
+        })),
+    };
+    const writer = {
+      settleChapterState: vi.fn(),
+    };
+
+    const result = await validateChapterTruthPersistence({
+      writer,
+      validator,
+      book: BOOK,
+      bookDir: "/tmp/book",
+      chapterNumber: 9,
+      title: "裂缝深处",
+      content: "楚夜进入东侧裂缝，旧伤裂开。他发现H001推进的新线索，并消耗药引压住毒性。",
+      persistenceOutput: createWriterOutput({
+        updatedState: "# 当前状态\n\n- 楚夜仍在原地。",
+        updatedHooks: "# 伏笔池\n",
+        updatedLedger: "# 资源账本\n",
+      }),
+      auditResult: createAuditResult(),
+      previousTruth: {
+        oldState: "# 当前状态\n\n- 楚夜仍在原地。\n",
+        oldHooks: "# 伏笔池\n",
+        oldLedger: "# 资源账本\n",
+      },
+      language: "zh",
+      logWarn: vi.fn(),
+      logger: { warn: vi.fn() },
+    });
+
+    expect(writer.settleChapterState).not.toHaveBeenCalled();
+    expect(result.validation.passed).toBe(true);
+    expect(result.persistenceOutput.updatedState).toContain("当前位置: 东侧裂缝");
+    expect(result.persistenceOutput.updatedState).toContain("主角状态: 旧伤裂开");
+    expect(result.persistenceOutput.updatedHooks).toContain("H001");
+    expect(result.persistenceOutput.updatedLedger).toContain("药引压住毒性：本章已消耗");
+    expect(result.persistenceOutput.settlementConfidence).toBeGreaterThanOrEqual(0.8);
+  });
+
+  it("adds a settlement-confidence warning issue when synchronization confidence is low", async () => {
+    const validator = {
+      validate: vi.fn().mockResolvedValue(createValidationResult()),
+    };
+    const writer = {
+      settleChapterState: vi.fn(),
+    };
+
+    const result = await validateChapterTruthPersistence({
+      writer,
+      validator,
+      book: BOOK,
+      bookDir: "/tmp/book",
+      chapterNumber: 5,
+      title: "Test Chapter",
+      content: "Chapter content.",
+      persistenceOutput: createWriterOutput({
+        settlementConfidence: 0.45,
+      }),
+      auditResult: createAuditResult(),
+      previousTruth: {
+        oldState: "stable state",
+        oldHooks: "stable hooks",
+        oldLedger: "stable ledger",
+      },
+      language: "zh",
+      logWarn: vi.fn(),
+      logger: { warn: vi.fn() },
+    });
+
+    expect(result.auditResult.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        category: "settlement-confidence",
+      }),
+    ]));
+  });
 });

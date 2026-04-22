@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { BaseAgent } from "./base.js";
 import type { BookConfig } from "../models/book.js";
 import { parseBookRules } from "../models/book-rules.js";
+import { CurrentStateStateSchema } from "../models/runtime-state.js";
 import {
   ChapterIntentSchema,
   type ChapterConflict,
@@ -26,6 +27,7 @@ import {
   summarizePowerSystem,
 } from "../utils/webnovel-inputs.js";
 import { describeHookLifecycle, resolveHookPayoffTiming } from "../utils/hook-lifecycle.js";
+import { renderCurrentStateProjection } from "../state/state-projections.js";
 
 export interface PlanChapterInput {
   readonly book: BookConfig;
@@ -78,6 +80,16 @@ interface HookEmergenceDirective {
   readonly targetHook?: HookPressureStateEntry;
 }
 
+interface PlannerCurrentStateResolution {
+  readonly markdown: string;
+  readonly sourcePath: string;
+}
+
+interface ContinuityGoalResolution {
+  readonly goal: string;
+  readonly conflict?: ChapterConflict;
+}
+
 export class PlannerAgent extends BaseAgent {
   get name(): string {
     return "planner";
@@ -110,7 +122,7 @@ export class PlannerAgent extends BaseAgent {
       volumeOutline,
       chapterSummaries,
       bookRulesRaw,
-      currentState,
+      currentStateMarkdown,
       pendingHooksRaw,
       foreshadowRegistryRaw,
       genreProfileRaw,
@@ -131,6 +143,15 @@ export class PlannerAgent extends BaseAgent {
       this.readFileOrDefault(sourcePaths.powerSystem),
     ]);
     const language = this.isChineseLanguage(input.book.language) ? "zh" : "en";
+    const resolvedCurrentState = await this.resolveCurrentStateForPlanning({
+      storyDir,
+      chapterNumber: input.chapterNumber,
+      language,
+      currentStateMarkdown,
+      chapterSummaries,
+    });
+    const currentState = resolvedCurrentState.markdown;
+    const preferLatestStateAnchor = resolvedCurrentState.sourcePath !== sourcePaths.currentState;
     const genreProfile = summarizeGenreProfile(genreProfileRaw, language);
     const arcMap = summarizeArcMap(arcMapRaw, input.chapterNumber, language);
     const powerSystem = summarizePowerSystem(powerSystemRaw, language);
@@ -153,15 +174,23 @@ export class PlannerAgent extends BaseAgent {
     const matchedOutlineAnchor = outlineLooksStale
       ? false
       : outlineSelection.matchedAnchor;
-    const goal = this.deriveGoal(
+    const derivedGoal = this.deriveGoal(
       input.externalContext,
       currentFocus,
       authorIntent,
-      outlineLooksStale ? continuityAnchor.goal : undefined,
+      (outlineLooksStale || preferLatestStateAnchor) ? continuityAnchor.goal : undefined,
       outlineNode,
       arcMap.goalHint,
       input.chapterNumber,
     );
+    const continuityGoal = this.applyContinuityGoalOverride({
+      chapterNumber: input.chapterNumber,
+      goal: derivedGoal,
+      continuityAnchor,
+      outlineNode,
+      preferLatestStateAnchor,
+    });
+    const goal = continuityGoal.goal;
     const parsedRules = parseBookRules(bookRulesRaw);
     const mustKeepBase = this.unique([
       ...this.collectMustKeep(currentState, storyBible),
@@ -273,7 +302,11 @@ export class PlannerAgent extends BaseAgent {
         ...this.buildHookDebtMustAvoid(hookThrottle, language),
       ]).slice(0, 8),
       styleEmphasis,
-      conflicts: [...conflicts, ...throttleConflicts],
+      conflicts: [
+        ...conflicts,
+        ...(continuityGoal.conflict ? [continuityGoal.conflict] : []),
+        ...throttleConflicts,
+      ],
       chapterGoal,
       hookAgenda,
     });
@@ -292,11 +325,327 @@ export class PlannerAgent extends BaseAgent {
     return {
       intent,
       intentMarkdown,
-      plannerInputs: [
+      plannerInputs: this.unique([
         ...Object.values(sourcePaths),
+        resolvedCurrentState.sourcePath,
         ...(memorySelection.dbPath ? [memorySelection.dbPath] : []),
-      ],
+      ]),
       runtimePath,
+    };
+  }
+
+  private async resolveCurrentStateForPlanning(input: {
+    readonly storyDir: string;
+    readonly chapterNumber: number;
+    readonly language: "zh" | "en";
+    readonly currentStateMarkdown: string;
+    readonly chapterSummaries: string;
+  }): Promise<PlannerCurrentStateResolution> {
+    const snapshotPath = join(input.storyDir, "state", "current_state.json");
+    const runtimeContextPath = join(
+      input.storyDir,
+      "runtime",
+      `chapter-${String(Math.max(1, input.chapterNumber - 1)).padStart(4, "0")}.context.json`,
+    );
+    const fallbackPath = join(input.storyDir, "current_state.md");
+
+    const snapshotMarkdown = await this.readCurrentStateSnapshot(snapshotPath, input.language);
+    if (snapshotMarkdown) {
+      return {
+        markdown: snapshotMarkdown,
+        sourcePath: snapshotPath,
+      };
+    }
+
+    const runtimeContextState = await this.readStateFromRuntimeContext({
+      runtimeContextPath,
+      chapterNumber: input.chapterNumber,
+      language: input.language,
+    });
+    if (runtimeContextState) {
+      return {
+        markdown: runtimeContextState,
+        sourcePath: runtimeContextPath,
+      };
+    }
+
+    const markdownLooksLagging = this.isMarkdownStateLaggingBehindSummaries({
+      currentStateMarkdown: input.currentStateMarkdown,
+      chapterSummaries: input.chapterSummaries,
+      chapterNumber: input.chapterNumber,
+    });
+    if (input.currentStateMarkdown.trim() && !markdownLooksLagging) {
+      return {
+        markdown: input.currentStateMarkdown,
+        sourcePath: fallbackPath,
+      };
+    }
+
+    const summaryFallback = this.deriveStateFromChapterSummaries({
+      chapterSummaries: input.chapterSummaries,
+      chapterNumber: input.chapterNumber,
+      language: input.language,
+    });
+    if (summaryFallback) {
+      return {
+        markdown: summaryFallback,
+        sourcePath: join(input.storyDir, "chapter_summaries.md"),
+      };
+    }
+
+    if (input.currentStateMarkdown.trim()) {
+      return {
+        markdown: input.currentStateMarkdown,
+        sourcePath: fallbackPath,
+      };
+    }
+
+    return {
+      markdown: this.buildFallbackCurrentState(input.language, input.chapterNumber),
+      sourcePath: fallbackPath,
+    };
+  }
+
+  private async readCurrentStateSnapshot(path: string, language: "zh" | "en"): Promise<string | undefined> {
+    try {
+      const raw = await readFile(path, "utf-8");
+      const parsed = CurrentStateStateSchema.parse(JSON.parse(raw));
+      return renderCurrentStateProjection(parsed, language);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async readStateFromRuntimeContext(input: {
+    readonly runtimeContextPath: string;
+    readonly chapterNumber: number;
+    readonly language: "zh" | "en";
+  }): Promise<string | undefined> {
+    const raw = await readFile(input.runtimeContextPath, "utf-8").catch(() => undefined);
+    if (!raw) return undefined;
+
+    type ContextSource = { source?: string; excerpt?: string };
+    type RuntimeContextShape = {
+      selectedContext?: ReadonlyArray<ContextSource>;
+      chapterGoal?: {
+        mainConflict?: string;
+        protagonistGoal?: string;
+      };
+    };
+
+    let parsed: RuntimeContextShape | undefined;
+    try {
+      parsed = JSON.parse(raw) as RuntimeContextShape;
+    } catch {
+      return undefined;
+    }
+
+    const fields = new Map<string, string>();
+    const entries = parsed.selectedContext ?? [];
+    for (const entry of entries) {
+      if (!entry?.source?.startsWith("story/current_state.md#")) {
+        continue;
+      }
+      const excerpt = entry.excerpt?.trim() ?? "";
+      const match = excerpt.match(/^(.+?)\s*\|\s*(.+)$/u);
+      if (!match) continue;
+      const key = this.normalizeCurrentStateLabel(match[1] ?? "");
+      const value = (match[2] ?? "").trim();
+      if (!key || !value) continue;
+      fields.set(key, value);
+    }
+
+    const protagonistGoal = parsed.chapterGoal?.protagonistGoal?.trim();
+    if (!fields.has("goal") && protagonistGoal) {
+      fields.set("goal", protagonistGoal);
+    }
+    const mainConflict = parsed.chapterGoal?.mainConflict?.trim();
+    if (!fields.has("conflict") && mainConflict) {
+      fields.set("conflict", mainConflict);
+    }
+
+    if (fields.size === 0) {
+      return undefined;
+    }
+
+    const projected = CurrentStateStateSchema.parse({
+      chapter: Math.max(0, input.chapterNumber - 1),
+      facts: [...fields.entries()].map(([key, value]) => ({
+        subject: "protagonist",
+        predicate: this.denormalizeCurrentStateLabel(key, input.language),
+        object: value,
+        validFromChapter: Math.max(0, input.chapterNumber - 1),
+        validUntilChapter: null,
+        sourceChapter: Math.max(0, input.chapterNumber - 1),
+      })),
+    });
+    return renderCurrentStateProjection(projected, input.language);
+  }
+
+  private deriveStateFromChapterSummaries(input: {
+    readonly chapterSummaries: string;
+    readonly chapterNumber: number;
+    readonly language: "zh" | "en";
+  }): string | undefined {
+    const latestSummary = parseChapterSummariesMarkdown(input.chapterSummaries)
+      .filter((summary) => summary.chapter < input.chapterNumber)
+      .sort((left, right) => right.chapter - left.chapter)[0];
+    if (!latestSummary) {
+      return undefined;
+    }
+
+    const facts: Array<{ key: string; value: string }> = [];
+    if (latestSummary.events.trim()) {
+      facts.push({ key: "goal", value: latestSummary.events.trim() });
+    }
+    if (latestSummary.stateChanges.trim()) {
+      facts.push({ key: "conflict", value: latestSummary.stateChanges.trim() });
+    }
+    if (latestSummary.characters.trim()) {
+      facts.push({ key: "alliances", value: latestSummary.characters.trim() });
+    }
+    if (facts.length === 0) {
+      return undefined;
+    }
+
+    const projected = CurrentStateStateSchema.parse({
+      chapter: latestSummary.chapter,
+      facts: facts.map((item) => ({
+        subject: "current_state",
+        predicate: this.denormalizeCurrentStateLabel(item.key, input.language),
+        object: item.value,
+        validFromChapter: latestSummary.chapter,
+        validUntilChapter: null,
+        sourceChapter: latestSummary.chapter,
+      })),
+    });
+    return renderCurrentStateProjection(projected, input.language);
+  }
+
+  private buildFallbackCurrentState(language: "zh" | "en", chapterNumber: number): string {
+    const fallback = CurrentStateStateSchema.parse({
+      chapter: Math.max(0, chapterNumber - 1),
+      facts: [],
+    });
+    return renderCurrentStateProjection(fallback, language);
+  }
+
+  private isMarkdownStateLaggingBehindSummaries(input: {
+    readonly currentStateMarkdown: string;
+    readonly chapterSummaries: string;
+    readonly chapterNumber: number;
+  }): boolean {
+    const stateChapter = this.extractCurrentStateMarkdownChapter(input.currentStateMarkdown);
+    if (stateChapter === undefined) {
+      return false;
+    }
+    const latestSummaryChapter = parseChapterSummariesMarkdown(input.chapterSummaries)
+      .filter((summary) => summary.chapter < input.chapterNumber)
+      .sort((left, right) => right.chapter - left.chapter)[0]?.chapter;
+    if (!latestSummaryChapter) {
+      return false;
+    }
+    return stateChapter < latestSummaryChapter;
+  }
+
+  private extractCurrentStateMarkdownChapter(markdown: string): number | undefined {
+    const lines = markdown.split("\n").map((line) => line.trim()).filter(Boolean);
+    for (const line of lines) {
+      if (!line.startsWith("|")) continue;
+      if (line.includes("---")) continue;
+      const cells = line.split("|").slice(1, -1).map((cell) => cell.trim());
+      const label = cells[0] ?? "";
+      const value = cells[1] ?? "";
+      if (!/^(当前章节|current chapter)$/i.test(label)) continue;
+      const parsed = Number.parseInt((value.match(/\d+/)?.[0] ?? ""), 10);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+    return undefined;
+  }
+
+  private normalizeCurrentStateLabel(label: string): string {
+    const normalized = label.trim().toLowerCase();
+    if (/^(current location|当前位置)$/i.test(normalized)) return "location";
+    if (/^(protagonist state|主角状态)$/i.test(normalized)) return "protagonist_state";
+    if (/^(current goal|当前目标)$/i.test(normalized)) return "goal";
+    if (/^(current constraint|当前限制)$/i.test(normalized)) return "constraint";
+    if (/^(current alliances|current relationships|当前敌我)$/i.test(normalized)) return "alliances";
+    if (/^(current conflict|当前冲突)$/i.test(normalized)) return "conflict";
+    return "";
+  }
+
+  private denormalizeCurrentStateLabel(
+    key: string,
+    language: "zh" | "en",
+  ): string {
+    const labels = language === "zh"
+      ? {
+        location: "当前位置",
+        protagonist_state: "主角状态",
+        goal: "当前目标",
+        constraint: "当前限制",
+        alliances: "当前敌我",
+        conflict: "当前冲突",
+      }
+      : {
+        location: "Current Location",
+        protagonist_state: "Protagonist State",
+        goal: "Current Goal",
+        constraint: "Current Constraint",
+        alliances: "Current Alliances",
+        conflict: "Current Conflict",
+      };
+    return labels[key as keyof typeof labels] ?? key;
+  }
+
+  private applyContinuityGoalOverride(input: {
+    readonly chapterNumber: number;
+    readonly goal: string;
+    readonly continuityAnchor: ContinuityAnchor;
+    readonly outlineNode?: string;
+    readonly preferLatestStateAnchor: boolean;
+  }): ContinuityGoalResolution {
+    if (input.chapterNumber < 4) {
+      return { goal: input.goal };
+    }
+
+    const recentAnchor = this.firstMeaningful([
+      input.continuityAnchor.goal,
+      input.continuityAnchor.outlineNode,
+      input.continuityAnchor.summaryText,
+      input.outlineNode,
+    ]);
+    if (!recentAnchor) {
+      return { goal: input.goal };
+    }
+
+    const openingAnchor = input.continuityAnchor.firstSummaryText;
+    if (!openingAnchor) {
+      return { goal: input.goal };
+    }
+
+    const looksLikeOpeningRegression = this.hasKeywordOverlap(input.goal, openingAnchor)
+      && !this.hasKeywordOverlap(input.goal, recentAnchor);
+    const looksLikeStaleAgainstLatestAnchor = input.preferLatestStateAnchor
+      && !this.hasKeywordOverlap(input.goal, recentAnchor);
+    if (!looksLikeOpeningRegression && !looksLikeStaleAgainstLatestAnchor) {
+      return { goal: input.goal };
+    }
+
+    const overrideGoal = this.extractFirstDirective(recentAnchor);
+    if (!overrideGoal || overrideGoal.trim().toLowerCase() === input.goal.trim().toLowerCase()) {
+      return { goal: input.goal };
+    }
+
+    return {
+      goal: overrideGoal,
+      conflict: {
+        type: "continuity_goal_override",
+        resolution: "prefer latest runtime continuity anchor over stale opening beat",
+        detail: overrideGoal,
+      },
     };
   }
 

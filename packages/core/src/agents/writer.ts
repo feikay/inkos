@@ -49,6 +49,7 @@ import {
 import { extractPOVFromOutline, filterMatrixByPOV, filterHooksByPOV } from "../utils/pov-filter.js";
 import { parseCreativeOutput } from "./writer-parser.js";
 import { buildRuntimeStateArtifacts, saveRuntimeStateSnapshot, type RuntimeStateArtifacts } from "../state/runtime-state-store.js";
+import { reconcileSettlementDiff } from "../state/settlement-reconciliation.js";
 import type { RuntimeStateSnapshot } from "../state/state-reducer.js";
 import { parsePendingHooksMarkdown } from "../utils/memory-retrieval.js";
 import { analyzeHookHealth } from "../utils/hook-health.js";
@@ -107,6 +108,7 @@ export interface WriteChapterOutput {
   readonly updatedSubplots: string;
   readonly updatedEmotionalArcs: string;
   readonly updatedCharacterMatrix: string;
+  readonly settlementConfidence?: number;
   readonly postWriteErrors: ReadonlyArray<PostWriteViolation>;
   readonly postWriteWarnings: ReadonlyArray<PostWriteViolation>;
   readonly endingHookCheck?: EndingHookCheck;
@@ -433,6 +435,17 @@ export class WriterAgent extends BaseAgent {
       resolvedLanguage,
       chapterNumber,
     );
+    const reconciledSettlement = reconcileSettlementDiff({
+      content: creative.content,
+      chapterNumber,
+      language: resolvedLanguage,
+      oldState: currentState,
+      oldHooks: hooks,
+      oldLedger: ledger,
+      updatedState: runtimeStateArtifacts?.currentStateMarkdown ?? settlement.updatedState,
+      updatedHooks: runtimeStateArtifacts?.hooksMarkdown ?? settlement.updatedHooks,
+      updatedLedger: settlement.updatedLedger,
+    });
     const resolvedRuntimeStateDelta = runtimeStateArtifacts?.resolvedDelta ?? settlement.runtimeStateDelta;
     const priorHookIds = new Set(parsePendingHooksMarkdown(hooks).map((hook) => hook.hookId));
     const hookHealthIssues = resolvedRuntimeStateDelta
@@ -554,9 +567,9 @@ export class WriterAgent extends BaseAgent {
       postSettlement: settlement.postSettlement,
       runtimeStateDelta: resolvedRuntimeStateDelta,
       runtimeStateSnapshot: runtimeStateArtifacts?.snapshot ?? settlement.runtimeStateSnapshot,
-      updatedState: runtimeStateArtifacts?.currentStateMarkdown ?? settlement.updatedState,
-      updatedLedger: settlement.updatedLedger,
-      updatedHooks: runtimeStateArtifacts?.hooksMarkdown ?? settlement.updatedHooks,
+      updatedState: reconciledSettlement.updatedState,
+      updatedLedger: reconciledSettlement.updatedLedger,
+      updatedHooks: reconciledSettlement.updatedHooks,
       chapterSummary: resolvedRuntimeStateDelta
         ? this.renderDeltaSummaryRow(resolvedRuntimeStateDelta)
         : settlement.chapterSummary,
@@ -564,6 +577,7 @@ export class WriterAgent extends BaseAgent {
       updatedSubplots: settlement.updatedSubplots,
       updatedEmotionalArcs: settlement.updatedEmotionalArcs,
       updatedCharacterMatrix: settlement.updatedCharacterMatrix,
+      settlementConfidence: reconciledSettlement.settlementConfidence,
       postWriteErrors,
       postWriteWarnings,
       endingHookCheck: disciplineChecks?.endingHookCheck,
@@ -640,6 +654,17 @@ export class WriterAgent extends BaseAgent {
       input.chapterNumber,
       input.allowReapply,
     );
+    const reconciledSettlement = reconcileSettlementDiff({
+      content: input.content,
+      chapterNumber: input.chapterNumber,
+      language: resolvedLanguage,
+      oldState: currentState,
+      oldHooks: hooks,
+      oldLedger: ledger,
+      updatedState: runtimeStateArtifacts?.currentStateMarkdown ?? settlement.updatedState,
+      updatedHooks: runtimeStateArtifacts?.hooksMarkdown ?? settlement.updatedHooks,
+      updatedLedger: settlement.updatedLedger,
+    });
 
     return {
       chapterNumber: input.chapterNumber,
@@ -653,9 +678,9 @@ export class WriterAgent extends BaseAgent {
       postSettlement: settlement.postSettlement,
       runtimeStateDelta: runtimeStateArtifacts?.resolvedDelta ?? settlement.runtimeStateDelta,
       runtimeStateSnapshot: runtimeStateArtifacts?.snapshot ?? settlement.runtimeStateSnapshot,
-      updatedState: runtimeStateArtifacts?.currentStateMarkdown ?? settlement.updatedState,
-      updatedLedger: settlement.updatedLedger,
-      updatedHooks: runtimeStateArtifacts?.hooksMarkdown ?? settlement.updatedHooks,
+      updatedState: reconciledSettlement.updatedState,
+      updatedLedger: reconciledSettlement.updatedLedger,
+      updatedHooks: reconciledSettlement.updatedHooks,
       chapterSummary: settlement.runtimeStateDelta
         ? this.renderDeltaSummaryRow(settlement.runtimeStateDelta)
         : settlement.chapterSummary,
@@ -663,6 +688,7 @@ export class WriterAgent extends BaseAgent {
       updatedSubplots: settlement.updatedSubplots,
       updatedEmotionalArcs: settlement.updatedEmotionalArcs,
       updatedCharacterMatrix: settlement.updatedCharacterMatrix,
+      settlementConfidence: reconciledSettlement.settlementConfidence,
       postWriteErrors: [],
       postWriteWarnings: [],
       endingHookCheck: undefined,

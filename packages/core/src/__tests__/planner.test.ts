@@ -928,6 +928,265 @@ describe("PlannerAgent", () => {
     expect(result.intent.outlineNode).toContain("black market entrance");
   });
 
+  it("prefers latest runtime state snapshot over stale current_state markdown for next-chapter grounding", async () => {
+    const stateDir = join(storyDir, "state");
+    await mkdir(stateDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(
+        join(storyDir, "current_focus.md"),
+        "# Current Focus\n\n（描述接下来 1-3 章最需要优先推进的内容。）\n",
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "current_state.md"),
+        [
+          "# 当前状态",
+          "",
+          "| 字段 | 值 |",
+          "| --- | --- |",
+          "| 当前章节 | 28 |",
+          "| 当前位置 | 药铺后院 |",
+          "| 当前目标 | 回到药铺躲避追兵 |",
+          "| 当前冲突 | 药铺掌柜起疑 |",
+          "",
+        ].join("\n"),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "chapter_summaries.md"),
+        [
+          "# Chapter Summaries",
+          "",
+          "| chapter | title | characters | events | stateChanges | hookActivity | mood | chapterType |",
+          "| --- | --- | --- | --- | --- | --- | --- | --- |",
+          "| 29 | 暗河入口 | 楚夜 | 楚夜潜入黑石岭暗河入口并锁定黑市线。 | 无法回药铺，追兵封锁回路。 | hook_013 advanced | 紧绷 | transition |",
+          "",
+        ].join("\n"),
+        "utf-8",
+      ),
+      writeFile(
+        join(stateDir, "current_state.json"),
+        JSON.stringify({
+          chapter: 29,
+          facts: [
+            {
+              subject: "protagonist",
+              predicate: "当前位置",
+              object: "黑石岭暗河",
+              validFromChapter: 29,
+              validUntilChapter: null,
+              sourceChapter: 29,
+            },
+            {
+              subject: "protagonist",
+              predicate: "当前目标",
+              object: "潜入黑石岭暗河并找到黑市入口",
+              validFromChapter: 29,
+              validUntilChapter: null,
+              sourceChapter: 29,
+            },
+            {
+              subject: "protagonist",
+              predicate: "当前冲突",
+              object: "暗河追兵已锁定痕迹，回撤路径被切断",
+              validFromChapter: 29,
+              validUntilChapter: null,
+              sourceChapter: 29,
+            },
+          ],
+        }, null, 2),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "volume_outline.md"),
+        "# Volume Outline\n\n## Chapter 30\n回到药铺处理旧账。\n",
+        "utf-8",
+      ),
+    ]);
+
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await planner.planChapter({
+      book: {
+        ...book,
+        language: "zh",
+      },
+      bookDir,
+      chapterNumber: 30,
+    });
+
+    expect(result.intent.goal).toContain("黑石岭暗河");
+    expect(result.intent.goal).not.toContain("药铺");
+    expect(result.plannerInputs).toContain(join(storyDir, "state", "current_state.json"));
+  });
+
+  it("falls back to previous runtime context when snapshot is missing and markdown state is stale", async () => {
+    await Promise.all([
+      writeFile(
+        join(storyDir, "current_focus.md"),
+        "# Current Focus\n\nTODO\n",
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "current_state.md"),
+        [
+          "# 当前状态",
+          "",
+          "| 字段 | 值 |",
+          "| --- | --- |",
+          "| 当前章节 | 28 |",
+          "| 当前位置 | 药铺后院 |",
+          "| 当前目标 | 回到药铺躲避追兵 |",
+          "| 当前冲突 | 药铺掌柜起疑 |",
+          "",
+        ].join("\n"),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "runtime", "chapter-0029.context.json"),
+        JSON.stringify({
+          chapter: 29,
+          selectedContext: [
+            {
+              source: "story/current_state.md#当前位置",
+              excerpt: "当前位置 | 黑石岭暗河",
+            },
+            {
+              source: "story/current_state.md#当前目标",
+              excerpt: "当前目标 | 潜入黑石岭暗河并找到黑市入口",
+            },
+            {
+              source: "story/current_state.md#当前冲突",
+              excerpt: "当前冲突 | 暗河追兵已锁定痕迹，回撤路径被切断",
+            },
+          ],
+          chapterGoal: {
+            protagonistGoal: "潜入黑石岭暗河并找到黑市入口",
+            mainConflict: "暗河追兵已锁定痕迹，回撤路径被切断",
+          },
+        }, null, 2),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "chapter_summaries.md"),
+        "# Chapter Summaries\n",
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "volume_outline.md"),
+        "# Volume Outline\n\n## Chapter 30\n回到药铺处理旧账。\n",
+        "utf-8",
+      ),
+    ]);
+
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await planner.planChapter({
+      book: {
+        ...book,
+        language: "zh",
+      },
+      bookDir,
+      chapterNumber: 30,
+    });
+
+    expect(result.intent.goal).toContain("黑石岭暗河");
+    expect(result.intent.goal).not.toContain("药铺");
+    expect(result.plannerInputs).toContain(join(storyDir, "runtime", "chapter-0029.context.json"));
+  });
+
+  it("triggers continuity goal override when requested goal regresses to opening events", async () => {
+    const stateDir = join(storyDir, "state");
+    await mkdir(stateDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(
+        join(storyDir, "current_focus.md"),
+        "# Current Focus\n\nTODO\n",
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "chapter_summaries.md"),
+        [
+          "# Chapter Summaries",
+          "",
+          "| chapter | title | characters | events | stateChanges | hookActivity | mood | chapterType |",
+          "| --- | --- | --- | --- | --- | --- | --- | --- |",
+          "| 1 | 押送兽潮 | 楚夜 | 楚夜在押送途中遭遇兽潮并趁乱逃脱。 | 初次逃亡 | none | 绝望 | opening |",
+          "| 29 | 暗河入口 | 楚夜 | 楚夜潜入黑石岭暗河入口并锁定黑市线。 | 无法回药铺，追兵封锁回路。 | hook_013 advanced | 紧绷 | transition |",
+          "",
+        ].join("\n"),
+        "utf-8",
+      ),
+      writeFile(
+        join(stateDir, "current_state.json"),
+        JSON.stringify({
+          chapter: 29,
+          facts: [
+            {
+              subject: "protagonist",
+              predicate: "当前目标",
+              object: "潜入黑石岭暗河并找到黑市入口",
+              validFromChapter: 29,
+              validUntilChapter: null,
+              sourceChapter: 29,
+            },
+            {
+              subject: "protagonist",
+              predicate: "当前冲突",
+              object: "暗河追兵已锁定痕迹，回撤路径被切断",
+              validFromChapter: 29,
+              validUntilChapter: null,
+              sourceChapter: 29,
+            },
+          ],
+        }, null, 2),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "volume_outline.md"),
+        "# Volume Outline\n\n## Chapter 30\n回到押送现场重新经历兽潮。\n",
+        "utf-8",
+      ),
+    ]);
+
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await planner.planChapter({
+      book: {
+        ...book,
+        language: "zh",
+      },
+      bookDir,
+      chapterNumber: 30,
+      externalContext: "本章回到押送途中遭遇兽潮并趁乱逃脱。",
+    });
+
+    expect(result.intent.goal).toContain("黑石岭暗河");
+    expect(result.intent.goal).not.toContain("押送");
+    expect(result.intent.conflicts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "continuity_goal_override",
+      }),
+    ]));
+  });
+
   it("keeps external context above both outline anchors and current focus", async () => {
     await Promise.all([
       writeFile(

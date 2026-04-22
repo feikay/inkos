@@ -10,6 +10,12 @@ export interface ValidationResult {
   readonly passed: boolean;
 }
 
+export function hasRepairableStateWarnings(
+  warnings: ReadonlyArray<ValidationWarning>,
+): boolean {
+  return warnings.some((warning) => /^(unsupported_change|missing_state_change|hook_anomaly)$/i.test(warning.category.trim()));
+}
+
 /**
  * Validates Settler output by comparing old and new truth files via LLM.
  * Catches contradictions, missing state changes, and temporal inconsistencies.

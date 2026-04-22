@@ -1,10 +1,11 @@
 import type { AuditIssue, AuditResult } from "../agents/continuity.js";
-import type { ValidationResult, StateValidatorAgent } from "../agents/state-validator.js";
+import { hasRepairableStateWarnings, type ValidationResult, type StateValidatorAgent } from "../agents/state-validator.js";
 import type { WriteChapterOutput, WriterAgent } from "../agents/writer.js";
 import type { BookConfig } from "../models/book.js";
 import type { ContextPackage, RuleStack } from "../models/input-governance.js";
 import type { Logger } from "../utils/logger.js";
 import type { LengthLanguage } from "../utils/length-metrics.js";
+import { reconcileSettlementDiff } from "../state/settlement-reconciliation.js";
 import {
   buildStateDegradedPersistenceOutput,
   retrySettlementAfterValidationFailure,
@@ -97,6 +98,59 @@ export async function validateChapterTruthPersistence(params: {
   }
 
   if (!validation.passed) {
+    const canAttemptLocalRepair = hasRepairableStateWarnings(validation.warnings);
+    if (canAttemptLocalRepair) {
+      const repaired = reconcileSettlementDiff({
+        content: params.content,
+        chapterNumber: params.chapterNumber,
+        language: params.language,
+        oldState: params.previousTruth.oldState,
+        oldHooks: params.previousTruth.oldHooks,
+        oldLedger: params.previousTruth.oldLedger,
+        updatedState: persistenceOutput.updatedState,
+        updatedHooks: persistenceOutput.updatedHooks,
+        updatedLedger: persistenceOutput.updatedLedger,
+      });
+
+      if (repaired.repaired) {
+        const locallyRepairedOutput: WriteChapterOutput = {
+          ...persistenceOutput,
+          updatedState: repaired.updatedState,
+          updatedHooks: repaired.updatedHooks,
+          updatedLedger: repaired.updatedLedger,
+          settlementConfidence: repaired.settlementConfidence,
+        };
+
+        let localValidation: ValidationResult | null = null;
+        try {
+          localValidation = await params.validator.validate(
+            params.content,
+            params.chapterNumber,
+            params.previousTruth.oldState,
+            locallyRepairedOutput.updatedState,
+            params.previousTruth.oldHooks,
+            locallyRepairedOutput.updatedHooks,
+            params.language,
+          );
+        } catch (error) {
+          params.logger?.warn(`Local settlement reconciliation validation failed for chapter ${params.chapterNumber}: ${String(error)}`);
+        }
+
+        if (localValidation?.passed) {
+          params.logWarn({
+            zh: `状态校验：第${params.chapterNumber}章通过本地 reconciliation 自动修复`,
+            en: `State validation: chapter ${params.chapterNumber} auto-repaired by local reconciliation`,
+          });
+          validation = localValidation;
+          persistenceOutput = locallyRepairedOutput;
+        } else {
+          persistenceOutput = locallyRepairedOutput;
+        }
+      }
+    }
+  }
+
+  if (!validation.passed) {
     const recovery = await retrySettlementAfterValidationFailure({
       writer: params.writer,
       validator: params.validator,
@@ -131,6 +185,23 @@ export async function validateChapterTruthPersistence(params: {
         issues: [...auditResult.issues, ...recovery.issues],
       };
     }
+  }
+
+  if ((persistenceOutput.settlementConfidence ?? 1) < 0.8) {
+    const confidenceIssue: AuditIssue = {
+      severity: "warning",
+      category: "settlement-confidence",
+      description: params.language === "en"
+        ? `Settlement confidence is low (${Math.round((persistenceOutput.settlementConfidence ?? 0) * 100)}%). Some narrative facts may still be unsynchronized.`
+        : `Settlement confidence 偏低（${Math.round((persistenceOutput.settlementConfidence ?? 0) * 100)}%），部分正文事实可能仍未同步。`,
+      suggestion: params.language === "en"
+        ? "Check current_state, pending_hooks, and ledger before writing the next chapter."
+        : "继续写下一章前，请先人工核对 current_state / pending_hooks / ledger。",
+    };
+    auditResult = {
+      ...auditResult,
+      issues: [...auditResult.issues, confidenceIssue],
+    };
   }
 
   return {
