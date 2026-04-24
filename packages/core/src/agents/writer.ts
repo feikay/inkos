@@ -13,23 +13,28 @@ import {
   detectParagraphLengthDrift,
   evaluateCadenceDirectiveCompliance,
   evaluateChapterGoalDiscipline,
+  evaluateEndingTypeCompliance,
   evaluateEndingIsomorphism,
   evaluateHookEmergenceCompliance,
   evaluateHookDebtThrottle,
   evaluateMoodCadenceCompliance,
+  evaluatePayoffImpact,
   evaluateResourceLedgerDiscipline,
   toCadenceDirectiveWarnings,
   toDisciplineWarnings,
+  toEndingTypeWarnings,
   toEndingIsomorphismWarnings,
   toHookEmergenceWarnings,
   toHookDebtWarnings,
   toMoodCadenceWarnings,
+  toPayoffImpactWarnings,
   toResourceLedgerWarnings,
   validatePostWrite,
   type EndingHookCheck,
   type HookDebtCheck,
   type MoodCadenceCheck,
   type PayoffCheck,
+  type PayoffImpactCheck,
   type PostWriteViolation,
   type ResourceLedgerCheck,
 } from "./post-write-validator.js";
@@ -113,6 +118,7 @@ export interface WriteChapterOutput {
   readonly postWriteWarnings: ReadonlyArray<PostWriteViolation>;
   readonly endingHookCheck?: EndingHookCheck;
   readonly payoffCheck?: PayoffCheck;
+  readonly payoffImpactCheck?: PayoffImpactCheck;
   readonly moodCadenceCheck?: MoodCadenceCheck;
   readonly resourceLedgerCheck?: ResourceLedgerCheck;
   readonly hookDebtCheck?: HookDebtCheck;
@@ -294,17 +300,44 @@ export class WriterAgent extends BaseAgent {
 
     // Scale maxTokens to chapter word count (Chinese ≈ 1.5 tokens/char)
     const creativeMaxTokens = Math.max(8192, Math.ceil(targetWords * 2));
+    let phaseOneUsage: TokenUsage | undefined;
+    const lockedScene1 = moodDirective?.targetMode === "breath"
+      ? await this.generateLockedBreathScene1({
+          systemPrompt: creativeSystemPrompt,
+          baseUserPrompt: creativeUserPrompt,
+          language: resolvedLanguage,
+          chapterNumber,
+          maxTokens: Math.max(2048, Math.ceil(creativeMaxTokens * 0.35)),
+          temperature: Math.min(creativeTemperature, 0.55),
+          chapterIntent: input.chapterIntent,
+          countingMode: resolvedLengthSpec.countingMode,
+          onUsage: (usage) => {
+            // creativeUsage is initialized immediately after the main creative call.
+            phaseOneUsage = usage;
+          },
+        })
+      : undefined;
+    const lockedScene1Block = lockedScene1
+      ? this.buildLockedScene1Phase2Block(lockedScene1, resolvedLanguage)
+      : "";
 
     const creativeResponse = await this.chat(
       [
         { role: "system", content: creativeSystemPrompt },
-        { role: "user", content: creativeUserPrompt },
+        { role: "user", content: `${creativeUserPrompt}${lockedScene1Block}` },
       ],
       { maxTokens: creativeMaxTokens, temperature: creativeTemperature },
     );
-    let creativeUsage = creativeResponse.usage;
+    let creativeUsage = phaseOneUsage
+      ? {
+        promptTokens: phaseOneUsage.promptTokens + creativeResponse.usage.promptTokens,
+        completionTokens: phaseOneUsage.completionTokens + creativeResponse.usage.completionTokens,
+        totalTokens: phaseOneUsage.totalTokens + creativeResponse.usage.totalTokens,
+      }
+      : creativeResponse.usage;
 
     let creative = parseCreativeOutput(chapterNumber, creativeResponse.content, resolvedLengthSpec.countingMode);
+    creative = this.applyLockedScene1ToCreative(creative, lockedScene1, resolvedLengthSpec.countingMode);
     creative = await this.rewriteForHookEmergenceIfNeeded({
       creative,
       chapterIntent: input.chapterIntent,
@@ -322,6 +355,7 @@ export class WriterAgent extends BaseAgent {
         };
       },
     });
+    creative = this.applyLockedScene1ToCreative(creative, lockedScene1, resolvedLengthSpec.countingMode);
     creative = await this.rewriteForPayoffDirectiveIfNeeded({
       creative,
       chapterIntent: input.chapterIntent,
@@ -339,10 +373,12 @@ export class WriterAgent extends BaseAgent {
         };
       },
     });
+    creative = this.applyLockedScene1ToCreative(creative, lockedScene1, resolvedLengthSpec.countingMode);
     creative = await this.rewriteForMoodDirectiveIfNeeded({
       creative,
       chapterIntent: input.chapterIntent,
       moodDirective,
+      hookEmergenceDirective,
       language: resolvedLanguage,
       chapterNumber,
       maxTokens: creativeMaxTokens,
@@ -356,6 +392,24 @@ export class WriterAgent extends BaseAgent {
         };
       },
     });
+    creative = this.applyLockedScene1ToCreative(creative, lockedScene1, resolvedLengthSpec.countingMode);
+    creative = await this.rewriteForEndingTypeIfNeeded({
+      creative,
+      chapterIntent: input.chapterIntent,
+      language: resolvedLanguage,
+      chapterNumber,
+      maxTokens: creativeMaxTokens,
+      titleCandidates,
+      countingMode: resolvedLengthSpec.countingMode,
+      onUsage: (usage) => {
+        creativeUsage = {
+          promptTokens: creativeUsage.promptTokens + usage.promptTokens,
+          completionTokens: creativeUsage.completionTokens + usage.completionTokens,
+          totalTokens: creativeUsage.totalTokens + usage.totalTokens,
+        };
+      },
+    });
+    creative = this.applyLockedScene1ToCreative(creative, lockedScene1, resolvedLengthSpec.countingMode);
     const resolvedTitle = resolveChapterTitle({
       language: resolvedLanguage,
       rawTitle: creative.title,
@@ -469,9 +523,19 @@ export class WriterAgent extends BaseAgent {
     const disciplineChecks = chapterGoal
       ? evaluateChapterGoalDiscipline(creative.content, chapterGoal)
       : undefined;
+    const payoffImpactCheck = chapterGoal
+      ? evaluatePayoffImpact(creative.content, chapterGoal)
+      : undefined;
+    const endingTypeCheck = evaluateEndingTypeCompliance(
+      creative.content,
+      input.chapterIntent,
+    );
     const disciplineWarnings = disciplineChecks
       ? toDisciplineWarnings(disciplineChecks, resolvedLanguage)
       : [];
+    const endingTypeWarnings = toEndingTypeWarnings(endingTypeCheck, resolvedLanguage);
+    const payoffImpactWarnings = toPayoffImpactWarnings(payoffImpactCheck, resolvedLanguage);
+    const normalizedDisciplineWarnings = disciplineWarnings.filter((warning) => warning.rule !== "ending-hook-check");
     const cadenceDirectiveCheck = evaluateCadenceDirectiveCompliance(
       creative.content,
       input.chapterIntent,
@@ -510,7 +574,9 @@ export class WriterAgent extends BaseAgent {
     const hookDebtWarnings = toHookDebtWarnings(hookDebtCheck, resolvedLanguage);
     const allWarnings = [
       ...ruleViolations,
-      ...disciplineWarnings,
+      ...normalizedDisciplineWarnings,
+      ...payoffImpactWarnings,
+      ...endingTypeWarnings,
       ...cadenceDirectiveWarnings,
       ...moodCadenceWarnings,
       ...endingIsomorphismWarnings,
@@ -582,6 +648,7 @@ export class WriterAgent extends BaseAgent {
       postWriteWarnings,
       endingHookCheck: disciplineChecks?.endingHookCheck,
       payoffCheck: disciplineChecks?.payoffCheck,
+      payoffImpactCheck,
       moodCadenceCheck,
       resourceLedgerCheck,
       hookDebtCheck,
@@ -693,6 +760,7 @@ export class WriterAgent extends BaseAgent {
       postWriteWarnings: [],
       endingHookCheck: undefined,
       payoffCheck: undefined,
+      payoffImpactCheck: undefined,
       resourceLedgerCheck: undefined,
       hookDebtCheck: undefined,
       tokenUsage: settleResult.usage,
@@ -727,16 +795,19 @@ export class WriterAgent extends BaseAgent {
     const payoffToDeliver = entries.get("payoffToDeliver");
     const payoffDirectivePromisedPayoff = entries.get("payoffDirective.promisedPayoff");
     const payoffDirectivePayoffType = entries.get("payoffDirective.payoffType");
+    const payoffDirectivePayoffDepth = entries.get("payoffDirective.payoffDepth");
     const payoffDirectiveMandatory = entries.get("payoffDirective.mandatoryByFinalAct");
     const endingHookType = entries.get("endingHookType");
+    const endingType = entries.get("endingType") ?? this.extractEndingTypeFromIntentMarkdown(chapterIntent);
     const nextChapterPull = entries.get("nextChapterPull");
-    if (!mainConflict || !protagonistGoal || !payoffToDeliver || !endingHookType || !nextChapterPull) {
+    if (!mainConflict || !protagonistGoal || !payoffToDeliver || !nextChapterPull) {
       return undefined;
     }
 
-    if (!["danger", "reveal", "pursuit", "choice", "breakthrough"].includes(endingHookType)) {
-      return undefined;
-    }
+    const resolvedEndingHookType = this.resolveLegacyEndingHookType({
+      endingType,
+      endingHookType,
+    });
 
     return {
       mainConflict,
@@ -749,13 +820,50 @@ export class WriterAgent extends BaseAgent {
           payoffDirective: {
             promisedPayoff: payoffDirectivePromisedPayoff,
             payoffType: payoffDirectivePayoffType as "reveal" | "resource" | "breakthrough" | "relationship" | "reversal",
+            payoffDepth: payoffDirectivePayoffDepth === "shallow" || payoffDirectivePayoffDepth === "deep"
+              ? payoffDirectivePayoffDepth
+              : "layered",
             mandatoryByFinalAct: payoffDirectiveMandatory !== "false",
           },
         }
         : {}),
-      endingHookType: endingHookType as ChapterGoal["endingHookType"],
+      endingHookType: resolvedEndingHookType,
       nextChapterPull,
     };
+  }
+
+  private extractEndingTypeFromIntentMarkdown(chapterIntent: string | undefined): "reveal_end" | "unresolved_end" | "resolution_end" | "twist_end" | "calm_end" | undefined {
+    if (!chapterIntent) {
+      return undefined;
+    }
+    const match = chapterIntent.match(/## Structured Directives[\s\S]*?-\s*endingType:\s*(reveal_end|unresolved_end|resolution_end|twist_end|calm_end)/i);
+    return match?.[1]?.toLowerCase() as "reveal_end" | "unresolved_end" | "resolution_end" | "twist_end" | "calm_end" | undefined;
+  }
+
+  private resolveLegacyEndingHookType(input: {
+    readonly endingType?: string;
+    readonly endingHookType?: string;
+  }): ChapterGoal["endingHookType"] {
+    if (input.endingType) {
+      switch (input.endingType) {
+        case "reveal_end":
+          return "reveal";
+        case "unresolved_end":
+          return "danger";
+        case "resolution_end":
+          return "breakthrough";
+        case "twist_end":
+          return "choice";
+        case "calm_end":
+          return "choice";
+      }
+    }
+
+    if (input.endingHookType && ["danger", "reveal", "pursuit", "choice", "breakthrough"].includes(input.endingHookType)) {
+      return input.endingHookType as ChapterGoal["endingHookType"];
+    }
+
+    return "danger";
   }
 
   private splitInlineList(value: string | undefined): string[] {
@@ -771,6 +879,7 @@ export class WriterAgent extends BaseAgent {
 
   private extractHookEmergenceDirectiveFromIntentMarkdown(chapterIntent: string | undefined): {
     readonly mustMaterializeHookNow: boolean;
+    readonly hookExecutionPhase?: "any" | "late";
     readonly targetHookId?: string;
     readonly targetHookState?: string;
     readonly targetHookExpectedPayoff?: string;
@@ -788,6 +897,9 @@ export class WriterAgent extends BaseAgent {
 
     return {
       mustMaterializeHookNow: true,
+      ...(section.match(/hookExecutionPhase:\s*(any|late)/i)?.[1]?.trim()
+        ? { hookExecutionPhase: section.match(/hookExecutionPhase:\s*(any|late)/i)?.[1]?.trim().toLowerCase() as "any" | "late" }
+        : {}),
       ...(section.match(/targetHookId:\s*(.+)/i)?.[1]?.trim() ? { targetHookId: section.match(/targetHookId:\s*(.+)/i)?.[1]?.trim() } : {}),
       ...(section.match(/targetHookState:\s*(.+)/i)?.[1]?.trim() ? { targetHookState: section.match(/targetHookState:\s*(.+)/i)?.[1]?.trim() } : {}),
       ...(section.match(/targetHookExpectedPayoff:\s*(.+)/i)?.[1]?.trim() ? { targetHookExpectedPayoff: section.match(/targetHookExpectedPayoff:\s*(.+)/i)?.[1]?.trim() } : {}),
@@ -1062,7 +1174,9 @@ export class WriterAgent extends BaseAgent {
 ${params.parentCanon}\n`
       : "";
     const titleBlock = this.buildTitleCandidatesBlock(params.titleCandidates, params.language ?? "zh");
+    const modeLockBlock = this.buildFirstPassModeLockBlock(params.moodDirective, params.language ?? "zh");
     const moodDirectiveBlock = this.buildMoodDirectiveBlock(params.moodDirective, params.language ?? "zh");
+    const characterAuthenticityBlock = this.buildCharacterAuthenticityBlock(params.language ?? "zh");
     const payoffDirectiveBlock = this.buildPayoffDirectiveBlock(params.chapterGoal, params.language ?? "zh");
     const hookEmergenceDirectiveBlock = this.buildHookEmergenceDirectiveBlock({
       directive: params.hookEmergenceDirective,
@@ -1072,6 +1186,7 @@ ${params.parentCanon}\n`
 
     if (params.language === "en") {
       return `Write chapter ${params.chapterNumber}.
+${modeLockBlock}
 ${contextBlock}
 ## Current State
 ${params.currentState}
@@ -1081,6 +1196,7 @@ ${params.hooks}
 ${summariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${fingerprintBlock}${relevantBlock}${canonBlock}
 ${titleBlock}
 ${moodDirectiveBlock}
+${characterAuthenticityBlock}
 ${payoffDirectiveBlock}
 ${hookEmergenceDirectiveBlock}
 ## Recent Chapters
@@ -1104,6 +1220,7 @@ ${lengthRequirementBlock}
     }
 
     return `请续写第${params.chapterNumber}章。
+${modeLockBlock}
 ${contextBlock}
 ## 当前状态卡
 ${params.currentState}
@@ -1113,6 +1230,7 @@ ${params.hooks}
 ${summariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${fingerprintBlock}${relevantBlock}${canonBlock}
 ${titleBlock}
 ${moodDirectiveBlock}
+${characterAuthenticityBlock}
 ${payoffDirectiveBlock}
 ${hookEmergenceDirectiveBlock}
 ## 最近章节
@@ -1135,6 +1253,328 @@ ${lengthRequirementBlock}
       - 只需输出 PRE_WRITE_CHECK、CHAPTER_TITLE、CHAPTER_CONTENT 三个区块`;
   }
 
+  private async generateLockedBreathScene1(params: {
+    readonly systemPrompt: string;
+    readonly baseUserPrompt: string;
+    readonly language: "zh" | "en";
+    readonly chapterNumber: number;
+    readonly maxTokens: number;
+    readonly temperature: number;
+    readonly chapterIntent?: string;
+    readonly countingMode: LengthSpec["countingMode"];
+    readonly onUsage: (usage: TokenUsage) => void;
+  }): Promise<string | undefined> {
+    let accumulatedUsage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    let lastScene1: string | undefined;
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const response = await this.chat(
+        [
+          {
+            role: "system",
+            content: this.buildBreathPhase1SystemPrompt(params.language),
+          },
+          {
+            role: "user",
+            content: this.buildBreathPhase1UserPrompt({
+              baseUserPrompt: params.baseUserPrompt,
+              language: params.language,
+              chapterNumber: params.chapterNumber,
+              previousScene1: lastScene1,
+              previousFailure: lastScene1 ? this.describePhase1PurityFailure(lastScene1, params.language) : undefined,
+            }),
+          },
+        ],
+        { maxTokens: params.maxTokens, temperature: params.temperature },
+      );
+      accumulatedUsage = {
+        promptTokens: accumulatedUsage.promptTokens + response.usage.promptTokens,
+        completionTokens: accumulatedUsage.completionTokens + response.usage.completionTokens,
+        totalTokens: accumulatedUsage.totalTokens + response.usage.totalTokens,
+      };
+
+      const scene1 = this.extractLockedScene1(response.content);
+      lastScene1 = scene1;
+      if (scene1 && this.lockedScene1PassesBreathGate(scene1, params.chapterIntent) && this.phase1SemanticPurityPasses(scene1)) {
+        params.onUsage(accumulatedUsage);
+        return scene1;
+      }
+    }
+
+    this.logWarn(params.language, {
+      zh: `Phase1 Scene1 连续未通过语义纯净自检，使用安全模板兜底。`,
+      en: "Phase1 Scene1 failed semantic purity self-check repeatedly; using safe fallback template.",
+    });
+    params.onUsage(accumulatedUsage);
+    return this.buildFallbackBreathScene1(params.language);
+  }
+
+  private buildBreathPhase1SystemPrompt(language: "zh" | "en"): string {
+    if (language === "en") {
+      return [
+        "You are generating ONLY the locked first scene for a breath-mode chapter.",
+        "Phase1 output is locked and cannot be overwritten by later rewrites.",
+        "Generate only [Scene1]. Do not generate title, PRE_WRITE_CHECK, Scene2, Scene3, payoff, hook advancement, threat, pressure, or death semantics.",
+        "Scene1 must feel safe, slow, and temporarily stable. No tension buildup, no foreshadowing of danger.",
+        "Forbidden semantic categories: imminent danger, tense/oppressive atmosphere, unease/omen/abnormality, unknown presence approaching.",
+        "Allowed semantic categories only: fatigue, pain, light recovery, character dialogue, neutral static environment description.",
+      ].join("\n");
+    }
+
+    return [
+      "你只负责生成 breath 章节的锁定开头 Scene1。",
+      "Phase1 输出会被锁定，后续 rewrite 不得覆盖。",
+      "只输出 [Scene1]，不要输出标题、PRE_WRITE_CHECK、Scene2、Scene3、payoff、hook 推进、威胁、压力或死亡语义。",
+      "Scene1 must feel safe, slow, and temporarily stable. No tension buildup, no foreshadowing of danger.",
+      "禁止语义类别：即将发生危险、紧张/压迫氛围、不安/预兆/异常、未知存在靠近。",
+      "只允许语义类别：疲惫、疼痛、轻微恢复、人物对话、中性静态环境描写。",
+    ].join("\n");
+  }
+
+  private buildBreathPhase1UserPrompt(params: {
+    readonly baseUserPrompt: string;
+    readonly language: "zh" | "en";
+    readonly chapterNumber: number;
+    readonly previousScene1?: string;
+    readonly previousFailure?: string;
+  }): string {
+    const retryBlock = params.previousScene1
+      ? params.language === "en"
+        ? [
+          "",
+          "## Previous Scene1 failed Phase1 semantic purity self-check",
+          params.previousFailure ?? "semantic purity failed",
+          "Rewrite Scene1 from scratch as safe, slow, temporarily stable recovery/character material.",
+          params.previousScene1,
+        ].join("\n")
+        : [
+          "",
+          "## 上一次 Scene1 未通过 Phase1 语义纯净自检",
+          params.previousFailure ?? "语义纯净失败",
+          "请从头重写 Scene1，让它成为安全、缓慢、暂时稳定的恢复/人物场景。",
+          params.previousScene1,
+        ].join("\n")
+      : "";
+
+    if (params.language === "en") {
+      return [
+        `Generate Phase1 Scene1 for chapter ${params.chapterNumber}.`,
+        "Hard requirements:",
+        "- Output only [Scene1] followed by the scene text.",
+        "- Scene1 is the first 30% of the chapter.",
+        "- Scene1 must be pure recovery / character expression.",
+        "- Scene1 must feel safe, slow, and temporarily stable.",
+        "- Use only character state, injury care, body sensation, dialogue, relationship movement, and emotion unfolding.",
+        "- Forbidden: threat, rule pressure, pursuit pressure, storm signals, death semantics, conflict escalation, payoff, hook advancement.",
+        "- Also forbidden: tension buildup, oppressive atmosphere, unease, omen, abnormality, or unknown presence approaching.",
+        "- Allowed only: fatigue, pain, light recovery, character dialogue, neutral static environment description.",
+        "- Phase2 will handle payoff, hook, and forward motion later.",
+        retryBlock,
+        "## Base chapter context for reference only",
+        params.baseUserPrompt,
+      ].join("\n");
+    }
+
+    return [
+      `生成第${params.chapterNumber}章 Phase1 Scene1。`,
+      "硬要求：",
+      "- 只输出 [Scene1] 和 scene1 正文。",
+      "- Scene1 是章节前 30%。",
+      "- Scene1 必须是纯 recovery / character：人物状态、伤势处理、身体感知、对话、关系变化、情绪展开。",
+      "- Scene1 must feel safe, slow, and temporarily stable.",
+      "- 禁止：威胁、规则压力、追杀压力、风暴信号、死亡语义、冲突升级、payoff、hook 推进。",
+      "- 也禁止：紧张/压迫氛围、不安、预兆、异常、未知存在靠近。",
+      "- 只允许：疲惫、疼痛、轻微恢复、人物对话、中性静态环境描写。",
+      "- payoff、hook、剧情推进全部留给 Phase2。",
+      retryBlock,
+      "## 基础章节上下文（只供参考）",
+      params.baseUserPrompt,
+    ].join("\n");
+  }
+
+  private phase1SemanticPurityPasses(scene1: string): boolean {
+    return !this.findPhase1SemanticImpurity(scene1);
+  }
+
+  private describePhase1PurityFailure(scene1: string, language: "zh" | "en"): string {
+    const match = this.findPhase1SemanticImpurity(scene1);
+    if (language === "en") {
+      return match
+        ? `Forbidden implicit pressure semantic detected: ${match}`
+        : "Forbidden implicit pressure semantic detected.";
+    }
+    return match
+      ? `检测到隐性压力语义：${match}`
+      : "检测到隐性压力语义。";
+  }
+
+  private findPhase1SemanticImpurity(scene1: string): string | undefined {
+    const patterns = [
+      /像是[^。！？\n]{0,18}(异常|不安|预兆|危险|有人|什么东西|靠近|逼近|压迫|风暴)/u,
+      /仿佛[^。！？\n]{0,18}(异常|不安|预兆|危险|有人|什么东西|靠近|逼近|压迫|风暴)/u,
+      /似乎[^。！？\n]{0,18}(异常|不安|预兆|危险|有人|什么东西|靠近|逼近|压迫|风暴)/u,
+      /沉默[^。！？\n]{0,8}(太久|过长|久得)[^。！？\n]{0,18}(异常|不安|压抑|压迫|怪|冷)/u,
+      /紧张|不安|压抑|压迫|预兆|异常|异样|未知.{0,8}(?:靠近|逼近|接近)|靠近|逼近|危险将至|危险临近|似乎有什么|有什么在|阴影|寒意逼近|杀机|威胁|风暴|omen|unease|oppressive|tension|abnormal|unknown presence|approach(?:ing)?|closing in|foreshadow(?:ing)? danger/iu,
+    ];
+    return patterns
+      .map((pattern) => scene1.match(pattern)?.[0])
+      .find((value): value is string => Boolean(value));
+  }
+
+  private buildFallbackBreathScene1(language: "zh" | "en"): string {
+    if (language === "en") {
+      return [
+        "He sat down with his back against the wall.",
+        "",
+        "His breathing slowed, one breath at a time.",
+        "",
+        "Warmth had returned to his palm, though his knuckles still trembled.",
+        "",
+        "The stone beneath him was cool and steady. Nearby water dripped in a slow, even rhythm.",
+        "",
+        "Yun Lan handed him the water flask.",
+        "",
+        "\"Can you keep going?\"",
+        "",
+        "He nodded without answering.",
+        "",
+        "His throat was dry.",
+        "",
+        "But at least he could stand again.",
+      ].join("\n");
+    }
+
+    return [
+      "他靠坐下来，背抵着石壁。",
+      "",
+      "呼吸一下一下缓下来。",
+      "",
+      "掌心的温度已经回升，但指节还在发抖。",
+      "",
+      "身后的石壁很凉，水声从远处慢慢滴下来。",
+      "",
+      "云岚把水递过来。",
+      "",
+      "“还能撑吗？”",
+      "",
+      "他点了点头，没有说话。",
+      "",
+      "喉咙发干。",
+      "",
+      "但至少还能走。",
+    ].join("\n");
+  }
+
+  private buildLockedScene1Phase2Block(scene1: string, language: "zh" | "en"): string {
+    if (language === "en") {
+      return [
+        "",
+        "## TWO-PHASE GENERATION LOCK",
+        "Phase1 has already generated [Scene1]. It is locked.",
+        "You must generate the remaining 70% around this exact Scene1.",
+        "Do not rewrite, summarize, shorten, extend, or replace LOCKED_SCENE1.",
+        "Only after LOCKED_SCENE1 may you introduce payoff, hook movement, or low-intensity forward motion.",
+        "",
+        "=== LOCKED_SCENE1 ===",
+        "[Scene1]",
+        scene1,
+        "=== END_LOCKED_SCENE1 ===",
+        "",
+      ].join("\n");
+    }
+
+    return [
+      "",
+      "## TWO-PHASE GENERATION LOCK",
+      "Phase1 已经生成 [Scene1]，该段已锁定。",
+      "你必须围绕这个精确 Scene1 生成剩余 70%。",
+      "不得重写、概括、缩短、扩写或替换 LOCKED_SCENE1。",
+      "只有在 LOCKED_SCENE1 之后，才允许进入 payoff、hook 推进或低强度前推。",
+      "",
+      "=== LOCKED_SCENE1 ===",
+      "[Scene1]",
+      scene1,
+      "=== END_LOCKED_SCENE1 ===",
+      "",
+    ].join("\n");
+  }
+
+  private extractLockedScene1(raw: string): string | undefined {
+    const parsed = parseCreativeOutput(0, raw, "zh_chars");
+    const source = parsed.content.trim().length > 0 ? parsed.content : raw;
+    const normalized = source.replace(/\r\n/g, "\n").trim();
+    const sceneMatch = normalized.match(/\[Scene\s*1\]\s*([\s\S]*?)(?=\n\s*\[Scene\s*2\]|\n\s*===|$)/i);
+    const scene = (sceneMatch?.[1] ?? normalized.replace(/^\s*\[Scene\s*1\]\s*/i, "")).trim();
+    return scene.length > 0 ? scene : undefined;
+  }
+
+  private lockedScene1PassesBreathGate(scene1: string, chapterIntent?: string): boolean {
+    const intent = chapterIntent ?? [
+      "## Structured Directives",
+      "- mood:",
+      "  - targetMode: breath",
+      "  - requiredSceneQuota: 1",
+      "  - moodCoverageMin: 0.3",
+      "  - forbidDominantMode: combat-heavy",
+    ].join("\n");
+    const probe = [
+      "[Scene1]",
+      scene1,
+      "",
+      "[Scene2]",
+      "两人低声交谈，讨论计划，关系稍稍缓和。",
+      "",
+      "[Scene3]",
+      "他们只做低强度前推，没有立刻触发冲突。",
+    ].join("\n\n");
+    const check = evaluateMoodCadenceCompliance(probe, intent);
+    if (!check) {
+      return true;
+    }
+    return check.scene1IsolationMatched !== false && check.semanticFailures?.includes("scene1-combat-or-escalation") !== true;
+  }
+
+  private applyLockedScene1ToCreative(
+    creative: {
+      title: string;
+      content: string;
+      wordCount: number;
+      preWriteCheck: string;
+    },
+    lockedScene1: string | undefined,
+    countingMode: LengthSpec["countingMode"],
+  ): {
+    title: string;
+    content: string;
+    wordCount: number;
+    preWriteCheck: string;
+  } {
+    if (!lockedScene1) {
+      return creative;
+    }
+
+    const content = this.applyLockedScene1ToContent(creative.content, lockedScene1);
+    return {
+      ...creative,
+      content,
+      wordCount: countChapterLength(content, countingMode),
+    };
+  }
+
+  private applyLockedScene1ToContent(content: string, lockedScene1: string): string {
+    const normalized = content.replace(/\r\n/g, "\n").trim();
+    const lockedBlock = `[Scene1]\n${lockedScene1.trim()}`;
+    const scene1Index = normalized.search(/\[Scene\s*1\]/i);
+    const scene2Index = normalized.search(/\[Scene\s*2\]/i);
+    if (scene1Index >= 0 && scene2Index > scene1Index) {
+      return `${normalized.slice(0, scene1Index)}${lockedBlock}\n\n${normalized.slice(scene2Index)}`.trim();
+    }
+    if (scene2Index >= 0) {
+      return `${lockedBlock}\n\n${normalized.slice(scene2Index)}`.trim();
+    }
+    return `${lockedBlock}\n\n[Scene2]\n${normalized}`.trim();
+  }
+
   private buildGovernedUserPrompt(params: {
     readonly chapterNumber: number;
     readonly chapterIntent: string;
@@ -1147,6 +1587,7 @@ ${lengthRequirementBlock}
     readonly selectedEvidenceBlock?: string;
     readonly titleCandidates?: ReadonlyArray<{ readonly style: string; readonly title: string }>;
   }): string {
+    const sanitizedChapterIntent = this.stripLegacyEndingHookDirective(params.chapterIntent);
     const contextSections = params.contextPackage.selectedContext
       .map((entry) => [
         `### ${entry.source}`,
@@ -1175,15 +1616,18 @@ ${lengthRequirementBlock}
     const selectedEvidenceBlock = params.selectedEvidenceBlock
       ? `\n${params.selectedEvidenceBlock}\n`
       : "";
-    const moodDirective = this.extractMoodDirectiveFromIntentMarkdown(params.chapterIntent);
+    const moodDirective = this.extractMoodDirectiveFromIntentMarkdown(sanitizedChapterIntent);
+    const modeLockBlock = this.buildFirstPassModeLockBlock(moodDirective, params.language ?? "zh");
     const moodDirectiveBlock = this.buildMoodDirectiveBlock(moodDirective, params.language ?? "zh");
+    const endingTypeDirectiveBlock = this.buildEndingTypeDirectiveBlock(sanitizedChapterIntent, params.language ?? "zh");
+    const characterAuthenticityBlock = this.buildCharacterAuthenticityBlock(params.language ?? "zh");
     const payoffDirectiveBlock = this.buildPayoffDirectiveBlock(params.contextPackage.chapterGoal, params.language ?? "zh");
     const hookEmergenceDirectiveBlock = this.buildHookEmergenceDirectiveBlock({
-      directive: this.extractHookEmergenceDirectiveFromIntentMarkdown(params.chapterIntent),
+      directive: this.extractHookEmergenceDirectiveFromIntentMarkdown(sanitizedChapterIntent),
       language: params.language ?? "zh",
     });
     const titleBlock = this.buildTitleCandidatesBlock(params.titleCandidates, params.language ?? "zh");
-    const explicitHookAgenda = this.extractMarkdownSection(params.chapterIntent, "## Hook Agenda");
+    const explicitHookAgenda = this.extractMarkdownSection(sanitizedChapterIntent, "## Hook Agenda");
     const hookAgendaBlock = explicitHookAgenda
       ? params.language === "en"
         ? `\n## Explicit Hook Agenda\n${explicitHookAgenda}\n`
@@ -1192,15 +1636,18 @@ ${lengthRequirementBlock}
 
     if (params.language === "en") {
       return `Write chapter ${params.chapterNumber}.
+${modeLockBlock}
 
 ## Chapter Intent
-${params.chapterIntent}
+${sanitizedChapterIntent}
 
 ## Selected Context
 ${contextSections || "(none)"}
 ${selectedEvidenceBlock}
 ${hookAgendaBlock}
+${endingTypeDirectiveBlock}
 ${moodDirectiveBlock}
+${characterAuthenticityBlock}
 ${payoffDirectiveBlock}
 ${hookEmergenceDirectiveBlock}
 ${titleBlock}
@@ -1223,15 +1670,18 @@ ${lengthRequirementBlock}
     }
 
     return `请续写第${params.chapterNumber}章。
+${modeLockBlock}
 
 ## 本章意图
-${params.chapterIntent}
+${sanitizedChapterIntent}
 
 ## 已选上下文
 ${contextSections || "(无)"}
 ${selectedEvidenceBlock}
 ${hookAgendaBlock}
+${endingTypeDirectiveBlock}
 ${moodDirectiveBlock}
+${characterAuthenticityBlock}
 ${payoffDirectiveBlock}
 ${hookEmergenceDirectiveBlock}
 ${titleBlock}
@@ -1251,6 +1701,253 @@ ${varianceBlock}
 ${lengthRequirementBlock}
 - 先输出写作自检表，再写正文
 - 只需输出 PRE_WRITE_CHECK、CHAPTER_TITLE、CHAPTER_CONTENT 三个区块`;
+  }
+
+  private stripLegacyEndingHookDirective(chapterIntent: string): string {
+    return chapterIntent
+      .split("\n")
+      .filter((line) => !/^\s*-\s*endingHookType\s*:/i.test(line))
+      .join("\n");
+  }
+
+  private buildEndingTypeDirectiveBlock(
+    chapterIntent: string | undefined,
+    language: "zh" | "en",
+  ): string {
+    const endingType = this.extractEndingTypeFromIntentMarkdown(chapterIntent);
+    if (!endingType) {
+      return "";
+    }
+
+    const hasPromisedPayoff = this.hasPromisedPayoffInIntent(chapterIntent);
+
+    if (language === "en") {
+      return [
+        "",
+        "## Ending Control",
+        `- EndingType: ${endingType}`,
+        "- Use EndingType as the single authoritative ending directive.",
+        "- Ignore legacy endingHookType hints if they appear anywhere.",
+        "- The ending MUST strictly follow EndingType. Non-compliance invalidates the chapter.",
+        hasPromisedPayoff
+          ? "- When a payoff is promised, payoff priority is higher than EndingType, and the payoff MUST happen in this chapter at least partially."
+          : undefined,
+        hasPromisedPayoff
+          ? "- EndingType may shape closure, but it must not block payoff realization or visible situation change."
+          : undefined,
+        endingType === "unresolved_end" && hasPromisedPayoff
+          ? "- You MUST complete the payoff, then leave the situation unresolved by introducing a new threat or question."
+          : undefined,
+      ].join("\n");
+    }
+
+    return [
+      "",
+      "## 结尾控制",
+      `- EndingType: ${endingType}`,
+      "- 结尾类型以 EndingType 为唯一权威控制源。",
+      "- 若出现旧字段 endingHookType，忽略它，不作为写作约束。",
+      "- The ending MUST strictly follow EndingType. Non-compliance invalidates the chapter.",
+      hasPromisedPayoff
+        ? "- 当存在 payoffToDeliver 时，payoff 优先级高于 EndingType，本章也必须至少部分兑现 payoff。"
+        : undefined,
+      hasPromisedPayoff
+        ? "- EndingType 只控制收束方式，不得阻止 payoff 发生与局势变化。"
+        : undefined,
+      endingType === "unresolved_end" && hasPromisedPayoff
+        ? "- You MUST complete the payoff, then leave the situation unresolved by introducing a new threat or question."
+        : undefined,
+    ].join("\n");
+  }
+
+  private buildCharacterAuthenticityBlock(language: "zh" | "en"): string {
+    if (language === "en") {
+      return [
+        "",
+        "## Character Authenticity",
+        "- At least once at a key turning point, a main character must make a slightly non-optimal or emotion-driven choice.",
+        "- Do not use explanation-heavy inner narration such as 'he realized', 'obviously', 'this meant', or 'he understood'.",
+        "- Any explanatory inner monologue is forbidden and will invalidate the chapter.",
+        "- Any realization must be expressed as a sequence of perception -> reaction -> implication, never as direct explanation.",
+        "- Every perception chain must contain at least 2 sensory signals and at least 1 physical reaction.",
+        "- Never rely on a single sensory cue or a single action beat to carry a realization.",
+        "- Express inner state through action, pause, sensory detail, or behavior change instead of explanatory summary.",
+        "- Do not write direct emotion labels like 'he was angry / nervous / exhausted' without embodiment.",
+        "- Emotion must show up as body reaction, hesitation, aggression, silence, grip, breath, gaze, posture, or a changed choice.",
+        "- Replace explanation with behavior. Bad: 'He understood he was being watched.' Good: 'He stopped without turning around. His fingers had already tightened on the sleeve edge.'",
+        "- Do not pause the scene to explain combat rules or worldbuilding to the reader. Fold it into consequence, pressure, and action instead.",
+      ].join("\n");
+    }
+
+    return [
+      "",
+      "## Character Authenticity",
+      "- 关键节点里，角色至少要出现一次非最优选择，或明显带情绪驱动的行为。",
+      "- 禁止说明式内心：不要直接写“他意识到”“显然”“这意味着”“他明白”。",
+      "- Any explanatory inner monologue is forbidden and will invalidate the chapter.",
+      "- Any realization must be expressed as a sequence of perception -> reaction -> implication, never as direct explanation.",
+      "- Every perception must be reinforced by multiple sensory signals and at least one physical reaction.",
+      "- 每个认知链至少要有 2 个感知信号 + 1 个行为反应，不能只靠单一感知或单句行为撑过去。",
+      "- 内心必须通过行动、停顿、感知、行为变化来表现，而不是解释给读者。",
+      "- 禁止直接写“他很愤怒/紧张/疲惫”这类情绪结论。",
+      "- 情绪必须外化为身体反应、动作变化、呼吸、目光、停顿、握紧、后退、沉默或决策偏移。",
+      "- 说明要改成行为。错误：他明白自己被盯上了。正确：他停下脚步，没有回头。但手指已经扣紧了袖口。",
+      "- 禁止停下来给读者解释战力规则、世界观设定或修炼体系；必须把信息折进后果、压力和行动里。",
+    ].join("\n");
+  }
+
+  private hasPromisedPayoffInIntent(chapterIntent: string | undefined): boolean {
+    if (!chapterIntent) {
+      return false;
+    }
+    const section = this.extractMarkdownSection(chapterIntent, "## Chapter Goal");
+    if (!section) {
+      return false;
+    }
+    const match = section.match(/-\s*payoffToDeliver:\s*(.+)/i)?.[1]?.trim();
+    return Boolean(match && match.toLowerCase() !== "none");
+  }
+
+  private async rewriteForEndingTypeIfNeeded(params: {
+    creative: {
+      title: string;
+      content: string;
+      wordCount: number;
+      preWriteCheck: string;
+    };
+    chapterIntent?: string;
+    language: "zh" | "en";
+    chapterNumber: number;
+    maxTokens: number;
+    titleCandidates: ReadonlyArray<{ title: string }>;
+    countingMode: LengthSpec["countingMode"];
+    onUsage: (usage: TokenUsage) => void;
+  }): Promise<{
+    title: string;
+    content: string;
+    wordCount: number;
+    preWriteCheck: string;
+  }> {
+    const endingTypeCheck = evaluateEndingTypeCompliance(params.creative.content, params.chapterIntent);
+    if (!endingTypeCheck || endingTypeCheck.matched) {
+      return params.creative;
+    }
+
+    let currentCreative = params.creative;
+    let check = endingTypeCheck;
+
+    for (let attempt = 1; attempt <= 2 && !check.matched; attempt += 1) {
+      this.logWarn(params.language, {
+        zh: `Writer ENDING TYPE MODE：第${params.chapterNumber}章 rewrite attempt ${attempt}，endingType=${check.expectedType} 未兑现`,
+        en: `Writer ENDING TYPE MODE: chapter ${params.chapterNumber} rewrite attempt ${attempt}, endingType=${check.expectedType} not satisfied`,
+      });
+
+      const response = await this.chat(
+        [
+          {
+            role: "system",
+            content: this.buildEndingTypeRewriteSystemPrompt(params.language, check.expectedType),
+          },
+          {
+            role: "user",
+            content: this.buildEndingTypeRewritePrompt({
+              language: params.language,
+              chapterNumber: params.chapterNumber,
+              expectedType: check.expectedType,
+              originalTitle: currentCreative.title,
+              originalContent: currentCreative.content,
+              preWriteCheck: currentCreative.preWriteCheck,
+              titleCandidates: params.titleCandidates,
+            }),
+          },
+        ],
+        { maxTokens: params.maxTokens, temperature: 0.45 },
+      );
+      params.onUsage(response.usage);
+      currentCreative = parseCreativeOutput(params.chapterNumber, response.content, params.countingMode);
+      check = evaluateEndingTypeCompliance(currentCreative.content, params.chapterIntent) ?? check;
+    }
+
+    return currentCreative;
+  }
+
+  private buildEndingTypeRewriteSystemPrompt(
+    language: "zh" | "en",
+    expectedType: "reveal_end" | "unresolved_end" | "resolution_end" | "twist_end" | "calm_end",
+  ): string {
+    if (language === "en") {
+      return [
+        "ENDING TYPE ENFORCEMENT MODE",
+        `Expected EndingType: ${expectedType}`,
+        "The ending MUST strictly follow EndingType. Non-compliance invalidates the chapter.",
+        "Rewrite only the final 2-3 paragraphs while preserving chapter facts and continuity.",
+        expectedType === "reveal_end"
+          ? "Hard rule: ending must contain a concrete new reveal (identity/source/clue/truth), not vague pressure or danger."
+          : undefined,
+        expectedType === "calm_end"
+          ? "Hard rule: ending must close in a calm/resting/regrouping beat and must not introduce new conflict or danger."
+          : undefined,
+      ].filter(Boolean).join("\n");
+    }
+
+    return [
+      "ENDING TYPE ENFORCEMENT MODE",
+      `Expected EndingType: ${expectedType}`,
+      "The ending MUST strictly follow EndingType. Non-compliance invalidates the chapter.",
+      "只重写最后 2-3 段，保持章节事实与连续性不变。",
+      expectedType === "reveal_end"
+        ? "硬规则：结尾必须出现明确的新信息揭示（身份/来源/关键线索/真相），不能只写危险逼近。"
+        : undefined,
+      expectedType === "calm_end"
+        ? "硬规则：结尾必须收束到平缓/休整/安顿，不允许新增冲突或危险。"
+        : undefined,
+    ].filter(Boolean).join("\n");
+  }
+
+  private buildEndingTypeRewritePrompt(params: {
+    language: "zh" | "en";
+    chapterNumber: number;
+    expectedType: "reveal_end" | "unresolved_end" | "resolution_end" | "twist_end" | "calm_end";
+    originalTitle: string;
+    originalContent: string;
+    preWriteCheck: string;
+    titleCandidates: ReadonlyArray<{ title: string }>;
+  }): string {
+    if (params.language === "en") {
+      return [
+        `Chapter ${params.chapterNumber} failed ending-type compliance.`,
+        `- Expected EndingType: ${params.expectedType}`,
+        "- Do not rewrite the whole chapter. Only rewrite the ending to satisfy EndingType strictly.",
+        "- Keep all established chapter facts unchanged.",
+        params.titleCandidates.length > 0 ? `- Keep or prefer one of these titles: ${params.titleCandidates.map((candidate) => candidate.title).join(" | ")}` : undefined,
+        "",
+        "=== ORIGINAL_PRE_WRITE_CHECK ===",
+        params.preWriteCheck || "- ok",
+        "",
+        "=== ORIGINAL_TITLE ===",
+        params.originalTitle,
+        "",
+        "=== ORIGINAL_CONTENT ===",
+        params.originalContent,
+      ].filter(Boolean).join("\n");
+    }
+
+    return [
+      `第${params.chapterNumber}章 endingType 不合规。`,
+      `- Expected EndingType: ${params.expectedType}`,
+      "- 不要整章重写，只重写结尾 2-3 段并严格满足 EndingType。",
+      "- 保持章节既有事实不变。",
+      params.titleCandidates.length > 0 ? `- 标题保持或优先使用：${params.titleCandidates.map((candidate) => candidate.title).join(" | ")}` : undefined,
+      "",
+      "=== ORIGINAL_PRE_WRITE_CHECK ===",
+      params.preWriteCheck || "- ok",
+      "",
+      "=== ORIGINAL_TITLE ===",
+      params.originalTitle,
+      "",
+      "=== ORIGINAL_CONTENT ===",
+      params.originalContent,
+    ].filter(Boolean).join("\n");
   }
 
   private joinGovernedEvidenceBlocks(blocks: ReturnType<typeof buildGovernedMemoryEvidenceBlocks> | undefined): string | undefined {
@@ -1312,9 +2009,16 @@ ${lengthRequirementBlock}
     }
 
     const targetMode = section.match(/targetMode:\s*(calm|breath|warmth|humor)/i)?.[1]?.toLowerCase();
+    const writingModeRaw = section.match(/writingMode:\s*(crisis|neutral|breath)/i)?.[1]?.toLowerCase();
+    const firstPassModeLockRaw = section.match(/firstPassModeLock:\s*(true|false)/i)?.[1]?.toLowerCase();
+    const forbidCrisisFallbackRaw = section.match(/forbidCrisisFallback:\s*(true|false)/i)?.[1]?.toLowerCase();
     const quotaRaw = section.match(/requiredSceneQuota:\s*(\d+)/i)?.[1];
     const coverageRaw = section.match(/moodCoverageMin:\s*(0(?:\.\d+)?|1(?:\.0+)?)/i)?.[1];
+    const sceneMinShareRaw = section.match(/sceneMinShare:\s*(0(?:\.\d+)?|1(?:\.0+)?)/i)?.[1];
     const forbidDominantMode = section.match(/forbidDominantMode:\s*([a-z-]+)/i)?.[1];
+    const scene1 = section.match(/scene1:\s*(.+)/i)?.[1]?.trim();
+    const scene2 = section.match(/scene2:\s*(.+)/i)?.[1]?.trim();
+    const scene3 = section.match(/scene3:\s*(.+)/i)?.[1]?.trim();
     const note = section.match(/note:\s*(.+)/i)?.[1]?.trim();
 
     if (!targetMode || !quotaRaw || !forbidDominantMode) {
@@ -1323,9 +2027,36 @@ ${lengthRequirementBlock}
 
     return {
       targetMode: targetMode as MoodDirective["targetMode"],
+      writingMode: ((): MoodDirective["writingMode"] => {
+        if (writingModeRaw === "crisis" || writingModeRaw === "neutral" || writingModeRaw === "breath") {
+          return writingModeRaw;
+        }
+        return targetMode === "breath" ? "breath" : "neutral";
+      })(),
+      firstPassModeLock: firstPassModeLockRaw
+        ? firstPassModeLockRaw === "true"
+        : targetMode === "breath",
+      forbidCrisisFallback: forbidCrisisFallbackRaw
+        ? forbidCrisisFallbackRaw === "true"
+        : targetMode === "breath",
       requiredSceneQuota: Number.parseInt(quotaRaw, 10),
       moodCoverageMin: coverageRaw ? Number.parseFloat(coverageRaw) : 0.3,
+      forceSceneStructure: targetMode === "breath",
+      sceneMinShare: sceneMinShareRaw ? Number.parseFloat(sceneMinShareRaw) : 0.2,
+      sceneSemanticEnforced: targetMode === "breath",
+      scene1NoThreatEscalation: targetMode === "breath",
+      scene2InteractionFocus: targetMode === "breath",
+      scene3ForwardOnly: targetMode === "breath",
       forbidDominantMode: forbidDominantMode as MoodDirective["forbidDominantMode"],
+      ...(scene1 && scene2 && scene3
+        ? {
+          scenePlan: {
+            scene1,
+            scene2,
+            scene3,
+          },
+        }
+        : {}),
       ...(note ? { note } : {}),
     };
   }
@@ -1339,17 +2070,59 @@ ${lengthRequirementBlock}
     }
 
     if (language === "en") {
+      const minSceneShare = Math.max(0.2, moodDirective.sceneMinShare ?? 0.2);
+      const writingMode = moodDirective.writingMode ?? (moodDirective.targetMode === "breath" ? "breath" : "neutral");
       return [
         "",
         "## Mood Cadence Directive",
         `- targetMode: ${moodDirective.targetMode}`,
+        `- writingMode: ${writingMode}`,
+        `- firstPassModeLock: ${moodDirective.firstPassModeLock ?? (moodDirective.targetMode === "breath")}`,
+        `- forbidCrisisFallback: ${moodDirective.forbidCrisisFallback ?? (moodDirective.targetMode === "breath")}`,
         `- requiredSceneQuota: at least ${moodDirective.requiredSceneQuota} scene`,
         `- moodCoverageMin: at least ${Math.round(moodDirective.moodCoverageMin * 100)}% of the final chapter`,
+        `- sceneMinShare: each scene >= ${Math.round(minSceneShare * 100)}%`,
         `- forbidDominantMode: ${moodDirective.forbidDominantMode}`,
+        "- DIRECTIVE PRIORITY: mood directive > scene plan > payoff > hook.",
+        "- FIRST DRAFT MODE: BREATH DRAFTING MODE (do not use default conflict-heavy skeleton).",
+        "- The first 30% of the chapter MUST be a pure recovery/character scene. Any threat or escalation in this part invalidates the chapter.",
         "- PRIMARY STRUCTURAL REQUIREMENT: this is not a soft note. The chapter must be structured as Act 1 / Act 2 / Act 3, and at least one act must function as a breath scene.",
+        moodDirective.scenePlan
+          ? [
+            "- scenePlan:",
+            `  - scene1: ${moodDirective.scenePlan.scene1}`,
+            `  - scene2: ${moodDirective.scenePlan.scene2}`,
+            `  - scene3: ${moodDirective.scenePlan.scene3}`,
+          ].join("\n")
+          : undefined,
         "- Section B must be a real breathing scene with healing, camp rest, eating, travel talk, trust-building, teasing, or lighter character interaction.",
         "- Breath chapter skeleton: Act 1 = aftershock / regroup, Act 2 = full breath scene, Act 3 = small forward motion with a low-intensity hook.",
+        "- Hard ordering constraint: the first 60% of the chapter must not be combat-heavy.",
+        "- Breath writing mode style: use slower sentence pacing, stronger environmental grounding, embodied sensation, and interaction pauses.",
+        "- Must include tactile/body sensations (cold/heat/pain/release), environment signals (smell/sound/light), and character interaction details (dialogue/eye contact/micro-actions).",
+        "- Avoid sustained oppressive tone. Do not stack crisis trigger words continuously (danger/kill intent/explosion/collapse/dying).",
+        "- Complete recovery / dialogue / relationship scenes first, then move into low-intensity forward motion.",
+        "- Invalid pattern: fight first, then add two short rest lines as patchwork.",
         "- Replace part of the dominant combat structure if needed. Do not simply append one calming paragraph at the end.",
+        "- OUTPUT FORMAT IS MANDATORY. CHAPTER_CONTENT must use exactly this 3-scene structure:",
+        "  [Scene1]",
+        "  (recovery / aftershock / regroup)",
+        "",
+        "  [Scene2]",
+        "  (dialogue / relationship / planning / repair)",
+        "",
+        "  [Scene3]",
+        "  (low-intensity forward move / soft hook)",
+        "- Do not skip Scene1 or Scene2.",
+        "- Do not jump straight into combat-heavy confrontation.",
+        "- Do not write climax first and patch front scenes later.",
+        "- In the first 30% / [Scene1], do not introduce threats, rule pressure, pursuit pressure, storm signals, or conflict escalation.",
+        '- Scene1 semantic hard rule: "Do NOT introduce new threats or escalate conflict."',
+        '- Scene2 semantic hard rule: "Focus on interaction, not action."',
+        '- Scene3 semantic hard rule: "Only here you may move plot forward."',
+        "- Scene1 must include recovery / aftershock / environmental grounding / body-state change.",
+        "- Scene2 must include dialogue / relationship movement / planning discussion / emotional release.",
+        `- Each scene must occupy at least ${Math.round(minSceneShare * 100)}% of CHAPTER_CONTENT.`,
         `- If breath coverage stays below ${Math.round(moodDirective.moodCoverageMin * 100)}%, the chapter is considered failed and must be rewritten before output.`,
         "- Do not let combat-heavy confrontation dominate the chapter.",
         moodDirective.note ? `- note: ${moodDirective.note}` : undefined,
@@ -1357,17 +2130,59 @@ ${lengthRequirementBlock}
       ].filter(Boolean).join("\n");
     }
 
+    const minSceneShare = Math.max(0.2, moodDirective.sceneMinShare ?? 0.2);
+    const writingMode = moodDirective.writingMode ?? (moodDirective.targetMode === "breath" ? "breath" : "neutral");
     return [
       "",
       "## 情绪节奏指令",
       `- targetMode: ${moodDirective.targetMode}`,
+      `- writingMode: ${writingMode}`,
+      `- firstPassModeLock: ${moodDirective.firstPassModeLock ?? (moodDirective.targetMode === "breath")}`,
+      `- forbidCrisisFallback: ${moodDirective.forbidCrisisFallback ?? (moodDirective.targetMode === "breath")}`,
       `- requiredSceneQuota: 至少 ${moodDirective.requiredSceneQuota} 段`,
       `- moodCoverageMin: 最终正文至少 ${Math.round(moodDirective.moodCoverageMin * 100)}%`,
+      `- sceneMinShare: 每个 Scene 至少 ${Math.round(minSceneShare * 100)}%`,
       `- forbidDominantMode: ${moodDirective.forbidDominantMode}`,
+      "- 指令优先级：mood directive > scene plan > payoff > hook。",
+      "- FIRST DRAFT MODE：BREATH DRAFTING MODE（首稿不要走默认冲突推进骨架）。",
+      "- The first 30% of the chapter MUST be a pure recovery/character scene. Any threat or escalation in this part invalidates the chapter.",
       "- PRIMARY STRUCTURAL REQUIREMENT：这不是软提示。章节必须按 Act1 / Act2 / Act3 组织，其中至少一幕必须是真正的 breath scene。",
+      moodDirective.scenePlan
+        ? [
+          "- scenePlan:",
+          `  - scene1: ${moodDirective.scenePlan.scene1}`,
+          `  - scene2: ${moodDirective.scenePlan.scene2}`,
+          `  - scene3: ${moodDirective.scenePlan.scene3}`,
+        ].join("\n")
+        : undefined,
       "- Section B 必须承担喘息段功能，内容应为疗伤、扎营、吃东西、休整、路途交谈、人物关系推进、玩笑或调侃之一，而不是继续打斗。",
       "- Breath 章骨架：Act1=余波/ regroup，Act2=完整喘息场景，Act3=小步前推 + 低强度尾钩。",
+      "- 硬约束：本章前 60% 不得以战斗为主导。",
+      "- Breath writingMode 语气要求：使用慢节奏句式，增强环境锚定、身体感知与互动停顿。",
+      "- 必须出现触觉/身体感受（冷、热、痛、缓）、环境要素（气味、声音、光线）以及人物互动细节（对话、眼神、动作）。",
+      "- 禁止持续压迫语气，避免连续堆叠危机触发词（危险、杀机、爆发、崩裂、濒死）。",
+      "- 必须先完成恢复/对话/关系场景，再进入低强度推进。",
+      "- 禁止“先打一场，再补两句休整”的补丁式结构。",
       "- 必要时必须替换掉部分主导性的战斗推进，不能只在结尾追加一小段喘息。",
+      "- 输出格式为硬约束：CHAPTER_CONTENT 必须按三段 Scene 输出：",
+      "  [Scene1]",
+      "  （恢复/余波/重整）",
+      "",
+      "  [Scene2]",
+      "  （对话/关系/计划/修复）",
+      "",
+      "  [Scene3]",
+      "  （低强度推进/软钩子）",
+      "- 不允许跳过 Scene1 或 Scene2。",
+      "- 不允许直接进入战斗。",
+      "- 不允许先写高潮再补前段。",
+      "- 正文前 30% / [Scene1] 禁止出现威胁、规则压力、追杀压力、风暴信号或冲突升级。",
+      '- Scene1 语义硬规则："Do NOT introduce new threats or escalate conflict."',
+      '- Scene2 语义硬规则："Focus on interaction, not action."',
+      '- Scene3 语义硬规则："Only here you may move plot forward."',
+      "- Scene1 必须包含：恢复 / 余波 / 环境描写 / 身体状态变化。",
+      "- Scene2 必须包含：对话 / 关系推进 / 计划讨论 / 情绪释放。",
+      `- 每个 Scene 至少占 CHAPTER_CONTENT 的 ${Math.round(minSceneShare * 100)}%。`,
       `- 若 breath coverage 低于 ${Math.round(moodDirective.moodCoverageMin * 100)}%，本章视为失败，必须先重写再输出。`,
       "- 不允许让大篇幅战斗/高压对抗继续主导整章。",
       moodDirective.note ? `- note: ${moodDirective.note}` : undefined,
@@ -1375,46 +2190,189 @@ ${lengthRequirementBlock}
     ].filter(Boolean).join("\n");
   }
 
+  private buildFirstPassModeLockBlock(
+    moodDirective: MoodDirective | undefined,
+    language: "zh" | "en",
+  ): string {
+    if (!moodDirective || moodDirective.targetMode !== "breath") {
+      return "";
+    }
+
+    const writingMode = moodDirective.writingMode ?? "breath";
+    const firstPassModeLock = moodDirective.firstPassModeLock ?? true;
+    const forbidCrisisFallback = moodDirective.forbidCrisisFallback ?? true;
+
+    if (language === "en") {
+      return [
+        "## FIRST-PASS MODE LOCK",
+        "THIS CHAPTER IS A BREATH CHAPTER.",
+        `- writingMode: ${writingMode}`,
+        `- firstPassModeLock: ${firstPassModeLock}`,
+        `- forbidCrisisFallback: ${forbidCrisisFallback}`,
+        "- This chapter must fully replace default crisis/conflict-driven drafting mode.",
+        "- Do not apply breath as an additive hint; use breath as the only first-pass writing mode.",
+        "- Crisis-mode fallback is forbidden in first pass.",
+        "- First paragraph hard rule: open with recovery/environment/dialogue details.",
+        "- First paragraph must not contain direct conflict trigger, immediate threat, or enemy action.",
+      ].join("\n");
+    }
+
+    return [
+      "## FIRST-PASS MODE LOCK",
+      "THIS CHAPTER IS A BREATH CHAPTER.",
+      `- writingMode: ${writingMode}`,
+      `- firstPassModeLock: ${firstPassModeLock}`,
+      `- forbidCrisisFallback: ${forbidCrisisFallback}`,
+      "- 本章必须完全替换默认危机/冲突驱动写法。",
+      "- 不允许把 breath 当作附加约束；首稿只能使用 breath 写作模式。",
+      "- 首稿禁止 crisis-mode fallback。",
+      "- 首段硬约束：必须以恢复/环境/对话开场。",
+      "- 首段禁止：直接冲突触发、立即危机、敌人行动。",
+    ].join("\n");
+  }
+
   private buildPayoffDirectiveBlock(
     chapterGoal: ChapterGoal | undefined,
     language: "zh" | "en",
   ): string {
+    const payoffToDeliver = chapterGoal?.payoffToDeliver?.trim();
     const payoffDirective = chapterGoal?.payoffDirective;
-    if (!payoffDirective) {
+    if (!payoffDirective && !payoffToDeliver) {
       return "";
     }
+    const promisedPayoff = payoffDirective?.promisedPayoff ?? payoffToDeliver!;
+    const payoffType = payoffDirective?.payoffType ?? "resource";
+    const payoffDepth = payoffDirective?.payoffDepth ?? "layered";
+    const mandatoryByFinalAct = payoffDirective?.mandatoryByFinalAct ?? true;
 
     if (language === "en") {
       return [
         "",
         "## Payoff Realization Directive",
-        `- promisedPayoff: ${payoffDirective.promisedPayoff}`,
-        `- payoffType: ${payoffDirective.payoffType}`,
-        `- mandatoryByFinalAct: ${payoffDirective.mandatoryByFinalAct}`,
+        `- promisedPayoff: ${promisedPayoff}`,
+        `- payoffType: ${payoffType}`,
+        `- payoffDepth: ${payoffDepth}`,
+        `- mandatoryByFinalAct: ${mandatoryByFinalAct}`,
+        "Priority is mandatory: payoff > cost > endingType.",
+        "If payoff is not realized, the chapter is invalid regardless of cost or ending type.",
+        "Execution order is locked: buildup -> trigger -> MOMENT (standalone sentence) -> result -> cost.",
+        "Hard lock: trigger must appear before MOMENT; MOMENT must appear before result/cost.",
+        "Do not skip the payoff to satisfy cost, calm_end, unresolved_end, or any other endingType.",
+        "Every payoff must include: sensory detail, cost paid, visible change in situation.",
+        "Every payoff must include vivid sensory detail showing the exact moment of change.",
+        "Every payoff must include a clear moment of change (a single, sharp turning instant).",
+        "Moment format is mandatory: write the MOMENT as one standalone sentence where the event clearly happens.",
+        "The MOMENT must be a hard event, not a gradual process. Invalid: 'gradually opened', 'began to open', 'seemed to open'.",
+        "Banned gradual Chinese expressions in MOMENT: '开始打开', '正在打开', '缓缓开启', '似乎裂开'.",
+        "Valid MOMENT example: 'The stone door split open with a crack.'",
+        "After the MOMENT, you MUST include a resolution phase that stabilizes the situation.",
+        "Every payoff MUST include a clear cost that hurts the protagonist.",
+        "Cost is mandatory and must land after the moment/result: moment -> result -> cost.",
+        "Cost must be at least one of: worsened bodily injury, qi-blood/blood essence/resource consumption, time cost that prevents action, or lingering side effect / worsened state.",
+        "No-cost success is invalid. Example: 'The door opened. His right arm went completely numb.'",
+        payoffType === "resource"
+          ? "For resource payoff, you MUST turn the acquisition into a sharp event with a clear trigger and impact."
+          : undefined,
+        payoffType === "reveal"
+          ? "For reveal payoff, you MUST write one standalone cognitive moment sentence where understanding completes clearly."
+          : undefined,
+        payoffType === "reveal"
+          ? "Invalid reveal wording: 'he seemed to realize', 'he vaguely discovered', 'he felt that'."
+          : undefined,
+        payoffType === "reveal"
+          ? "Valid reveal examples: 'In that instant, he understood the contract.' / 'He finally understood that this was not a contract, but a trap.' / 'All the clues snapped together at that moment.'"
+          : undefined,
+        payoffType === "resource"
+          ? "Resource payoff structure is mandatory: trigger -> MOMENT -> cost -> stabilization."
+          : undefined,
+        payoffType === "resource"
+          ? "Do not write flat resource lines like 'he obtained it' or 'the information appeared in his mind'."
+          : undefined,
+        "Do not use abstract payoff-only phrasing like 'power increased' or 'suppression disappeared' without concrete sensory rendering.",
+        "Painless success is invalid.",
+        "The promised payoff MUST happen in this chapter at least partially.",
         "- Act 3 must materialize the payoff as an actual event, not a vague hint.",
         "- If the payoff is reveal/resource/breakthrough/relationship/reversal, the final act must show a concrete reveal, resource gain, breakthrough, relationship shift, or reversal beat.",
+        "- Payoff paragraph structure is mandatory: buildup -> MOMENT -> post-moment resolution.",
+        "- MOMENT sentence format: one standalone sentence, explicit occurrence, no gradual wording.",
+        "- Cost placement is mandatory: moment -> result -> cost. The cost must be concrete and visible.",
+        "- Payoff impact must include: sensory detail + turning instant + cost paid + visible change.",
+        "- Missing this standalone event sentence triggers missing-moment / payoff-impact-missing.moment.",
+        "- MOMENT cannot be the final sentence of the chapter.",
+        payoffType === "reveal" && payoffDepth === "layered"
+          ? "- For layered reveal, this chapter may realize only one reveal layer (surface OR middle), and must leave at least one unresolved deeper unknown."
+          : undefined,
         "- If the promised payoff is missing, the chapter is considered failed and must be rewritten in Payoff Realization Mode.",
         "",
-      ].join("\n");
+      ].filter(Boolean).join("\n");
     }
 
     return [
       "",
       "## Payoff Realization Directive",
-      `- promisedPayoff: ${payoffDirective.promisedPayoff}`,
-      `- payoffType: ${payoffDirective.payoffType}`,
-      `- mandatoryByFinalAct: ${payoffDirective.mandatoryByFinalAct}`,
+      `- promisedPayoff: ${promisedPayoff}`,
+      `- payoffType: ${payoffType}`,
+      `- payoffDepth: ${payoffDepth}`,
+      `- mandatoryByFinalAct: ${mandatoryByFinalAct}`,
+      "Priority is mandatory: payoff > cost > endingType.",
+      "If payoff is not realized, the chapter is invalid regardless of cost or ending type.",
+      "执行顺序锁死：buildup（过程）-> trigger（触发）-> MOMENT（必须单独一句）-> result（结果）-> cost（代价）。",
+      "硬锁：trigger 必须先于 MOMENT，MOMENT 必须先于 result/cost。",
+      "禁止为了满足 cost、calm_end、unresolved_end 或任何 endingType 而跳过 payoff。",
+      "Every payoff must include: sensory detail, cost paid, visible change in situation.",
+      "Every payoff must include vivid sensory detail showing the exact moment of change.",
+      "Every payoff must include a clear moment of change (a single, sharp turning instant).",
+      "Moment format is mandatory: write the MOMENT as one standalone sentence where the event clearly happens.",
+      "The MOMENT must be a hard event, not a gradual process. Invalid: “逐渐打开 / 开始打开 / 正在打开 / 缓缓开启 / 似乎打开 / 似乎裂开”.",
+      "正确 MOMENT 示例：门，被强行打开。",
+      "正确 MOMENT 示例：石门猛地裂开。",
+      "After the MOMENT, you MUST include a resolution phase that stabilizes the situation.",
+      "Every payoff MUST include a clear cost that hurts the protagonist.",
+      "Cost is mandatory and must land after the moment/result: moment -> result -> cost.",
+      "代价至少满足一种：身体损伤加重、气血/精血/资源消耗、时间代价（无法行动）、后遗症/状态恶化。",
+      "禁止无代价成功。错误：门开了。正确：门开了。他的右臂随之彻底失去知觉。",
+      payoffType === "resource"
+        ? "For resource payoff, you MUST turn the acquisition into a sharp event with a clear trigger and impact."
+        : undefined,
+      payoffType === "reveal"
+        ? "硬规则：reveal 型 payoff 必须写出认知断点句：单独一句，认知在这一句里明确完成。"
+        : undefined,
+      payoffType === "reveal"
+        ? "禁止 reveal 写成“他似乎意识到 / 他隐约发现 / 他感觉到”。"
+        : undefined,
+      payoffType === "reveal"
+        ? "正确 reveal 模板：那一刻，他看懂了这份契约。/ 他终于明白，这不是契约，而是陷阱。/ 所有线索，在这一刻拼合。"
+        : undefined,
+      payoffType === "resource"
+        ? "资源型 payoff 必须写成带触发与冲击的获取事件，结构固定为 trigger -> MOMENT -> cost -> stabilization。"
+        : undefined,
+      payoffType === "resource"
+        ? "禁止直接写“他获得了……”或“信息出现在脑海”。"
+        : undefined,
+      "禁止只写抽象结果（如“力量增强”“压制消失”）；必须给出变化瞬间的具体感知描写。",
+      "Painless success is invalid.",
+      "The promised payoff MUST happen in this chapter at least partially.",
       "- Act3 必须把 payoff 兑现成实际事件，而不是模糊暗示。",
       "- 如果 payoffType 是 reveal/resource/breakthrough/relationship/reversal，则章尾主段必须出现对应的真实揭示、资源获得、突破、关系变化或反转节点。",
+      "- payoff 段结构必须为：buildup（铺垫）-> MOMENT（爆点）-> post-moment resolution（收束）。",
+      "- MOMENT 句格式：必须单独成句，明确发生，不允许渐变表达。",
+      "- cost 落点强制：moment -> result -> cost，代价必须具体落地。",
+      "- payoff 冲击必须具备：感知层 + 瞬间爆发点 + 代价层 + 结果层。",
+      "- 缺少这个单句瞬间事件会触发 missing-moment / payoff-impact-missing.moment。",
+      "- MOMENT 不能作为章节最后一句。",
+      payoffType === "reveal" && payoffDepth === "layered"
+        ? "- layered reveal 只允许本章兑现一层（表层或中层），必须保留至少一个更深未知，不得一章全解释完。"
+        : undefined,
       "- 如果 promised payoff 没有兑现，本章视为失败，必须进入 Payoff Realization Mode 重写。",
       "",
-    ].join("\n");
+    ].filter(Boolean).join("\n");
   }
 
   private buildHookEmergenceDirectiveBlock(params: {
     readonly directive:
       | {
         readonly mustMaterializeHookNow: boolean;
+        readonly hookExecutionPhase?: "any" | "late";
         readonly targetHookId?: string;
         readonly targetHookState?: string;
         readonly targetHookExpectedPayoff?: string;
@@ -1432,12 +2390,22 @@ ${lengthRequirementBlock}
         "",
         "## Hook Emergence Directive",
         `- mustMaterializeHookNow: ${params.directive.mustMaterializeHookNow}`,
+        params.directive.hookExecutionPhase ? `- hookExecutionPhase: ${params.directive.hookExecutionPhase}` : undefined,
         `- targetHookId: ${params.directive.targetHookId}`,
         `- targetHookState: ${params.directive.targetHookState ?? "overdue"}`,
         `- targetHookExpectedPayoff: ${params.directive.targetHookExpectedPayoff ?? "none"}`,
         "- This hook cannot stay suspended. The chapter must advance it, partially resolve it, or fully resolve it now.",
         "- Mentioning the hook name again, repeating old information, or merely saying the danger still exists does not count.",
         "- The hook needs a real new state change this chapter.",
+        params.directive.hookExecutionPhase === "late"
+          ? "- PRIORITY ORDER: mood directive > scene plan > payoff > hook emergence."
+          : undefined,
+        params.directive.hookExecutionPhase === "late"
+          ? "- Hook emergence is allowed only in [Scene3]. [Scene1] and [Scene2] must remain recovery/dialogue-focused."
+          : undefined,
+        params.directive.hookExecutionPhase === "late"
+          ? "- If hook advancement or climax appears in [Scene1]/[Scene2], the chapter is invalid and must be rewritten."
+          : undefined,
         "",
       ].join("\n");
     }
@@ -1446,12 +2414,22 @@ ${lengthRequirementBlock}
       "",
       "## Hook Emergence Directive",
       `- mustMaterializeHookNow: ${params.directive.mustMaterializeHookNow}`,
+      params.directive.hookExecutionPhase ? `- hookExecutionPhase: ${params.directive.hookExecutionPhase}` : undefined,
       `- targetHookId: ${params.directive.targetHookId}`,
       `- targetHookState: ${params.directive.targetHookState ?? "overdue"}`,
       `- targetHookExpectedPayoff: ${params.directive.targetHookExpectedPayoff ?? "none"}`,
       "- 这个 hook 不能继续纯悬置。本章必须让它发生推进、部分兑现或完全回收之一。",
       "- 仅仅再次提到 hook 名字、重复旧信息、或只说危险仍在，不算推进。",
       "- 本章必须让这个 hook 产生真正的新状态变化。",
+      params.directive.hookExecutionPhase === "late"
+        ? "- 指令优先级：mood directive > scene plan > payoff > hook推进。"
+        : undefined,
+      params.directive.hookExecutionPhase === "late"
+        ? "- Hook 推进只能发生在 [Scene3]。在 [Scene1]/[Scene2] 禁止触发核心冲突或高潮。"
+        : undefined,
+      params.directive.hookExecutionPhase === "late"
+        ? "- 若在 [Scene1]/[Scene2] 提前推进 hook，本章视为无效，必须重写。"
+        : undefined,
       "",
     ].join("\n");
   }
@@ -1477,28 +2455,39 @@ ${lengthRequirementBlock}
     wordCount: number;
     preWriteCheck: string;
   }> {
-    const payoffDirective = params.chapterGoal?.payoffDirective;
-    if (!params.chapterGoal || !payoffDirective?.mandatoryByFinalAct) {
+    const chapterGoal = params.chapterGoal;
+    if (!chapterGoal || !chapterGoal.payoffToDeliver?.trim()) {
       return params.creative;
     }
+    const payoffDirective = chapterGoal.payoffDirective ?? {
+      promisedPayoff: chapterGoal.payoffToDeliver,
+      payoffType: "resource" as const,
+      mandatoryByFinalAct: true,
+    };
 
     let currentCreative = params.creative;
-    let checks = evaluateChapterGoalDiscipline(currentCreative.content, params.chapterGoal);
-    if (checks.payoffCheck.matched) {
+    let checks = evaluateChapterGoalDiscipline(currentCreative.content, chapterGoal);
+    let impactCheck = evaluatePayoffImpact(currentCreative.content, chapterGoal);
+    if (checks.payoffCheck.matched && (!impactCheck || impactCheck.matched)) {
       return currentCreative;
     }
 
-    for (let attempt = 1; attempt <= 2 && !checks.payoffCheck.matched; attempt += 1) {
+    for (
+      let attempt = 1;
+      attempt <= 3 && (!checks.payoffCheck.matched || (impactCheck ? !impactCheck.matched : false));
+      attempt += 1
+    ) {
+      const forceMomentAnchor = attempt >= 3;
       this.logWarn(params.language, {
-        zh: `Writer PAYOFF MODE：第${params.chapterNumber}章 rewrite attempt ${attempt}，payoff 尚未真正兑现`,
-        en: `Writer PAYOFF MODE: chapter ${params.chapterNumber} rewrite attempt ${attempt}, payoff still not materialized`,
+        zh: `Writer PAYOFF MODE：第${params.chapterNumber}章 rewrite attempt ${attempt}，payoff ${checks.payoffCheck.matched ? "冲击层缺失" : "尚未真正兑现"}`,
+        en: `Writer PAYOFF MODE: chapter ${params.chapterNumber} rewrite attempt ${attempt}, payoff ${checks.payoffCheck.matched ? "impact layers missing" : "still not materialized"}`,
       });
 
       const response = await this.chat(
         [
           {
             role: "system",
-            content: this.buildPayoffRewriteSystemPrompt(params.language, payoffDirective),
+            content: this.buildPayoffRewriteSystemPrompt(params.language, payoffDirective, forceMomentAnchor),
           },
           {
             role: "user",
@@ -1510,6 +2499,7 @@ ${lengthRequirementBlock}
               preWriteCheck: currentCreative.preWriteCheck,
               payoffDirective,
               titleCandidates: params.titleCandidates,
+              forceMomentAnchor,
             }),
           },
         ],
@@ -1517,7 +2507,11 @@ ${lengthRequirementBlock}
       );
       params.onUsage(response.usage);
       currentCreative = parseCreativeOutput(params.chapterNumber, response.content, params.countingMode);
-      checks = evaluateChapterGoalDiscipline(currentCreative.content, params.chapterGoal);
+      if (forceMomentAnchor) {
+        currentCreative = this.applyForcedMomentAnchor(currentCreative, chapterGoal, params.language, params.countingMode);
+      }
+      checks = evaluateChapterGoalDiscipline(currentCreative.content, chapterGoal);
+      impactCheck = evaluatePayoffImpact(currentCreative.content, chapterGoal);
     }
 
     return currentCreative;
@@ -1526,17 +2520,69 @@ ${lengthRequirementBlock}
   private buildPayoffRewriteSystemPrompt(
     language: "zh" | "en",
     payoffDirective: NonNullable<ChapterGoal["payoffDirective"]>,
+    forceMomentAnchor = false,
   ): string {
+    const payoffDepth = payoffDirective.payoffDepth ?? "layered";
     if (language === "en") {
       return [
         "PAYOFF REALIZATION MODE",
         "You are performing a controlled rewrite to materialize a missing promised payoff.",
         `Promised payoff: ${payoffDirective.promisedPayoff}`,
         `Payoff type: ${payoffDirective.payoffType}`,
+        `Payoff depth: ${payoffDepth}`,
+        "Hard priority: payoff > cost > endingType.",
+        "Hard rule: if payoff is not realized, the chapter is invalid regardless of cost or ending type.",
+        "Hard execution order: 1) moment/event happens, 2) result becomes visible, 3) cost lands.",
+        "Hard rule: do not skip the payoff to satisfy cost, calm_end, unresolved_end, or any other endingType.",
         "Hard rule: Act 3 must contain the concrete payoff event, not a vague hint.",
+        "Hard rule: every payoff beat must include sensory detail, cost paid, and a visible situation change.",
+        "Hard rule: sensory detail must be vivid and tied to the exact moment of change.",
+        "Hard rule: every payoff beat must contain one clear turning instant (MOMENT).",
+        "Hard rule: MOMENT must be one standalone sentence where the event happens all at once.",
+        "Hard rule: gradual or uncertain MOMENT wording is invalid: 'gradually opened', 'began to open', 'seemed to open'.",
+        "Good MOMENT example: 'The stone door split open with a crack.'",
+        "Hard rule: after the MOMENT, include a stabilization phase.",
+        "Hard rule: every payoff beat must include a clear cost that hurts the protagonist.",
+        "Hard rule: cost must land after the moment/result: moment -> result -> cost.",
+        "Hard rule: cost must be concrete: worsened bodily injury, qi-blood/blood essence/resource consumption, time cost that prevents action, or lingering side effect / worsened state.",
+        "Hard rule: no-cost success is invalid. Example: 'The door opened. His right arm went completely numb.'",
+        "Hard rule: MOMENT cannot be the chapter's final sentence.",
+        payoffDirective.payoffType === "resource"
+          ? "Hard rule: for resource payoff, the acquisition must become a sharp event with a clear trigger and impact."
+          : undefined,
+        payoffDirective.payoffType === "reveal"
+          ? "Hard rule: for reveal payoff, you MUST write one standalone cognitive moment sentence where understanding completes clearly."
+          : undefined,
+        payoffDirective.payoffType === "reveal"
+          ? "Hard rule: invalid reveal wording includes 'he seemed to realize', 'he vaguely discovered', 'he felt that'."
+          : undefined,
+        payoffDirective.payoffType === "reveal"
+          ? "Hard rule: if rewrites already failed twice, force the sentence: 'In that instant, he understood the contract.'"
+          : undefined,
+        payoffDirective.payoffType === "resource"
+          ? "Hard rule: resource payoff structure is trigger -> MOMENT -> cost -> stabilization."
+          : undefined,
+        payoffDirective.payoffType === "resource"
+          ? "Hard rule: do not use flat lines like 'he obtained it' or 'the information appeared in his mind'."
+          : undefined,
+        "Hard rule: abstract-only lines like 'power increased' / 'suppression disappeared' are invalid without concrete sensory rendering.",
+        "No painless success is allowed.",
+        forceMomentAnchor
+          ? "FORCED MOMENT ANCHOR MODE: payoff rewrites already failed at least twice. You MUST insert a standard standalone MOMENT sentence immediately after the trigger, even if the fit is imperfect."
+          : undefined,
+        forceMomentAnchor
+          ? "Forced anchor examples must match payoff type: event -> 'The door was forced open.' / resource-cognition -> 'The full contract flooded into his mind.' / state-change -> 'His true name began to break apart.'"
+          : undefined,
+        forceMomentAnchor
+          ? "After the forced MOMENT anchor, you MUST immediately supply result and cost."
+          : undefined,
         "Insert or replace a scene so the promised object produces new information, a new resource, a breakthrough, a relationship shift, or a reversal now.",
+        "Do not patch with one extra sentence. Rewrite the payoff paragraph as a full impact beat.",
+        payoffDirective.payoffType === "reveal" && payoffDepth === "layered"
+          ? "For layered reveal, materialize only one layer in this chapter and leave at least one deeper unknown unresolved."
+          : undefined,
         "Keep chapter facts and continuity intact.",
-      ].join("\n");
+      ].filter(Boolean).join("\n");
     }
 
     return [
@@ -1544,10 +2590,62 @@ ${lengthRequirementBlock}
       "你正在执行一次受控重写，用来兑现缺失的 promised payoff。",
       `Promised payoff: ${payoffDirective.promisedPayoff}`,
       `Payoff type: ${payoffDirective.payoffType}`,
+      `Payoff depth: ${payoffDepth}`,
+      "硬优先级：payoff > cost > endingType。",
+      "硬规则：如果 payoff 没有兑现，无论 cost 或 endingType 是否满足，本章都无效。",
+      "硬执行顺序：buildup（过程）-> trigger（触发）-> MOMENT（单独一句）-> result（结果）-> cost（代价）。",
+      "硬锁：trigger 必须先于 MOMENT，MOMENT 必须先于 result/cost。",
+      "硬规则：禁止为了满足 cost、calm_end、unresolved_end 或任何 endingType 而跳过 payoff。",
       "硬规则：Act3 必须出现具体 payoff 事件，而不是模糊暗示。",
+      "硬规则：每个 payoff 段必须同时具备感知细节、代价、可见局势变化三层。",
+      "硬规则：感知层必须具体且可感（视觉/触觉/听觉/生理至少一类），并绑定变化瞬间。",
+      "硬规则：每个 payoff 段必须有一个明确 MOMENT（瞬间断点/爆发点）。",
+      "硬规则：MOMENT 必须是单独一句，事件在这一句里明确发生。",
+      "硬规则：禁止渐变或不确定 MOMENT 表达，例如“逐渐打开 / 开始打开 / 正在打开 / 缓缓开启 / 似乎打开 / 似乎裂开”。",
+      "正确 MOMENT 示例：门，被强行打开。",
+      "正确 MOMENT 示例：石门猛地裂开。",
+      "硬规则：MOMENT 之后必须写收束段，让局势稳定。",
+      "硬规则：每个 payoff 段必须有明确代价，并且这个代价要真正伤到主角。",
+      "硬规则：代价必须落在 moment/result 之后，结构为 moment -> result -> cost。",
+      "硬规则：代价必须具体，至少属于身体损伤加重、气血/精血/资源消耗、时间代价（无法行动）、后遗症/状态恶化之一。",
+      "硬规则：禁止无代价成功。错误：门开了。正确：门开了。他的右臂随之彻底失去知觉。",
+      "硬规则：MOMENT 不得作为章节最后一句。",
+      payoffDirective.payoffType === "resource"
+        ? "硬规则：资源型 payoff 必须写成带触发与冲击的获取事件，而不是平滑状态变化。"
+        : undefined,
+      payoffDirective.payoffType === "reveal"
+        ? "硬规则：reveal 型 payoff 必须写出认知断点句：单独一句，且认知在这一句里明确完成。"
+        : undefined,
+      payoffDirective.payoffType === "reveal"
+        ? "硬规则：禁止 reveal 写成“他似乎意识到 / 他隐约发现 / 他感觉到”。"
+        : undefined,
+      payoffDirective.payoffType === "reveal"
+        ? "硬规则：如果 rewrite 已失败至少 2 次，直接强制句：那一刻，他看懂了这份契约。"
+        : undefined,
+      payoffDirective.payoffType === "resource"
+        ? "硬规则：资源型 payoff 结构固定为 trigger -> MOMENT -> cost -> stabilization。"
+        : undefined,
+      payoffDirective.payoffType === "resource"
+        ? "硬规则：禁止直接写“他获得了……”或“信息出现在脑海”。"
+        : undefined,
+      "硬规则：只写“力量增强/压制消失”等抽象结果视为不合格，必须落到具体感知。",
+      "禁止“无痛成功”。",
+      forceMomentAnchor
+        ? "FORCED MOMENT ANCHOR MODE：payoff rewrite 已连续失败至少 2 次。即使上下文衔接不够完美，也必须在 trigger 之后插入一个标准 MOMENT 单句。"
+        : undefined,
+      forceMomentAnchor
+        ? "标准 MOMENT 句必须匹配 payoffType：event -> 门，被强行打开。/ resource-cognition -> 契约的全部内容，涌入他的意识。/ state-change -> 他的真名，开始崩解。"
+        : undefined,
+      forceMomentAnchor
+        ? "强制锚点落下后，必须立刻补 result 与 cost，宁可略突兀，也不能没有爆点。"
+        : undefined,
       "必须插入或替换一个具体 scene，让承诺对象现在就产出新信息、新资源、新突破、关系变化或反转结果。",
+      "不要补一句话了事；要把 payoff 段重写成完整冲击段。",
+      payoffDirective.payoffType === "reveal" && payoffDepth === "layered"
+        ? "对于 layered reveal：本章只能兑现一层，必须保留至少一个更深未知，禁止一章解释完所有层。"
+        : undefined,
       "保留章节事实和连续性。",
-    ].join("\n");
+    ].filter(Boolean).join("\n");
   }
 
   private buildPayoffRewritePrompt(params: {
@@ -1558,14 +2656,66 @@ ${lengthRequirementBlock}
     preWriteCheck: string;
     payoffDirective: NonNullable<ChapterGoal["payoffDirective"]>;
     titleCandidates: ReadonlyArray<{ title: string }>;
+    forceMomentAnchor?: boolean;
   }): string {
+    const payoffDepth = params.payoffDirective.payoffDepth ?? "layered";
     if (params.language === "en") {
       return [
         `Chapter ${params.chapterNumber} failed payoff materialization.`,
         "- Do not merely strengthen the hint.",
         "- Insert or replace a concrete payoff scene in Act 3.",
+        "- Priority is locked: payoff > cost > endingType.",
+        "- If payoff is not realized, the chapter is invalid regardless of cost or ending type.",
+        "- Execution order is locked: buildup -> trigger -> MOMENT (standalone sentence) -> result -> cost.",
+        "- Hard lock: trigger must appear before MOMENT; MOMENT must appear before result/cost.",
+        "- Do not skip the payoff to satisfy cost, calm_end, unresolved_end, or any other endingType.",
+        "- Every payoff must include: sensory detail, cost paid, visible change in situation.",
+        "- Sensory detail must be vivid and tied to the exact moment of change.",
+        "- Every payoff must include a clear MOMENT (single sharp turning instant).",
+        "- MOMENT must be one standalone sentence where the event clearly happens.",
+        "- Invalid MOMENT wording: gradually opened / began to open / seemed to open.",
+        "- Banned gradual Chinese expressions in MOMENT: 开始打开 / 正在打开 / 缓缓开启 / 似乎裂开.",
+        "- Good MOMENT example: The stone door split open with a crack.",
+        "- After MOMENT, you MUST include a stabilization phase.",
+        "- Every payoff MUST include a clear cost that hurts the protagonist.",
+        "- Cost must land after moment/result: moment -> result -> cost.",
+        "- Cost must be concrete: worsened bodily injury, qi-blood/blood essence/resource consumption, time cost that prevents action, or lingering side effect / worsened state.",
+        "- No-cost success is invalid. Example: The door opened. His right arm went completely numb.",
+        params.payoffDirective.payoffType === "resource"
+          ? "- For resource payoff, you MUST turn the acquisition into a sharp event with a clear trigger and impact."
+          : undefined,
+        params.payoffDirective.payoffType === "reveal"
+          ? "- For reveal payoff, you MUST include one standalone cognitive moment sentence where understanding is clearly completed."
+          : undefined,
+        params.payoffDirective.payoffType === "reveal"
+          ? "- Invalid reveal wording: he seemed to realize / he vaguely discovered / he felt that."
+          : undefined,
+        params.payoffDirective.payoffType === "resource"
+          ? "- Resource payoff structure is mandatory: trigger -> MOMENT -> cost -> stabilization."
+          : undefined,
+        params.payoffDirective.payoffType === "resource"
+          ? "- Flat lines like 'he obtained it' or 'the information appeared in his mind' are invalid."
+          : undefined,
+        "- Abstract-only outcomes like 'power increased' or 'suppression disappeared' are invalid without concrete sensory rendering.",
+        "- Painless success is invalid.",
+        params.forceMomentAnchor
+          ? "- Forced Moment Anchor is active: insert one standard standalone MOMENT sentence immediately after the trigger."
+          : undefined,
+        params.forceMomentAnchor
+          ? "- Forced anchor examples must match payoff type: event -> 'The door was forced open.' / resource-cognition -> 'The full contract flooded into his mind.' / state-change -> 'His true name began to break apart.'"
+          : undefined,
+        params.forceMomentAnchor
+          ? "- Even if the transition feels slightly abrupt, do not omit the MOMENT. Add result and cost right after it."
+          : undefined,
         `- The promised payoff is: ${params.payoffDirective.promisedPayoff}`,
+        `- The payoff depth is: ${payoffDepth}`,
         "- The scene must show real new information / resource / breakthrough / relationship shift / reversal.",
+        "- The payoff paragraph structure must be: buildup -> MOMENT -> post-moment resolution.",
+        "- MOMENT cannot be the final sentence of the chapter.",
+        "- Do not patch one sentence. Rewrite the payoff paragraph into a full impact beat.",
+        params.payoffDirective.payoffType === "reveal" && payoffDepth === "layered"
+          ? "- Reveal only one layer this chapter and leave at least one deeper unknown unresolved."
+          : undefined,
         "- Output PRE_WRITE_CHECK, CHAPTER_TITLE, and CHAPTER_CONTENT only.",
         params.titleCandidates.length > 0 ? `- Prefer one of these titles if useful: ${params.titleCandidates.map((candidate) => candidate.title).join(" | ")}` : undefined,
         "",
@@ -1584,8 +2734,61 @@ ${lengthRequirementBlock}
       `第${params.chapterNumber}章没有真正兑现 promised payoff。`,
       "- 不要只加强暗示。",
       "- 必须在 Act3 插入或替换一个具体的 payoff scene。",
+      "- 优先级锁死：payoff > cost > endingType。",
+      "- 如果 payoff 没有兑现，无论 cost 或 endingType 是否满足，本章都无效。",
+      "- 执行顺序锁死：buildup（过程）-> trigger（触发）-> MOMENT（单独一句）-> result（结果）-> cost（代价）。",
+      "- 硬锁：trigger 必须先于 MOMENT，MOMENT 必须先于 result/cost。",
+      "- 禁止为了满足 cost、calm_end、unresolved_end 或任何 endingType 而跳过 payoff。",
+      "- Every payoff must include: sensory detail, cost paid, visible change in situation.",
+      "- 感知层必须具体并绑定变化瞬间（视觉/触觉/听觉/生理至少一类）。",
+      "- 必须有明确 MOMENT（单一清晰的瞬间爆发点）。",
+      "- MOMENT 必须单独成句，并且事件必须在这一句里明确发生。",
+      "- 禁止 MOMENT 写成“逐渐打开 / 开始打开 / 正在打开 / 缓缓开启 / 似乎打开 / 似乎裂开”。",
+      "- 正确 MOMENT 示例：门，被强行打开。",
+      "- 正确 MOMENT 示例：石门猛地裂开。",
+      "- MOMENT 后必须有收束阶段，稳定局势。",
+      "- Every payoff MUST include a clear cost that hurts the protagonist.",
+      "- 代价必须落在 moment/result 之后：moment -> result -> cost。",
+      "- 代价必须具体：身体损伤加重、气血/精血/资源消耗、时间代价（无法行动）、后遗症/状态恶化，至少一种。",
+      "- 禁止无代价成功。错误：门开了。正确：门开了。他的右臂随之彻底失去知觉。",
+      params.payoffDirective.payoffType === "resource"
+        ? "- 资源型 payoff 必须写成带触发与冲击的获取事件，而不是平滑结果。"
+        : undefined,
+      params.payoffDirective.payoffType === "reveal"
+        ? "- reveal 型 payoff 必须包含一个单独成句的认知断点句，且认知必须在这一句里明确完成。"
+        : undefined,
+      params.payoffDirective.payoffType === "reveal"
+        ? "- 禁止 reveal 写成“他似乎意识到 / 他隐约发现 / 他感觉到”。"
+        : undefined,
+      params.payoffDirective.payoffType === "resource"
+        ? "- 资源型 payoff 结构固定为 trigger -> MOMENT -> cost -> stabilization。"
+        : undefined,
+      params.payoffDirective.payoffType === "resource"
+        ? "- 禁止直接写“他获得了……”或“信息出现在脑海”。"
+        : undefined,
+      "- 禁止抽象结果空转（如“力量增强”“压制消失”）；必须写出可感的变化细节。",
+      "- Painless success is invalid.",
+      params.forceMomentAnchor
+        ? "- Forced Moment Anchor 已激活：必须在 trigger 之后插入一个标准 MOMENT 单句。"
+        : undefined,
+      params.forceMomentAnchor && params.payoffDirective.payoffType === "reveal"
+        ? "- reveal fallback 强制句：那一刻，他看懂了这份契约。"
+        : undefined,
+      params.forceMomentAnchor
+        ? "- 标准 MOMENT 句必须匹配 payoffType：event -> 门，被强行打开。/ resource-cognition -> 契约的全部内容，涌入他的意识。/ state-change -> 他的真名，开始崩解。"
+        : undefined,
+      params.forceMomentAnchor
+        ? "- 即使衔接略突兀，也不能省略 MOMENT；MOMENT 后立刻补 result 与 cost。"
+        : undefined,
       `- promisedPayoff: ${params.payoffDirective.promisedPayoff}`,
+      `- payoffDepth: ${payoffDepth}`,
       "- 该 scene 必须让承诺对象真的产出新信息 / 新资源 / 新突破 / 关系变化 / 反转之一。",
+      "- payoff 段结构必须是 buildup（铺垫）-> MOMENT（爆点）-> post-moment resolution（收束）。",
+      "- MOMENT 不得作为章节最后一句。",
+      "- 不能只补一句；要重写 payoff 段为完整冲击段（感知层+瞬间爆发点+爆点后收束+代价层+结果层）。",
+      params.payoffDirective.payoffType === "reveal" && payoffDepth === "layered"
+        ? "- layered reveal 只允许本章兑现一层，并且必须保留至少一个更深未知。"
+        : undefined,
       "- 只输出 PRE_WRITE_CHECK、CHAPTER_TITLE、CHAPTER_CONTENT 三个区块。",
       params.titleCandidates.length > 0 ? `- 可优先参考这些标题：${params.titleCandidates.map((candidate) => candidate.title).join(" | ")}` : undefined,
       "",
@@ -1600,6 +2803,215 @@ ${lengthRequirementBlock}
     ].filter(Boolean).join("\n");
   }
 
+  private applyForcedMomentAnchor(
+    creative: {
+      title: string;
+      content: string;
+      wordCount: number;
+      preWriteCheck: string;
+    },
+    chapterGoal: ChapterGoal,
+    language: "zh" | "en",
+    countingMode: LengthSpec["countingMode"],
+  ): {
+    title: string;
+    content: string;
+    wordCount: number;
+    preWriteCheck: string;
+  } {
+    const momentLikePattern = language === "zh"
+      ? /(就在这一刻|那一瞬间|这一刻|猛地|轰然|骤然|门，被强行打开。|石门，轰然裂开。|那扇门，开了。)/
+      : /(in that instant|at that instant|all at once|the door was forced open|the stone door split open)/i;
+    if (momentLikePattern.test(creative.content)) {
+      return creative;
+    }
+
+    const paragraphs = creative.content
+      .split(/\n{2,}/)
+      .map((paragraph) => paragraph.trim())
+      .filter(Boolean);
+    if (paragraphs.length === 0) {
+      return creative;
+    }
+
+    const anchorKind = this.resolveForcedMomentAnchorKind(chapterGoal, creative.content);
+    const anchorSentence = this.selectForcedMomentAnchor(creative.content, chapterGoal, language, anchorKind);
+    const resultSentence = this.buildForcedMomentAnchorResult(language, anchorKind);
+    const costSentence = this.buildForcedMomentAnchorCost(language, anchorKind);
+    const triggerPattern = language === "zh"
+      ? /(触发|引动|催动|逼到极限|血痕|灼痛|共鸣|反噬|临界|匙钥|钥匙|裂纹|阵纹|符文|卷轴|古卷|石门|门扉|门锁|契约|地图|玉简|真相|记忆|意识|看懂|崩解|消散|失控|觉醒|反转|真名)/
+      : /(trigger|resonance|backlash|limit|threshold|key|seal|door|gate|glyph|mark|pain|blood|contract|map|memory|truth|mind|awaken|break apart|identity)/i;
+    const triggerIndex = paragraphs.findIndex((paragraph) => triggerPattern.test(paragraph));
+    const insertAt = triggerIndex >= 0 ? triggerIndex + 1 : 1;
+    const anchorBlock = [anchorSentence, resultSentence, costSentence].join("\n");
+    const nextParagraphs = [...paragraphs];
+    nextParagraphs.splice(Math.min(insertAt, nextParagraphs.length), 0, anchorBlock);
+
+    return {
+      ...creative,
+      content: nextParagraphs.join("\n\n"),
+      wordCount: countChapterLength(nextParagraphs.join("\n\n"), countingMode),
+      preWriteCheck: creative.preWriteCheck.includes("forced moment anchor")
+        ? creative.preWriteCheck
+        : `${creative.preWriteCheck.trim()}\n- forced moment anchor inserted`.trim(),
+    };
+  }
+
+  private selectForcedMomentAnchor(
+    content: string,
+    chapterGoal: ChapterGoal,
+    language: "zh" | "en",
+    anchorKind: "event" | "resource-cognition" | "state-change" | "reveal-cognition",
+  ): string {
+    if (language === "en") {
+      if (anchorKind === "reveal-cognition") {
+        return "In that instant, he understood the contract.";
+      }
+      if (anchorKind === "resource-cognition") {
+        if (/contract/i.test(content)) {
+          return "The full contract flooded into his mind.";
+        }
+        return "In that instant, he understood what he had gained.";
+      }
+      if (anchorKind === "state-change") {
+        if (/true name|name/i.test(content)) {
+          return "His true name began to break apart.";
+        }
+        return "The change inside him lurched into motion.";
+      }
+      if (/stone door|stone gate/i.test(content)) {
+        return "The stone door split open with a crash.";
+      }
+      if (/door|gate|seal|lock/i.test(content)) {
+        return "The door was forced open.";
+      }
+      return "That door opened.";
+    }
+
+    if (anchorKind === "reveal-cognition") {
+      if (/陷阱|trap/i.test(content)) {
+        return "他终于明白，这不是契约，而是陷阱。";
+      }
+      if (/线索/.test(content)) {
+        return "所有线索，在这一刻拼合。";
+      }
+      return "那一刻，他看懂了这份契约。";
+    }
+    if (anchorKind === "resource-cognition") {
+      if (/契约/.test(content)) {
+        return "契约的全部内容，涌入他的意识。";
+      }
+      if (/地图|玉简/.test(content)) {
+        return "那一刻，他看懂了这份线索。";
+      }
+      return "那一刻，他看懂了这份契约。";
+    }
+    if (anchorKind === "state-change") {
+      if (/真名/.test(content) || /真名/.test(chapterGoal.payoffToDeliver ?? "")) {
+        return "他的真名，开始崩解。";
+      }
+      return "消散的速度，骤然加快。";
+    }
+    if (/石门|石壁门|门扉/.test(content)) {
+      return "石门，轰然裂开。";
+    }
+    if (/门|门洞|门锁|封门|封印/.test(content) || chapterGoal.payoffDirective?.payoffType === "resource") {
+      return "门，被强行打开。";
+    }
+    return "那扇门，开了。";
+  }
+
+  private resolveForcedMomentAnchorKind(
+    chapterGoal: ChapterGoal,
+    content: string,
+  ): "event" | "resource-cognition" | "state-change" | "reveal-cognition" {
+    const payoffType = chapterGoal.payoffDirective?.payoffType;
+    const promised = `${chapterGoal.payoffDirective?.promisedPayoff ?? ""} ${chapterGoal.payoffToDeliver ?? ""} ${content}`;
+    if (payoffType === "resource") {
+      return "resource-cognition";
+    }
+    if (payoffType === "reveal") {
+      return "reveal-cognition";
+    }
+    if (payoffType === "breakthrough" || payoffType === "reversal") {
+      return "state-change";
+    }
+    if (
+      /(揭开|揭示|看懂|明白|真相|线索拼合|认出|识破|看清)/.test(promised)
+    ) {
+      return "reveal-cognition";
+    }
+    if (
+      /(契约|地图|玉简|线索|信息|真相|记忆|意识|看懂|得知|认出|看清)/.test(promised)
+    ) {
+      return "resource-cognition";
+    }
+    if (
+      /(真名|崩解|消散|失控|觉醒|突破|反转|污染|侵蚀|蜕变|状态)/.test(promised)
+    ) {
+      return "state-change";
+    }
+    return "event";
+  }
+
+  private buildForcedMomentAnchorResult(
+    language: "zh" | "en",
+    anchorKind: "event" | "resource-cognition" | "state-change" | "reveal-cognition",
+  ): string {
+    if (language === "en") {
+      if (anchorKind === "reveal-cognition") {
+        return "The hidden meaning locked into place, and the reveal finally became usable truth.";
+      }
+      if (anchorKind === "resource-cognition") {
+        return "New meaning snapped into place, and the scene finally yielded usable knowledge.";
+      }
+      if (anchorKind === "state-change") {
+        return "His condition shifted visibly, pushing the whole situation into a new state.";
+      }
+      return "The situation lurched forward the instant that sentence became real.";
+    }
+
+    if (anchorKind === "reveal-cognition") {
+      return "隐去的那一层意思，终于在这一句里锁死成了真相。";
+    }
+    if (anchorKind === "resource-cognition") {
+      return "新的信息，在这一句之后终于落成了可用的认知。";
+    }
+    if (anchorKind === "state-change") {
+      return "他的状态，被这一句硬生生推到了新的阶段。";
+    }
+    return "局势，在这一句之后被硬生生往前推了一步。";
+  }
+
+  private buildForcedMomentAnchorCost(
+    language: "zh" | "en",
+    anchorKind: "event" | "resource-cognition" | "state-change" | "reveal-cognition",
+  ): string {
+    if (language === "en") {
+      if (anchorKind === "reveal-cognition") {
+        return "The price hit with the understanding, leaving his head ringing and his breathing uneven.";
+      }
+      if (anchorKind === "resource-cognition") {
+        return "The cost hit immediately after it, leaving his mind throbbing and his body reeling.";
+      }
+      if (anchorKind === "state-change") {
+        return "The price followed at once, tearing through his body and stripping away control.";
+      }
+      return "The cost crashed in right after it, dragging pain back through the old wound.";
+    }
+
+    if (anchorKind === "reveal-cognition") {
+      return "代价也随着这道认知一起压下来，额角发紧，呼吸都乱了一瞬。";
+    }
+    if (anchorKind === "resource-cognition") {
+      return "代价随即压进识海，太阳穴突突作痛，连呼吸都乱了一拍。";
+    }
+    if (anchorKind === "state-change") {
+      return "代价立刻反咬回来，筋骨发紧，失控感顺着血肉往上窜。";
+    }
+    return "代价也紧跟着压了回来，胸口一沉，旧伤随之发作。";
+  }
+
   private async rewriteForMoodDirectiveIfNeeded(params: {
     creative: {
       title: string;
@@ -1609,6 +3021,16 @@ ${lengthRequirementBlock}
     };
     chapterIntent?: string;
     moodDirective?: MoodDirective;
+    hookEmergenceDirective?:
+      | {
+        readonly mustMaterializeHookNow: boolean;
+        readonly hookExecutionPhase?: "any" | "late";
+        readonly targetHookId?: string;
+        readonly targetHookState?: string;
+        readonly targetHookExpectedPayoff?: string;
+        readonly targetHookNotes?: string;
+      }
+      | undefined;
     language: "zh" | "en";
     chapterNumber: number;
     maxTokens: number;
@@ -1626,17 +3048,29 @@ ${lengthRequirementBlock}
       return creative;
     }
 
+    const requireSceneStructure = moodDirective.forceSceneStructure ?? true;
     let currentCreative = creative;
+    let structureCheck = this.evaluateBreathSceneStructure(currentCreative.content, moodDirective);
+    let hookPhaseCheck = this.evaluateHookExecutionPhaseInBreathScenes(currentCreative.content, params.hookEmergenceDirective);
     let moodCheck = evaluateMoodCadenceCompliance(currentCreative.content, chapterIntent);
-    if (!moodCheck || moodCheck.matched) {
+    if (
+      (!moodCheck || moodCheck.matched)
+      && (!requireSceneStructure || structureCheck.matched)
+      && hookPhaseCheck.matched
+    ) {
       return currentCreative;
     }
 
     const maxAttempts = 4;
-    for (let attempt = 1; attempt <= maxAttempts && moodCheck && !moodCheck.matched; attempt += 1) {
+    for (
+      let attempt = 1;
+      attempt <= maxAttempts
+      && ((moodCheck && !moodCheck.matched) || (requireSceneStructure && !structureCheck.matched) || !hookPhaseCheck.matched);
+      attempt += 1
+    ) {
       this.logWarn(language, {
-        zh: `Writer REWRITE MODE：第${chapterNumber}章 rewrite attempt ${attempt}，当前 breath coverage=${Math.round((moodCheck.coverageRatio ?? 0) * 100)}%`,
-        en: `Writer REWRITE MODE: chapter ${chapterNumber} rewrite attempt ${attempt}, current breath coverage=${Math.round((moodCheck.coverageRatio ?? 0) * 100)}%`,
+        zh: `Writer REWRITE MODE：第${chapterNumber}章 rewrite attempt ${attempt}，当前 breath coverage=${Math.round((moodCheck?.coverageRatio ?? 0) * 100)}%，sceneStructure=${structureCheck.matched ? "ok" : "failed"}，hookPhase=${hookPhaseCheck.matched ? "ok" : "failed"}`,
+        en: `Writer REWRITE MODE: chapter ${chapterNumber} rewrite attempt ${attempt}, current breath coverage=${Math.round((moodCheck?.coverageRatio ?? 0) * 100)}%, sceneStructure=${structureCheck.matched ? "ok" : "failed"}, hookPhase=${hookPhaseCheck.matched ? "ok" : "failed"}`,
       });
 
       const rewriteResponse = await this.chat(
@@ -1658,7 +3092,10 @@ ${lengthRequirementBlock}
               preWriteCheck: currentCreative.preWriteCheck,
               moodDirective,
               titleCandidates: params.titleCandidates,
-              currentCoverageRatio: moodCheck.coverageRatio ?? 0,
+              currentCoverageRatio: moodCheck?.coverageRatio ?? 0,
+              structureCheck,
+              hookPhaseCheck,
+              hookEmergenceDirective: params.hookEmergenceDirective,
               attempt,
             }),
           },
@@ -1668,8 +3105,14 @@ ${lengthRequirementBlock}
       params.onUsage(rewriteResponse.usage);
 
       currentCreative = parseCreativeOutput(chapterNumber, rewriteResponse.content, countingMode);
+      structureCheck = this.evaluateBreathSceneStructure(currentCreative.content, moodDirective);
+      hookPhaseCheck = this.evaluateHookExecutionPhaseInBreathScenes(currentCreative.content, params.hookEmergenceDirective);
       moodCheck = evaluateMoodCadenceCompliance(currentCreative.content, chapterIntent);
-      if (!moodCheck || moodCheck.matched) {
+      if (
+        (!moodCheck || moodCheck.matched)
+        && (!requireSceneStructure || structureCheck.matched)
+        && hookPhaseCheck.matched
+      ) {
         return currentCreative;
       }
     }
@@ -1685,9 +3128,13 @@ ${lengthRequirementBlock}
     if (params.language === "en") {
       return [
         "REWRITE MODE",
-        "You are not drafting from scratch and you are not retrying the same prompt.",
-        "You are performing a controlled structural rewrite to satisfy a failed breath-mode directive.",
+        "FRESH GENERATION MODE",
+        "You are not patching the prior draft.",
+        "You are performing a controlled full regeneration to satisfy a failed breath-mode directive.",
+        "Force writing mode switch: WRITING_MODE=breath.",
         `Hard requirement: final breath coverage must be >= ${targetCoverage}%.`,
+        "Hard requirement: regenerate structure from constraints, not patch existing paragraphs.",
+        "Move combat-heavy beats to later sections; first 60% must be recovery/dialogue/relationship-oriented.",
         "Hard requirement: add a real breath section and replace part of the combat-heavy stretch if necessary.",
         "Keep chapter facts, outcomes, and plot continuity intact.",
         "Output only PRE_WRITE_CHECK, CHAPTER_TITLE, and CHAPTER_CONTENT.",
@@ -1696,9 +3143,13 @@ ${lengthRequirementBlock}
 
     return [
       "REWRITE MODE",
-      "你现在不是重跑原始写作 prompt，也不是普通 retry。",
-      "你正在执行一次受控的结构重写，用来修复 breath-mode directive 失败。",
+      "FRESH GENERATION MODE",
+      "你现在不是补丁式改稿。",
+      "你正在执行一次受控的整章重生，用来修复 breath-mode directive 失败。",
+      "强制切换写作模式：WRITING_MODE=breath。",
       `硬约束：最终 breath coverage 必须 >= ${targetCoverage}%。`,
+      "硬约束：这次要按约束从头重建结构，不是补丁式加内容。",
+      "把 combat-heavy 段后移，前 60% 必须是恢复/对话/关系推进场景。",
       "硬约束：必须新增真正的 breath section，并在必要时替换掉部分 combat-heavy 战斗段。",
       "保留章节事实、结果和连续性，不得推翻既有主线。",
       "只输出 PRE_WRITE_CHECK、CHAPTER_TITLE、CHAPTER_CONTENT 三个区块。",
@@ -1714,21 +3165,90 @@ ${lengthRequirementBlock}
     moodDirective: MoodDirective;
     titleCandidates: ReadonlyArray<{ title: string }>;
     currentCoverageRatio: number;
+    structureCheck: {
+      readonly matched: boolean;
+      readonly missingScenes: ReadonlyArray<"Scene1" | "Scene2" | "Scene3">;
+      readonly sceneShares: Readonly<Record<"Scene1" | "Scene2" | "Scene3", number>>;
+      readonly minSceneShare: number;
+    };
+    hookPhaseCheck: {
+      readonly matched: boolean;
+      readonly violatedScenes: ReadonlyArray<"Scene1" | "Scene2">;
+      readonly evidence?: string;
+    };
+    hookEmergenceDirective?:
+      | {
+        readonly mustMaterializeHookNow: boolean;
+        readonly hookExecutionPhase?: "any" | "late";
+        readonly targetHookId?: string;
+        readonly targetHookState?: string;
+        readonly targetHookExpectedPayoff?: string;
+        readonly targetHookNotes?: string;
+      }
+      | undefined;
     attempt: number;
   }): string {
+    const failedScenes = (["Scene1", "Scene2", "Scene3"] as const)
+      .filter((scene) => params.structureCheck.sceneShares[scene] < params.structureCheck.minSceneShare)
+      .map((scene) => `${scene}(${Math.round(params.structureCheck.sceneShares[scene] * 100)}%)`);
+    const missingScenes = params.structureCheck.missingScenes.join(", ") || "none";
+
     if (params.language === "en") {
       return [
         `Chapter ${params.chapterNumber} failed the local mood self-check on rewrite attempt ${params.attempt}.`,
         "",
         `- currentCoverage=${Math.round(params.currentCoverageRatio * 100)}%`,
         `- targetCoverage>=${Math.round(params.moodDirective.moodCoverageMin * 100)}%`,
+        `- sceneStructureMatched=${params.structureCheck.matched}`,
+        `- missingScenes=${missingScenes}`,
+        `- sceneShares=${JSON.stringify({
+          scene1: Math.round(params.structureCheck.sceneShares.Scene1 * 100),
+          scene2: Math.round(params.structureCheck.sceneShares.Scene2 * 100),
+          scene3: Math.round(params.structureCheck.sceneShares.Scene3 * 100),
+        })}%`,
+        failedScenes.length > 0 ? `- underMinShareScenes=${failedScenes.join(", ")}` : "- underMinShareScenes=none",
+        params.hookEmergenceDirective?.hookExecutionPhase === "late"
+          ? `- hookExecutionPhase=late (targetHook=${params.hookEmergenceDirective.targetHookId ?? "unknown"})`
+          : undefined,
+        params.hookEmergenceDirective?.hookExecutionPhase === "late"
+          ? `- hookPhaseMatched=${params.hookPhaseCheck.matched}`
+          : undefined,
+        params.hookEmergenceDirective?.hookExecutionPhase === "late"
+          ? `- hookPhaseViolatedScenes=${params.hookPhaseCheck.violatedScenes.join(", ") || "none"}`
+          : undefined,
+        params.hookEmergenceDirective?.hookExecutionPhase === "late" && params.hookPhaseCheck.evidence
+          ? `- hookPhaseEvidence=${params.hookPhaseCheck.evidence}`
+          : undefined,
         "- Keep the chapter facts, outcomes, and core plot beats intact.",
+        "- Full-regeneration rule: generate a new chapter body from constraints; do not patch old paragraph structure.",
+        "- Force writing mode for this rewrite: WRITING_MODE=breath.",
+        "- Tone requirement: slow down sentence pacing and remove sustained high-pressure diction.",
+        "- Mandatory semantic payload: tactile/body sensations, environment grounding (smell/sound/light), and interaction details (dialogue/eyes/micro-actions).",
+        "- Forbidden semantic pattern: dense repeated crisis lexicon (danger/kill intent/explosion/collapse/dying) across consecutive lines.",
         "- PRIMARY STRUCTURAL REQUIREMENT: organize the chapter as Act 1 / Act 2 / Act 3.",
+        "- First paragraph hard rule: must open with recovery/environment/dialogue details.",
+        "- First paragraph forbidden content: direct conflict trigger, immediate threat, enemy action.",
+        "- FORCE THREE-SCENE OUTPUT. CHAPTER_CONTENT must contain [Scene1], [Scene2], [Scene3] in order.",
+        "- Scene1/Scene2/Scene3 are all mandatory. Missing any scene is failure.",
+        `- Each scene must be >= ${Math.round(params.structureCheck.minSceneShare * 100)}% of CHAPTER_CONTENT.`,
         "- Breath chapter skeleton: Act 1 = aftershock / regroup, Act 2 = full breath scene, Act 3 = small forward motion with a low-intensity hook.",
+        "- Reorder requirement: first 60% must complete breathing/recovery/dialogue before any major confrontation beat.",
         "- You must add a real Section B breath scene, not a token sentence.",
+        '- Scene1 semantic hard rule: "Do NOT introduce new threats or escalate conflict."',
+        '- Scene2 semantic hard rule: "Focus on interaction, not action."',
+        '- Scene3 semantic hard rule: "Only here you may move plot forward."',
         "- You must rewrite at least one combat-heavy segment into: rest/healing, dialogue during joint movement, light warmth/trust progression, or resource sorting/plan discussion.",
         "- If you only append a small breathing beat while combat-heavy material still dominates, this rewrite is a failure.",
         "- You must replace part of the dominant combat structure, not merely append a tiny calm note at the end.",
+        params.hookEmergenceDirective?.hookExecutionPhase === "late"
+          ? "- Directive priority is fixed: mood directive > scene plan > payoff > hook emergence."
+          : undefined,
+        params.hookEmergenceDirective?.hookExecutionPhase === "late"
+          ? "- Hook advancement is allowed only in [Scene3]. [Scene1]/[Scene2] must stay recovery/dialogue focused."
+          : undefined,
+        params.hookEmergenceDirective?.hookExecutionPhase === "late"
+          ? "- If [Scene1]/[Scene2] contains hook advancement, core conflict trigger, or climax around the target hook, this rewrite still fails."
+          : undefined,
         `- If breath coverage stays below ${Math.round(params.moodDirective.moodCoverageMin * 100)}%, this rewrite is still a failure.`,
         "- Output PRE_WRITE_CHECK, CHAPTER_TITLE, and CHAPTER_CONTENT only.",
         params.titleCandidates.length > 0 ? `- Prefer one of these titles if useful: ${params.titleCandidates.map((candidate) => candidate.title).join(" | ")}` : undefined,
@@ -1736,10 +3256,10 @@ ${lengthRequirementBlock}
         "=== ORIGINAL_PRE_WRITE_CHECK ===",
         params.preWriteCheck || "- ok",
         "",
-        "=== ORIGINAL_TITLE ===",
+        "=== ORIGINAL_TITLE (Reference only) ===",
         params.originalTitle,
         "",
-        "=== ORIGINAL_CONTENT ===",
+        "=== FACT REFERENCE ONLY (Do not patch sentence structure) ===",
         params.originalContent,
       ].filter(Boolean).join("\n");
     }
@@ -1749,13 +3269,52 @@ ${lengthRequirementBlock}
       "",
       `- 当前 coverage=${Math.round(params.currentCoverageRatio * 100)}%`,
       `- 目标 coverage>=${Math.round(params.moodDirective.moodCoverageMin * 100)}%`,
+      `- sceneStructureMatched=${params.structureCheck.matched ? "true" : "false"}`,
+      `- missingScenes=${missingScenes}`,
+      `- sceneShares=Scene1:${Math.round(params.structureCheck.sceneShares.Scene1 * 100)}% / Scene2:${Math.round(params.structureCheck.sceneShares.Scene2 * 100)}% / Scene3:${Math.round(params.structureCheck.sceneShares.Scene3 * 100)}%`,
+      failedScenes.length > 0 ? `- underMinShareScenes=${failedScenes.join("、")}` : "- underMinShareScenes=none",
+      params.hookEmergenceDirective?.hookExecutionPhase === "late"
+        ? `- hookExecutionPhase=late（targetHook=${params.hookEmergenceDirective.targetHookId ?? "unknown"}）`
+        : undefined,
+      params.hookEmergenceDirective?.hookExecutionPhase === "late"
+        ? `- hookPhaseMatched=${params.hookPhaseCheck.matched ? "true" : "false"}`
+        : undefined,
+      params.hookEmergenceDirective?.hookExecutionPhase === "late"
+        ? `- hookPhaseViolatedScenes=${params.hookPhaseCheck.violatedScenes.join("、") || "none"}`
+        : undefined,
+      params.hookEmergenceDirective?.hookExecutionPhase === "late" && params.hookPhaseCheck.evidence
+        ? `- hookPhaseEvidence=${params.hookPhaseCheck.evidence}`
+        : undefined,
       "- 保留章节事实、结果和主线推进，不要推翻既有情节。",
+      "- 整章重生规则：按约束重写整章正文，不能沿用旧段落做补丁。",
+      "- 本轮强制写作模式：WRITING_MODE=breath。",
+      "- 语气硬约束：放慢句式节奏，去掉持续高压措辞。",
+      "- 必须补齐语义载荷：触觉/身体感受 + 环境锚定（气味/声音/光线）+ 互动细节（对话/眼神/动作）。",
+      "- 禁止语义模式：连续多行堆叠危机词（危险、杀机、爆发、崩裂、濒死）。",
       "- PRIMARY STRUCTURAL REQUIREMENT：章节必须按 Act1 / Act2 / Act3 组织。",
+      "- 首段硬约束：必须以恢复/环境/对话开场。",
+      "- 首段禁止：直接冲突触发、立即危机、敌人行动。",
+      "- 强制三段结构重建：CHAPTER_CONTENT 必须按 [Scene1] / [Scene2] / [Scene3] 顺序输出。",
+      "- Scene1/Scene2/Scene3 都是必写项，缺任一项都算失败。",
+      `- 每个 Scene 必须 >= ${Math.round(params.structureCheck.minSceneShare * 100)}% 的 CHAPTER_CONTENT。`,
       "- Breath 章骨架：Act1=余波/ regroup，Act2=完整喘息场景，Act3=小步前推 + 低强度尾钩。",
+      "- 重排要求：前 60% 必须先完成喘息/恢复/对话，再允许出现主要对抗推进。",
       "- 必须新增真正的 Section B 喘息段，不能只是点到为止的一句话。",
+      '- Scene1 语义硬规则："Do NOT introduce new threats or escalate conflict."',
+      '- Scene2 语义硬规则："Focus on interaction, not action."',
+      '- Scene3 语义硬规则："Only here you may move plot forward."',
       "- 必须把至少一个高压段改写成：休整/疗伤、共同行动中的交谈、轻度温情/信任推进、资源整理/计划讨论之一。",
       "- 如果只是追加一小段喘息而主体仍是 combat-heavy，这次 rewrite 仍算失败。",
       "- 必须替换部分主导性的战斗推进，不能只在结尾补一小段。",
+      params.hookEmergenceDirective?.hookExecutionPhase === "late"
+        ? "- 指令优先级固定：mood directive > scene plan > payoff > hook推进。"
+        : undefined,
+      params.hookEmergenceDirective?.hookExecutionPhase === "late"
+        ? "- Hook 推进只能发生在 [Scene3]，[Scene1]/[Scene2] 必须保持恢复/对话主导。"
+        : undefined,
+      params.hookEmergenceDirective?.hookExecutionPhase === "late"
+        ? "- 若 [Scene1]/[Scene2] 提前触发 target hook 的推进/高潮，这次 rewrite 仍算失败。"
+        : undefined,
       `- 若 breath coverage 仍低于 ${Math.round(params.moodDirective.moodCoverageMin * 100)}%，这次 rewrite 仍算失败。`,
       "- 只输出 PRE_WRITE_CHECK、CHAPTER_TITLE、CHAPTER_CONTENT 三个区块。",
       params.titleCandidates.length > 0 ? `- 可优先参考这些标题：${params.titleCandidates.map((candidate) => candidate.title).join(" | ")}` : undefined,
@@ -1763,12 +3322,174 @@ ${lengthRequirementBlock}
       "=== ORIGINAL_PRE_WRITE_CHECK ===",
       params.preWriteCheck || "- ok",
       "",
-      "=== ORIGINAL_TITLE ===",
+      "=== ORIGINAL_TITLE（仅供参考）===",
       params.originalTitle,
       "",
-      "=== ORIGINAL_CONTENT ===",
+      "=== FACT REFERENCE ONLY（仅供事实对齐，禁止按原段落修补）===",
       params.originalContent,
     ].filter(Boolean).join("\n");
+  }
+
+  private evaluateBreathSceneStructure(content: string, moodDirective: MoodDirective): {
+    matched: boolean;
+    missingScenes: ReadonlyArray<"Scene1" | "Scene2" | "Scene3">;
+    sceneShares: Readonly<Record<"Scene1" | "Scene2" | "Scene3", number>>;
+    minSceneShare: number;
+  } {
+    const minSceneShare = Math.max(0.2, moodDirective.sceneMinShare ?? 0.2);
+    const normalized = content.replace(/\r\n/g, "\n");
+    const markerRegex = /\[(Scene\s*1|Scene\s*2|Scene\s*3)\]/gi;
+    const markers: Array<{ scene: "Scene1" | "Scene2" | "Scene3"; index: number }> = [];
+    let match: RegExpExecArray | null;
+    while ((match = markerRegex.exec(normalized)) !== null) {
+      const raw = match[1]?.replace(/\s+/g, "").toLowerCase();
+      const scene = raw === "scene1"
+        ? "Scene1"
+        : raw === "scene2"
+          ? "Scene2"
+          : "Scene3";
+      if (!markers.some((item) => item.scene === scene)) {
+        markers.push({ scene, index: match.index });
+      }
+    }
+
+    const required: ReadonlyArray<"Scene1" | "Scene2" | "Scene3"> = ["Scene1", "Scene2", "Scene3"];
+    const byScene = new Map(markers.map((item) => [item.scene, item.index] as const));
+    const missingScenes = required.filter((scene) => !byScene.has(scene));
+
+    const ordered = required.map((scene) => byScene.get(scene) ?? Number.POSITIVE_INFINITY);
+    const orderValid = ordered[0] < ordered[1] && ordered[1] < ordered[2];
+
+    const totalChars = normalized.replace(/\s+/g, "").length || 1;
+    const segments: Record<"Scene1" | "Scene2" | "Scene3", string> = {
+      Scene1: "",
+      Scene2: "",
+      Scene3: "",
+    };
+    if (missingScenes.length === 0 && orderValid) {
+      const starts = required.map((scene) => byScene.get(scene)!);
+      for (let idx = 0; idx < required.length; idx += 1) {
+        const scene = required[idx]!;
+        const start = starts[idx]!;
+        const end = idx + 1 < starts.length ? starts[idx + 1]! : normalized.length;
+        segments[scene] = normalized.slice(start, end);
+      }
+    }
+
+    const sceneShares: Record<"Scene1" | "Scene2" | "Scene3", number> = {
+      Scene1: segments.Scene1.replace(/\s+/g, "").length / totalChars,
+      Scene2: segments.Scene2.replace(/\s+/g, "").length / totalChars,
+      Scene3: segments.Scene3.replace(/\s+/g, "").length / totalChars,
+    };
+    const shareValid = required.every((scene) => sceneShares[scene] >= minSceneShare);
+    const matched = missingScenes.length === 0 && orderValid && shareValid;
+
+    return {
+      matched,
+      missingScenes,
+      sceneShares,
+      minSceneShare,
+    };
+  }
+
+  private evaluateHookExecutionPhaseInBreathScenes(
+    content: string,
+    directive:
+      | {
+        readonly mustMaterializeHookNow: boolean;
+        readonly hookExecutionPhase?: "any" | "late";
+        readonly targetHookId?: string;
+        readonly targetHookState?: string;
+        readonly targetHookExpectedPayoff?: string;
+        readonly targetHookNotes?: string;
+      }
+      | undefined,
+  ): {
+    matched: boolean;
+    violatedScenes: ReadonlyArray<"Scene1" | "Scene2">;
+    evidence?: string;
+  } {
+    if (!directive?.mustMaterializeHookNow || directive.hookExecutionPhase !== "late") {
+      return { matched: true, violatedScenes: [] };
+    }
+
+    const normalized = content.replace(/\r\n/g, "\n");
+    const sceneText = this.extractSceneTextMap(normalized);
+    const signalKeywords = this.extractHookExecutionKeywords(directive);
+    if (signalKeywords.length === 0) {
+      return { matched: true, violatedScenes: [] };
+    }
+
+    const violatedScenes: Array<"Scene1" | "Scene2"> = [];
+    const evidenceChunks: string[] = [];
+    (["Scene1", "Scene2"] as const).forEach((scene) => {
+      const text = (sceneText[scene] ?? "").toLowerCase();
+      if (!text) {
+        return;
+      }
+      const matchedKeyword = signalKeywords.find((keyword) => keyword.length > 1 && text.includes(keyword));
+      if (matchedKeyword) {
+        violatedScenes.push(scene);
+        evidenceChunks.push(`${scene}:${matchedKeyword}`);
+      }
+    });
+
+    return {
+      matched: violatedScenes.length === 0,
+      violatedScenes,
+      ...(evidenceChunks.length > 0 ? { evidence: evidenceChunks.join(", ") } : {}),
+    };
+  }
+
+  private extractSceneTextMap(content: string): Record<"Scene1" | "Scene2" | "Scene3", string> {
+    const markers = [
+      { scene: "Scene1" as const, regex: /\[(Scene\s*1)\]/i },
+      { scene: "Scene2" as const, regex: /\[(Scene\s*2)\]/i },
+      { scene: "Scene3" as const, regex: /\[(Scene\s*3)\]/i },
+    ];
+    const indexes = markers
+      .map(({ scene, regex }) => ({ scene, index: content.search(regex) }))
+      .filter((entry) => entry.index >= 0)
+      .sort((left, right) => left.index - right.index);
+
+    const segments: Record<"Scene1" | "Scene2" | "Scene3", string> = {
+      Scene1: "",
+      Scene2: "",
+      Scene3: "",
+    };
+    for (let idx = 0; idx < indexes.length; idx += 1) {
+      const current = indexes[idx]!;
+      const nextStart = idx + 1 < indexes.length ? indexes[idx + 1]!.index : content.length;
+      segments[current.scene] = content.slice(current.index, nextStart);
+    }
+    return segments;
+  }
+
+  private extractHookExecutionKeywords(directive: {
+    readonly targetHookId?: string;
+    readonly targetHookExpectedPayoff?: string;
+    readonly targetHookNotes?: string;
+  }): string[] {
+    const keywords = new Set<string>();
+    const addTokens = (value: string | undefined) => {
+      if (!value) return;
+      const lower = value.toLowerCase();
+      if (lower.trim()) {
+        keywords.add(lower.trim());
+      }
+      for (const token of lower.match(/[a-z0-9_-]{3,}/g) ?? []) {
+        keywords.add(token);
+      }
+      for (const token of lower.match(/[\u4e00-\u9fff]{2,8}/g) ?? []) {
+        keywords.add(token);
+      }
+    };
+
+    addTokens(directive.targetHookId);
+    addTokens(directive.targetHookExpectedPayoff);
+    addTokens(directive.targetHookNotes);
+
+    return [...keywords];
   }
 
   private async rewriteForHookEmergenceIfNeeded(params: {

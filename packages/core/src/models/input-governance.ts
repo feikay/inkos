@@ -77,23 +77,42 @@ export const PayoffTypeSchema = z.enum([
 
 export type PayoffType = z.infer<typeof PayoffTypeSchema>;
 
+export const PayoffDepthSchema = z.enum([
+  "shallow",
+  "layered",
+  "deep",
+]);
+
+export type PayoffDepth = z.infer<typeof PayoffDepthSchema>;
+
+export const PayoffScopeSchema = z.enum([
+  "chapter",
+  "arc",
+]);
+
+export type PayoffScope = z.infer<typeof PayoffScopeSchema>;
+
 export const PayoffDirectiveSchema = z.object({
   promisedPayoff: z.string().min(1),
   payoffType: PayoffTypeSchema,
+  payoffDepth: PayoffDepthSchema.optional(),
+  payoffScope: PayoffScopeSchema.optional(),
   mandatoryByFinalAct: z.boolean().default(true),
 });
 
 export type PayoffDirective = z.infer<typeof PayoffDirectiveSchema>;
 
 export const ChapterGoalSchema = z.object({
-  mainConflict: z.string().min(1),
-  protagonistGoal: z.string().min(1),
+  mainConflict: z.string().trim().min(1),
+  protagonistGoal: z.string().trim().min(1),
   activeCharacters: z.array(z.string().min(1)).max(4).default([]),
   foreshadowToTouch: z.array(z.string().min(1)).max(2).default([]),
-  payoffToDeliver: z.string().min(1),
+  payoffToDeliver: z.string().trim().min(1),
+  payoffTrigger: z.string().trim().min(1).optional(),
   payoffDirective: PayoffDirectiveSchema.optional(),
+  maxRevealLayersPerChapter: z.number().int().min(1).optional(),
   endingHookType: EndingHookTypeSchema,
-  nextChapterPull: z.string().min(1),
+  nextChapterPull: z.string().trim().min(1),
 });
 
 export type ChapterGoal = z.infer<typeof ChapterGoalSchema>;
@@ -101,23 +120,77 @@ export type ChapterGoal = z.infer<typeof ChapterGoalSchema>;
 export const MoodDirectiveTargetModeSchema = z.enum(["calm", "breath", "warmth", "humor"]);
 export type MoodDirectiveTargetMode = z.infer<typeof MoodDirectiveTargetModeSchema>;
 
+export const WritingModeSchema = z.enum(["crisis", "neutral", "breath"]);
+export type WritingMode = z.infer<typeof WritingModeSchema>;
+
+export const MoodScenePlanSchema = z.object({
+  scene1: z.string().min(1),
+  scene2: z.string().min(1),
+  scene3: z.string().min(1),
+});
+
+export type MoodScenePlan = z.infer<typeof MoodScenePlanSchema>;
+
 export const MoodDirectiveSchema = z.object({
   targetMode: MoodDirectiveTargetModeSchema,
+  writingMode: WritingModeSchema.optional(),
+  firstPassModeLock: z.boolean().optional(),
+  forbidCrisisFallback: z.boolean().optional(),
   requiredSceneQuota: z.number().int().min(1).default(1),
   moodCoverageMin: z.number().min(0.1).max(0.8).default(0.3),
   forbidDominantMode: z.literal("combat-heavy").default("combat-heavy"),
+  forceSceneStructure: z.boolean().optional(),
+  sceneMinShare: z.number().min(0.1).max(0.5).optional(),
+  sceneSemanticEnforced: z.boolean().optional(),
+  scene1NoThreatEscalation: z.boolean().optional(),
+  scene2InteractionFocus: z.boolean().optional(),
+  scene3ForwardOnly: z.boolean().optional(),
+  scenePlan: MoodScenePlanSchema.optional(),
   note: z.string().min(1).optional(),
 });
 
 export type MoodDirective = z.infer<typeof MoodDirectiveSchema>;
 
+export const HookExecutionPhaseSchema = z.enum(["any", "late"]);
+export type HookExecutionPhase = z.infer<typeof HookExecutionPhaseSchema>;
+
+export const ChapterModeSchema = z.enum(["breath", "escalation", "combat", "reveal"]);
+export type ChapterMode = z.infer<typeof ChapterModeSchema>;
+
+export const EndingTypeSchema = z.enum([
+  "reveal_end",
+  "unresolved_end",
+  "resolution_end",
+  "twist_end",
+  "calm_end",
+]);
+export type EndingType = z.infer<typeof EndingTypeSchema>;
+
+export const DirectivePriorityItemSchema = z.enum([
+  "mood-structure",
+  "scene-plan",
+  "hook-emergence",
+  "payoff",
+]);
+export type DirectivePriorityItem = z.infer<typeof DirectivePriorityItemSchema>;
+
+export const DirectivePrioritySchema = z.object({
+  ordered: z.array(DirectivePriorityItemSchema).min(1),
+});
+export type DirectivePriority = z.infer<typeof DirectivePrioritySchema>;
+
 export const ChapterIntentSchema = z.object({
   chapter: z.number().int().min(1),
-  goal: z.string().min(1),
+  goal: z.string().trim().min(1),
+  goalIntensity: z.enum(["low", "medium", "high"]).default("medium"),
+  chapterMode: ChapterModeSchema.optional(),
+  endingType: EndingTypeSchema.optional(),
   outlineNode: z.string().optional(),
   sceneDirective: z.string().min(1).optional(),
   arcDirective: z.string().min(1).optional(),
   moodDirective: MoodDirectiveSchema.optional(),
+  directivePriority: DirectivePrioritySchema.optional(),
+  hookExecutionPhase: HookExecutionPhaseSchema.optional(),
   titleDirective: z.string().min(1).optional(),
   mustKeep: z.array(z.string()).default([]),
   mustAvoid: z.array(z.string()).default([]),

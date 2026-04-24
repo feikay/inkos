@@ -14,7 +14,7 @@ import {
 } from "../utils/chapter-title-engine.js";
 import type { BookRules } from "../models/book-rules.js";
 import type { GenreProfile } from "../models/genre-profile.js";
-import type { ChapterGoal, EndingHookType, MoodDirective, PayoffDirective } from "../models/input-governance.js";
+import type { ChapterGoal, EndingHookType, EndingType, MoodDirective, PayoffDirective } from "../models/input-governance.js";
 import type { RuntimeStateDelta } from "../models/runtime-state.js";
 import type { RuntimeStateSnapshot } from "../state/state-reducer.js";
 
@@ -36,6 +36,23 @@ export interface PayoffCheck {
   readonly matched: boolean;
   readonly matchLevel: "none" | "partial" | "full";
   readonly payoffType?: PayoffDirective["payoffType"];
+  readonly payoffDepth?: PayoffDirective["payoffDepth"];
+  readonly overReleased?: boolean;
+  readonly evidence?: string;
+}
+
+export interface PayoffImpactCheck {
+  readonly expectedPayoff: string;
+  readonly matched: boolean;
+  readonly payoffType?: PayoffDirective["payoffType"];
+  readonly sensoryMatched: boolean;
+  readonly resourceTriggerMatched: boolean;
+  readonly resourceFlatMatched: boolean;
+  readonly momentMatched: boolean;
+  readonly postMomentResolutionMatched: boolean;
+  readonly momentAtEnding: boolean;
+  readonly costMatched: boolean;
+  readonly impactMatched: boolean;
   readonly evidence?: string;
 }
 
@@ -56,6 +73,15 @@ export interface MoodCadenceCheck {
   readonly evidence?: string;
   readonly coverageRatio?: number;
   readonly dominantMode?: "combat-heavy" | "mixed";
+  readonly structureMatched?: boolean;
+  readonly frontHalfCombatDominant?: boolean;
+  readonly frontHalfCalmCoverageRatio?: number;
+  readonly structureEvidence?: string;
+  readonly semanticMatched?: boolean;
+  readonly semanticFailures?: ReadonlyArray<"scene1-combat-or-escalation" | "scene1-missing-recovery" | "scene2-missing-interaction" | "scene2-combat-dominant">;
+  readonly semanticEvidence?: string;
+  readonly scene1IsolationMatched?: boolean;
+  readonly scene1IsolationEvidence?: string;
 }
 
 export interface EndingIsomorphismCheck {
@@ -63,6 +89,12 @@ export interface EndingIsomorphismCheck {
   readonly evidence?: string;
   readonly repeatedPhrases: ReadonlyArray<string>;
   readonly repeatedModes: ReadonlyArray<string>;
+}
+
+export interface EndingTypeCheck {
+  readonly expectedType: EndingType;
+  readonly matched: boolean;
+  readonly evidence?: string;
 }
 
 export interface ResourceLedgerFinding {
@@ -139,6 +171,26 @@ const MOOD_COMBAT_PATTERNS = [
   /clash|combat|battle|lunged|struck|ambush|sealed|fight|trading blows|blood fight/i,
 ] as const;
 
+const SCENE1_ESCALATION_PATTERNS = [
+  /杀|斩|砍|轰|爆发|突袭|冲杀|厮杀|交锋|血战|对轰|追兵扑来|封锁升级|危机升级|冲突升级/u,
+  /kill|slash|strike|detonate|ambush|charge|battle|clash|fight|escalat(?:e|ed|ing)|new threat/i,
+] as const;
+
+const SCENE1_RECOVERY_PATTERNS = [
+  /恢复|疗伤|包扎|止血|扎营|伤口|呼吸|稳下来|余波|缓过气|喘息|平静|环境|夜色|火堆|体力回升|伤势/u,
+  /recover|healing|bandage|stanch|aftershock|catch(?:ing)? breath|calm|surroundings|campfire|fatigue|wound/i,
+] as const;
+
+const SCENE2_INTERACTION_PATTERNS = [
+  /对话|交谈|讨论|计划|交换情报|关系|信任|情绪|释放|安抚|调侃|玩笑|并肩/u,
+  /dialogue|talked|conversation|discuss(?:ed)?|plan(?:ning)?|exchange(?:d)? information|relationship|trust|emotion|banter|joke|comfort/i,
+] as const;
+
+const SCENE1_FORBIDDEN_PRESSURE_PATTERNS = [
+  /威胁|规则压力|规则压制|追杀|追兵|围杀|风暴|杀机|危机升级|冲突升级|爆发|崩裂|濒死|封锁升级/u,
+  /threat|rule pressure|pursuit|chase|storm|kill intent|danger|conflict escalat(?:e|ed|ion)|explod(?:e|ed|ing)|collapse|dying/i,
+] as const;
+
 const ENDING_ISOMORPHISM_PHRASES: ReadonlyArray<{
   readonly label: string;
   readonly patterns: ReadonlyArray<RegExp>;
@@ -204,6 +256,73 @@ const ENDING_MODE_PATTERNS: ReadonlyArray<{
   },
 ];
 
+const ENDING_TYPE_PATTERNS: Record<EndingType, ReadonlyArray<RegExp>> = {
+  reveal_end: [
+    /真相|揭开|揭晓|原来|身份|线索|发现/u,
+    /reveal|truth|identity|clue|discovered|turned out/i,
+  ],
+  unresolved_end: [
+    /未解|尚未|仍未|还没|疑问|谜团|待查|未知|去向未明|下落未明/u,
+    /still unresolved|remains unknown|question remains|not yet clear|whereabouts unknown/i,
+  ],
+  resolution_end: [
+    /解决|稳住|收束|了结|告一段落|阶段闭环|尘埃落定/u,
+    /resolved|stabilized|closed the loop|settled for now|wrapped this stage/i,
+  ],
+  twist_end: [
+    /却|然而|反而|没想到|反转|出乎意料|转折/u,
+    /however|yet|but|unexpectedly|twist|turned against/i,
+  ],
+  calm_end: [
+    /平静|缓和|喘息|休整|安顿|短歇|暂时安全/u,
+    /calm|breathing room|regroup|rest|temporary safety|quiet beat/i,
+  ],
+};
+
+const PAYOFF_RESOURCE_TRIGGER_PATTERNS = [
+  /触发|引动|引爆|震开|扯开|撕开|按下|碰触|触碰|注入|灌入|激活|催动|翻开|揭开|夺下|抢下|嵌入|共鸣/u,
+  /trigger(?:ed)?|ignite(?:d)?|burst|tore open|ripped open|pressed|activated|resonated|seized|snatched|unsealed|unlocked/i,
+] as const;
+
+const PAYOFF_RESOURCE_FLAT_PATTERNS = [
+  /(?:他|她|楚夜|主角).{0,8}(获得了|拿到了|得到了).{0,16}(地图|情报|线索|腰牌|钥匙|令牌|卷轴|残图|信息)/u,
+  /(?:地图|情报|线索|记忆|信息).{0,12}(出现在脑海|涌入脑海|浮现在脑海|映入脑海)/u,
+  /(?:he|she|the protagonist).{0,12}(got|gained|received|obtained).{0,24}(map|intel|clue|token|key|scroll|information)/i,
+  /(?:information|memory|map details?).{0,24}(appeared in (?:his|her|the protagonist's) mind|flooded into (?:his|her|the protagonist's) mind)/i,
+] as const;
+
+const CALM_END_CONFLICT_PATTERNS: ReadonlyArray<RegExp> = [
+  /危险|杀机|追兵|爆发|崩裂|濒死|封锁|危机升级/u,
+  /danger|kill intent|pursuers?|explosion|collapse|dying|sealed|escalat(?:e|ed|ing)/i,
+];
+
+const PAYOFF_IMPACT_SENSORY_PATTERNS: ReadonlyArray<RegExp> = [
+  /冷|热|痛|刺痛|灼|麻|酸|胀|震|嗡鸣|耳鸣|低语|眩|汗|血腥|腥气|腥味|气味|光线|火光|光芒|裂纹|碎裂|裂响|轰鸣|触感|呼吸|心跳|失控|视线/u,
+  /cold|hot|pain|sting|burn|numb|ache|throb|vibration|ringing|whisper|dizzy|sweat|blood scent|smell|light|glow|crack|shatter|roar|touch|breath|heartbeat|out of control|vision/i,
+];
+
+const PAYOFF_IMPACT_COST_PATTERNS: ReadonlyArray<RegExp> = [
+  /代价|反噬|消耗|耗尽|折损|亏空|受损|伤口|旧伤|经脉|寿元|牺牲|付出|崩裂|失血|吐血|断裂|失控|精血|灵力.{0,4}骤降|结晶化|残缺|污染|暴露身份|牺牲他人/u,
+  /cost|backlash|consume|deplete|drain|price paid|injur(?:y|ed)|wound|meridian|lifespan|sacrifice|spent|vomit(?:ed)? blood|fracture|lost control|blood essence|spirit power drop|crystalliz(?:e|ed)|maimed|corrupt(?:ed|ion)|identity exposed/i,
+];
+
+const PAYOFF_IMPACT_RESULT_PATTERNS: ReadonlyArray<RegExp> = [
+  /获得|拿到|揭开|揭示|发现|查明|压住|稳住|摆脱|脱离|突破|掌握|逆转|改写|封锁.{0,4}松动|局势.{0,4}(变化|改写)|身份坐实|来源坐实/u,
+  /obtained|gained|revealed|discovered|confirmed|stabilized|suppressed|escaped|broke through|mastered|reversed|situation changed/i,
+];
+
+const PAYOFF_IMPACT_MOMENT_PATTERNS: ReadonlyArray<RegExp> = [
+  /那一瞬间|这一瞬间|就在这一刻|就在此刻|突然|骤然|忽然|猛地|刹那|瞬息|转瞬/u,
+  /in that instant|at that moment|right then|suddenly|all at once|in one sharp turn/i,
+  /——|--|…|……/u,
+  /(?:却|但|然而|可就在)[^。！？\n]{0,24}(?:突然|骤然|崩裂|逆转|翻转|松动|改写)/u,
+];
+
+const PAYOFF_POST_MOMENT_RESOLUTION_PATTERNS: ReadonlyArray<RegExp> = [
+  /稳住|收束|缓和|平复|止住|安定|告一段落|暂时安全|局势.{0,6}(稳住|缓和|改写|松动)|封锁.{0,4}松动/u,
+  /stabilized|settled|cooled down|contained|regrouped|temporary safety|situation (?:stabilized|shifted)|lockdown (?:loosened|eased)/i,
+];
+
 const HOOK_EMERGENCE_ADVANCE_PATTERNS = [
   /发现|找到|查明|试出|摸清|掌握|压制|缓解|稳住|新方法|线索|转机|破解|定位|拆出/u,
   /discover|found|figured out|worked out|stabilized|suppressed|new method|clue|breakthrough|identified/i,
@@ -222,6 +341,16 @@ const HOOK_EMERGENCE_RESOLVE_PATTERNS = [
 const HOOK_EMERGENCE_STALL_PATTERNS = [
   /仍危险|依旧危险|还是危险|仍存在|依旧存在|依然存在|还没解决|尚未解决|没有进展|依旧神秘|只是更神秘/u,
   /still dangerous|still there|still unresolved|no progress|remains a threat|still mysterious/i,
+] as const;
+
+const PAYOFF_OVERRELEASE_UNKNOWN_PATTERNS = [
+  /尚不清楚|仍不清楚|还不清楚|仍未知|去向未明|下落未明|还不知道|仍待查明|谜团仍在|疑问仍在|尚待揭晓|仍待揭开/u,
+  /still unknown|remains unknown|not yet clear|still unresolved|question remains|yet to be revealed|whereabouts unknown/i,
+] as const;
+
+const PAYOFF_OVERRELEASE_CLOSURE_PATTERNS = [
+  /全部真相|彻底说清|前因后果都|来龙去脉都|一次说清|全都交代|全都解释清楚/u,
+  /fully explained|everything was revealed|all was explained|complete truth|whole picture/i,
 ] as const;
 
 const RESOURCE_SIGNAL_RULES: ReadonlyArray<{
@@ -322,6 +451,42 @@ const COLLECTIVE_SHOCK_PATTERNS = [
   /(?:全场|众人|所有人|在场的人)[，,]?(?:都|全|齐齐|纷纷)?(?:震惊|惊呆|倒吸凉气|目瞪口呆|哗然|惊呼)/,
   /(?:全场|一片)[，,]?(?:寂静|哗然|沸腾|震动)/,
 ];
+
+const CHARACTER_EXPOSITION_PATTERNS = [
+  /他意识到|她意识到|楚夜意识到|他明白|她明白|楚夜明白|这意味着|显然/u,
+  /he realized|she realized|he understood|she understood|this meant|obviously/i,
+] as const;
+
+const EMOTION_TELLING_PATTERNS = [
+  /他很(?:愤怒|紧张|疲惫|害怕|悲伤|恼火|焦虑)|她很(?:愤怒|紧张|疲惫|害怕|悲伤|恼火|焦虑)|楚夜很(?:愤怒|紧张|疲惫|害怕|悲伤|恼火|焦虑)/u,
+  /he was (?:angry|nervous|tense|afraid|sad|furious|exhausted)|she was (?:angry|nervous|tense|afraid|sad|furious|exhausted)/i,
+] as const;
+
+const PERFECT_DECISION_PATTERNS = [
+  /毫不犹豫地做出最正确的选择|立刻做出了最优选择|没有半点迟疑地选中了唯一正确答案|冷静地做出最优解/u,
+  /immediately made the optimal choice|without hesitation chose the correct answer|coolly picked the best solution|made the perfect decision at once/i,
+] as const;
+
+const WORLD_EXPOSITION_PATTERNS = [
+  /按照(?:这个世界|此界|本界)?(?:的)?(?:战力规则|修炼规则|境界规则)|所谓(?:战力|修炼|境界)规则|这个世界的(?:修炼体系|战力体系|规则是)|在这个世界里(?:修炼|力量|境界)/u,
+  /这意味着.{0,16}(战力|境界|规则|体系)|(?:世界观|设定|修炼体系|战力体系)(?:说明|解释)/u,
+  /according to (?:the world's )?(?:power rules|cultivation rules)|the world(?:building)? explains|in this world, (?:cultivation|power) works|battle power rules/i,
+] as const;
+
+const COGNITIVE_JUMP_PATTERNS = [
+  /他意识到|她意识到|楚夜意识到|他明白|她明白|楚夜明白|这说明/u,
+  /he realized|she realized|he understood|she understood|this showed|this meant/i,
+] as const;
+
+const COGNITIVE_PERCEPTION_PATTERNS = [
+  /看见|听见|察觉|闻到|摸到|触到|瞥见|余光|脚步声|回音|呼吸|心跳|刺痛|发麻|发冷|冷意|一震|异样|波动|裂纹|光|声音/u,
+  /saw|heard|noticed|smelled|felt|glimpsed|footsteps|echo|breath|heartbeat|sting|numb|cold|shiver|odd|shift|crack|light|sound/i,
+] as const;
+
+const COGNITIVE_REACTION_PATTERNS = [
+  /停下|顿住|一顿|僵住|抬头|回头|后退|收手|握紧|屏住呼吸|咬紧|沉默|没有回头|脚步一缓|指节发白/u,
+  /stopped|froze|paused|looked up|turned|stepped back|withdrew|tightened|held his breath|went silent|did not turn around/i,
+] as const;
 
 // --- Validator ---
 
@@ -465,7 +630,68 @@ export function validatePostWrite(
     });
   }
 
-  // 8. 全场震惊类集体反应
+  // 8.5. 角色说明感 / 情绪直说 / 完美决策
+  const characterExpositionMatch = findRegexEvidence(content, CHARACTER_EXPOSITION_PATTERNS);
+  if (characterExpositionMatch) {
+    violations.push({
+      rule: "character-exposition",
+      severity: "error",
+      description: `出现说明式内心/解释性判断："${characterExpositionMatch}"`,
+      suggestion: "重写该段：删掉解释句，改用动作、停顿、感知或行为变化来体现人物判断。",
+    });
+  }
+
+  const emotionTellingMatch = findRegexEvidence(content, EMOTION_TELLING_PATTERNS);
+  if (emotionTellingMatch) {
+    violations.push({
+      rule: "emotion-telling",
+      severity: "error",
+      description: `出现直接情绪结论："${emotionTellingMatch}"`,
+      suggestion: "不要直接给情绪下定义；改写成呼吸、手势、目光、步伐、停顿等外化反应。",
+    });
+  }
+
+  const worldExpositionMatch = findRegexEvidence(content, WORLD_EXPOSITION_PATTERNS);
+  if (worldExpositionMatch) {
+    violations.push({
+      rule: "world-exposition",
+      severity: "error",
+      description: `出现战力规则/世界观解释式旁白："${worldExpositionMatch}"`,
+      suggestion: "删掉解释段，把设定信息折进人物当下的后果、风险、动作和压迫里。",
+    });
+  }
+
+  const cognitiveJumpEvidence = detectCognitiveJump(content);
+  if (cognitiveJumpEvidence) {
+    violations.push({
+      rule: "cognitive-jump",
+      severity: "error",
+      description: `出现直接认知跳跃，缺少“感知 -> 反应 -> 推断”过程："${cognitiveJumpEvidence}"`,
+      suggestion: "重写该段为三步链：先写异常/变化，再写停顿或反应，最后把判断隐含在动作与后续选择里。",
+    });
+  }
+
+  const actionDensityLowEvidence = detectActionDensityLow(content);
+  if (actionDensityLowEvidence) {
+    violations.push({
+      rule: "action-density-low",
+      severity: "warning",
+      description: `认知链的行为/感知密度过低："${actionDensityLowEvidence}"`,
+      suggestion: "重写该段，至少补到 2 个感知信号 + 1 个行为反应，不要只靠单一感知或单句动作撑起认知。",
+    });
+  }
+
+  const perfectDecisionMatch = findRegexEvidence(content, PERFECT_DECISION_PATTERNS);
+  if (perfectDecisionMatch) {
+    violations.push({
+      rule: "perfect-decision",
+      severity: "warning",
+      description: `角色做出过于完美、无摩擦的决策："${perfectDecisionMatch}"`,
+      suggestion: "让角色在关键节点出现一次非最优或情绪驱动选择，保留犹豫、偏差、代价或判断失真。",
+    });
+  }
+
+  // 9. 全场震惊类集体反应
   for (const pattern of COLLECTIVE_SHOCK_PATTERNS) {
     const match = content.match(pattern);
     if (match) {
@@ -479,7 +705,7 @@ export function validatePostWrite(
     }
   }
 
-  // 9. 连续"了"字检查（3句以上连续含"了"）
+  // 10. 连续"了"字检查（3句以上连续含"了"）
   const sentences = content
     .split(/[。！？]/)
     .map(s => s.trim())
@@ -504,7 +730,7 @@ export function validatePostWrite(
     });
   }
 
-  // 10. 段落长度检查（手机阅读适配：50-250字/段为宜）
+  // 11. 段落长度检查（手机阅读适配：50-250字/段为宜）
   const paragraphs = content
     .split(/\n\s*\n/)
     .map(p => p.trim())
@@ -522,7 +748,7 @@ export function validatePostWrite(
 
   violations.push(...detectParagraphShapeWarnings(content, "zh"));
 
-  // 11. Book-level prohibitions
+  // 12. Book-level prohibitions
   // Short prohibitions (2-30 chars): exact substring match
   // Long prohibitions (>30 chars): skip — these are conceptual rules for prompt-level enforcement only
   if (bookRules?.prohibitions) {
@@ -731,7 +957,135 @@ function validatePostWriteEnglish(
     }
   }
 
+  const characterExpositionMatch = findRegexEvidence(content, CHARACTER_EXPOSITION_PATTERNS);
+  if (characterExpositionMatch) {
+    violations.push({
+      rule: "character-exposition",
+      severity: "error",
+      description: `Explanation-heavy internal narration detected: "${characterExpositionMatch}"`,
+      suggestion: "Rewrite the line through action, pause, sensory detail, or behavior shift instead of explanatory inner summary.",
+    });
+  }
+
+  const emotionTellingMatch = findRegexEvidence(content, EMOTION_TELLING_PATTERNS);
+  if (emotionTellingMatch) {
+    violations.push({
+      rule: "emotion-telling",
+      severity: "error",
+      description: `Direct emotion labeling detected: "${emotionTellingMatch}"`,
+      suggestion: "Show the emotion through body reaction, dialogue pressure, posture, breath, or changed behavior instead of naming it directly.",
+    });
+  }
+
+  const worldExpositionMatch = findRegexEvidence(content, WORLD_EXPOSITION_PATTERNS);
+  if (worldExpositionMatch) {
+    violations.push({
+      rule: "world-exposition",
+      severity: "error",
+      description: `Explanatory worldbuilding / combat-rule narration detected: "${worldExpositionMatch}"`,
+      suggestion: "Cut the explanation and fold the rule into consequence, pressure, and concrete action on the page.",
+    });
+  }
+
+  const cognitiveJumpEvidence = detectCognitiveJump(content);
+  if (cognitiveJumpEvidence) {
+    violations.push({
+      rule: "cognitive-jump",
+      severity: "error",
+      description: `Direct realization leap detected without perception/reaction process: "${cognitiveJumpEvidence}"`,
+      suggestion: "Rewrite the line into perception -> reaction -> implication, instead of jumping straight to the conclusion.",
+    });
+  }
+
+  const actionDensityLowEvidence = detectActionDensityLow(content);
+  if (actionDensityLowEvidence) {
+    violations.push({
+      rule: "action-density-low",
+      severity: "warning",
+      description: `Perception/action density is too thin for the realization chain: "${actionDensityLowEvidence}"`,
+      suggestion: "Rewrite the chain with at least 2 sensory signals and 1 physical reaction instead of a single cue plus a thin action beat.",
+    });
+  }
+
+  const perfectDecisionMatch = findRegexEvidence(content, PERFECT_DECISION_PATTERNS);
+  if (perfectDecisionMatch) {
+    violations.push({
+      rule: "perfect-decision",
+      severity: "warning",
+      description: `Character decision reads too optimal and frictionless: "${perfectDecisionMatch}"`,
+      suggestion: "Let the character hesitate, misread, overreact, or make one emotion-driven/non-optimal choice at a key turn.",
+    });
+  }
+
   return violations;
+}
+
+function detectCognitiveJump(content: string): string | undefined {
+  const sentences = content
+    .split(/(?<=[。！？!?])\s*|\n+/u)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+
+  for (let index = 0; index < sentences.length; index += 1) {
+    const sentence = sentences[index]!;
+    if (!COGNITIVE_JUMP_PATTERNS.some((pattern) => pattern.test(sentence))) {
+      continue;
+    }
+
+    const localWindow = [
+      sentences[index - 1],
+      sentence,
+      sentences[index + 1],
+    ].filter((value): value is string => Boolean(value)).join(" ");
+
+    const hasPerception = COGNITIVE_PERCEPTION_PATTERNS.some((pattern) => pattern.test(localWindow));
+    const hasReaction = COGNITIVE_REACTION_PATTERNS.some((pattern) => pattern.test(localWindow));
+
+    if (!hasPerception || !hasReaction) {
+      return sentence;
+    }
+  }
+
+  return undefined;
+}
+
+function detectActionDensityLow(content: string): string | undefined {
+  const sentences = content
+    .split(/(?<=[。！？!?])\s*|\n+/u)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+
+  for (let index = 0; index < sentences.length; index += 1) {
+    const localWindow = [
+      sentences[index - 1],
+      sentences[index],
+      sentences[index + 1],
+    ].filter((value): value is string => Boolean(value)).join(" ");
+
+    const perceptionMatches = COGNITIVE_PERCEPTION_PATTERNS.flatMap((pattern) =>
+      Array.from(localWindow.matchAll(new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`)))
+        .map((match) => match[0]),
+    );
+    const uniquePerceptions = [...new Set(perceptionMatches.map((item) => item.trim()))];
+    const reactionMatches = COGNITIVE_REACTION_PATTERNS.flatMap((pattern) =>
+      Array.from(localWindow.matchAll(new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`)))
+        .map((match) => match[0]),
+    );
+    const uniqueReactions = [...new Set(reactionMatches.map((item) => item.trim()))];
+
+    const hasCognitiveIntent = COGNITIVE_JUMP_PATTERNS.some((pattern) => pattern.test(localWindow))
+      || (uniquePerceptions.length > 0 && uniqueReactions.length > 0);
+
+    if (!hasCognitiveIntent) {
+      continue;
+    }
+
+    if (uniquePerceptions.length < 2 || uniqueReactions.length < 1) {
+      return sentences[index] ?? localWindow;
+    }
+  }
+
+  return undefined;
 }
 
 function appendParagraphShapeWarnings(
@@ -1126,6 +1480,239 @@ function findMaterializedPayoffEvidence(
   });
 }
 
+export function evaluatePayoffImpact(
+  content: string,
+  chapterGoal: Pick<ChapterGoal, "payoffToDeliver" | "payoffDirective">,
+): PayoffImpactCheck | undefined {
+  const payoffDirective = chapterGoal.payoffDirective ?? {
+    promisedPayoff: chapterGoal.payoffToDeliver,
+    payoffType: inferPayoffTypeFromPromise(chapterGoal.payoffToDeliver),
+  };
+  const payoffMatch = findPayoffEvidence(content, chapterGoal.payoffToDeliver, payoffDirective);
+  if (payoffMatch.matchLevel === "none") {
+    return undefined;
+  }
+
+  const segment = extractPayoffImpactSegment(content, payoffMatch.evidence);
+  const sensoryEvidence = findRegexEvidence(segment, PAYOFF_IMPACT_SENSORY_PATTERNS);
+  const resourceTriggerEvidence = payoffDirective.payoffType === "resource"
+    ? findRegexEvidence(segment, PAYOFF_RESOURCE_TRIGGER_PATTERNS)
+    : undefined;
+  const resourceFlatEvidence = payoffDirective.payoffType === "resource"
+    ? findRegexEvidence(segment, PAYOFF_RESOURCE_FLAT_PATTERNS)
+    : undefined;
+  const momentEvidence = findRegexEvidence(segment, PAYOFF_IMPACT_MOMENT_PATTERNS);
+  const costEvidence = findRegexEvidence(segment, PAYOFF_IMPACT_COST_PATTERNS);
+  const impactEvidence = findRegexEvidence(segment, PAYOFF_IMPACT_RESULT_PATTERNS);
+  const payoffSentences = segment
+    .split(/(?<=[。！？!?])\s*|\n+/u)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const momentSentenceIndex = payoffSentences.findIndex((sentence) =>
+    PAYOFF_IMPACT_MOMENT_PATTERNS.some((pattern) => pattern.test(sentence)),
+  );
+  const momentAtEnding = momentSentenceIndex >= 0 && momentSentenceIndex === payoffSentences.length - 1;
+  const postMomentText = momentSentenceIndex >= 0
+    ? payoffSentences.slice(momentSentenceIndex + 1).join(" ")
+    : "";
+  const postMomentResolutionEvidence = postMomentText
+    ? findRegexEvidence(postMomentText, PAYOFF_POST_MOMENT_RESOLUTION_PATTERNS)
+    : undefined;
+  const postMomentResolutionMatched = Boolean(postMomentResolutionEvidence);
+  const evidence = postMomentResolutionEvidence ?? momentEvidence ?? sensoryEvidence ?? costEvidence ?? impactEvidence ?? payoffMatch.evidence;
+
+  return {
+    expectedPayoff: payoffDirective.promisedPayoff,
+    payoffType: payoffDirective.payoffType,
+    matched: Boolean(
+      sensoryEvidence
+      && (payoffDirective.payoffType !== "resource" || resourceTriggerEvidence)
+      && momentEvidence
+      && costEvidence
+      && impactEvidence
+      && !momentAtEnding
+      && postMomentResolutionMatched,
+    ),
+    sensoryMatched: Boolean(sensoryEvidence),
+    resourceTriggerMatched: Boolean(resourceTriggerEvidence),
+    resourceFlatMatched: Boolean(resourceFlatEvidence && !resourceTriggerEvidence),
+    momentMatched: Boolean(momentEvidence),
+    postMomentResolutionMatched,
+    momentAtEnding,
+    costMatched: Boolean(costEvidence),
+    impactMatched: Boolean(impactEvidence),
+    ...(evidence ? { evidence } : {}),
+  };
+}
+
+export function toPayoffImpactWarnings(
+  check: PayoffImpactCheck | undefined,
+  language: "zh" | "en",
+): ReadonlyArray<PostWriteViolation> {
+  if (!check || check.matched) {
+    return [];
+  }
+
+  if (check.payoffType === "resource" && check.resourceFlatMatched) {
+    return [{
+      rule: "payoff-resource-flat",
+      severity: "warning",
+      description: language === "en"
+        ? "The resource payoff is written as a smooth state/result instead of a sharp acquisition event."
+        : "资源型 payoff 被写成平滑结果，而不是带触发与爆点的获取事件。",
+      suggestion: language === "en"
+        ? "Rewrite the whole payoff beat as an acquisition event with trigger -> MOMENT -> cost -> stabilization, instead of 'he got it' or 'the information appeared in his mind'."
+        : "重写整个资源 payoff 段，改成 trigger -> MOMENT -> 代价 -> 收束 的获取事件，不要直接写“他获得了”或“信息出现在脑海”。",
+    }];
+  }
+
+  if (!check.costMatched && check.sensoryMatched && check.impactMatched) {
+    return [{
+      rule: "payoff-impact-missing.cost",
+      severity: "warning",
+      description: language === "en"
+        ? "Payoff succeeded but lacks a clear protagonist cost; this reads as painless success."
+        : "payoff 已成功但缺少清晰代价层，呈现为“无痛成功”。",
+      suggestion: language === "en"
+        ? "Rewrite the payoff paragraph to show an explicit cost that hurts the protagonist (injury, resource drain, irreversible change, or relationship cost)."
+        : "重写 payoff 段，明确主角付出的代价（受伤、资源骤降、不可逆变化或关系代价）。",
+    }];
+  }
+
+  if (!check.sensoryMatched && check.costMatched && check.impactMatched) {
+    return [{
+      rule: "payoff-impact-missing.sensory",
+      severity: "warning",
+      description: language === "en"
+        ? "Payoff happened with cost and result, but lacks vivid sensory detail at the moment of change."
+        : "payoff 已有代价层与结果层，但缺少变化瞬间的感知描写。",
+      suggestion: language === "en"
+        ? "Rewrite the payoff paragraph with concrete visual/tactile/auditory/physiological cues instead of abstract phrasing."
+        : "重写 payoff 段，补上视觉/触觉/听觉/生理中的具体感知细节，避免抽象描述。",
+    }];
+  }
+
+  if (!check.momentMatched && check.sensoryMatched && check.costMatched && check.impactMatched) {
+    return [{
+      rule: "payoff-impact-missing.moment",
+      severity: "warning",
+      description: language === "en"
+        ? "Payoff has sensory/cost/result but misses a sharp turning instant."
+        : "payoff 已有感知/代价/结果，但缺少“瞬间爆发点”。",
+      suggestion: language === "en"
+        ? "Rewrite the payoff paragraph with a single sharp turning instant (e.g., 'in that instant', sudden break, or explicit pivot)."
+        : "重写 payoff 段，加入明确瞬间断点（如“那一瞬间/突然/就在这一刻”或清晰转折断裂）。",
+    }];
+  }
+
+  if (check.momentMatched && check.momentAtEnding) {
+    return [{
+      rule: "payoff-ending-overlap",
+      severity: "warning",
+      description: language === "en"
+        ? "The payoff MOMENT is placed at the chapter tail with no post-moment stabilization."
+        : "payoff 的 MOMENT 落在章节尾部，缺少爆点后的收束阶段。",
+      suggestion: language === "en"
+        ? "Rewrite the payoff paragraph to follow buildup -> MOMENT -> post-moment resolution, and avoid ending on the MOMENT sentence."
+        : "重写 payoff 段为 buildup -> MOMENT -> post-moment resolution，并避免用 MOMENT 句直接收章。",
+    }];
+  }
+
+  if (check.momentMatched && !check.postMomentResolutionMatched && check.sensoryMatched && check.costMatched && check.impactMatched) {
+    return [{
+      rule: "payoff-ending-overlap",
+      severity: "warning",
+      description: language === "en"
+        ? "Payoff has a turning MOMENT but lacks a clear stabilization phase after it."
+        : "payoff 有爆点 MOMENT，但 MOMENT 之后没有明确收束。",
+      suggestion: language === "en"
+        ? "Add a post-moment resolution beat that stabilizes the situation after the turning instant."
+        : "在 MOMENT 后补写清晰收束段，让局势稳定下来。",
+    }];
+  }
+
+  const missingParts = [
+    check.sensoryMatched ? undefined : (language === "en" ? "sensory detail" : "感知层"),
+    check.momentMatched ? undefined : (language === "en" ? "turning instant" : "瞬间爆发点"),
+    check.postMomentResolutionMatched ? undefined : (language === "en" ? "post-moment resolution" : "爆点后收束"),
+    check.costMatched ? undefined : (language === "en" ? "cost paid" : "代价层"),
+    check.impactMatched ? undefined : (language === "en" ? "visible situation change" : "结果层"),
+  ].filter(Boolean).join(language === "en" ? ", " : "、");
+
+  return [{
+    rule: "payoff-impact-missing",
+    severity: "warning",
+    description: language === "en"
+      ? `Payoff happened but lacks impact layers (${missingParts}).`
+      : `payoff 已发生但缺少关键冲击层（${missingParts}）。`,
+    suggestion: language === "en"
+      ? "Rewrite the payoff paragraph as a full impact beat: add sensory detail, explicit cost paid, and a visible shift in the situation."
+      : "重写 payoff 段为完整冲击段：补齐感知细节、明确代价、以及可见局势变化。",
+  }];
+}
+
+function extractPayoffImpactSegment(content: string, evidence: string | undefined): string {
+  const paragraphs = extractParagraphs(content);
+  if (paragraphs.length === 0) {
+    return content;
+  }
+  if (!evidence) {
+    return extractEndingRegion(content);
+  }
+
+  const index = paragraphs.findIndex((paragraph) => paragraph.includes(evidence));
+  if (index < 0) {
+    return extractEndingRegion(content);
+  }
+  const start = Math.max(0, index - 1);
+  const end = Math.min(paragraphs.length, index + 2);
+  return paragraphs.slice(start, end).join("\n\n");
+}
+
+function evaluatePayoffOverrelease(input: {
+  readonly content: string;
+  readonly payoffDirective: Pick<PayoffDirective, "payoffType" | "payoffDepth" | "promisedPayoff">;
+  readonly payoffCheck: { readonly matchLevel: "none" | "partial" | "full" };
+}): { matched: boolean; evidence?: string } {
+  const payoffDepth = input.payoffDirective.payoffDepth ?? "layered";
+  if (input.payoffDirective.payoffType !== "reveal" || payoffDepth !== "layered") {
+    return { matched: false };
+  }
+  if (input.payoffCheck.matchLevel !== "full") {
+    return { matched: false };
+  }
+
+  const snippets = input.content
+    .split(/[\n。！？!?]/u)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const revealSnippets = snippets.filter((snippet) =>
+    /身份|是谁|来源|来历|下落|去向|真相|原因|为何|为什么|如何|origin|identity|whereabouts|truth|reason|why|how/i.test(snippet),
+  );
+  const unresolvedEvidence = snippets.find((snippet) =>
+    PAYOFF_OVERRELEASE_UNKNOWN_PATTERNS.some((pattern) => pattern.test(snippet)),
+  );
+  const closureEvidence = revealSnippets.find((snippet) =>
+    PAYOFF_OVERRELEASE_CLOSURE_PATTERNS.some((pattern) => pattern.test(snippet)),
+  );
+  const layeredSignals = [
+    /身份|是谁|血脉|父母|identity|who|lineage|parent/i.test(input.content),
+    /下落|去向|在哪|whereabouts|where/i.test(input.content),
+    /为什么|为何|原因|如何|why|reason|how/i.test(input.content),
+  ].filter(Boolean).length;
+  const overReleasedByDensity = layeredSignals >= 3 && revealSnippets.length >= 1;
+  const overReleasedByClosure = Boolean(closureEvidence);
+
+  if ((overReleasedByDensity || overReleasedByClosure) && !unresolvedEvidence) {
+    return {
+      matched: true,
+      evidence: closureEvidence ?? revealSnippets[0],
+    };
+  }
+
+  return { matched: false };
+}
+
 function getPayoffMaterializationPatterns(
   payoffType: PayoffDirective["payoffType"],
 ): ReadonlyArray<RegExp> {
@@ -1425,9 +2012,15 @@ export function evaluateChapterGoalDiscipline(
   const payoffDirective = chapterGoal.payoffDirective ?? {
     promisedPayoff: chapterGoal.payoffToDeliver,
     payoffType: inferPayoffTypeFromPromise(chapterGoal.payoffToDeliver),
+    payoffDepth: "shallow" as const,
     mandatoryByFinalAct: false,
   };
   const payoffMatch = findPayoffEvidence(content, chapterGoal.payoffToDeliver, payoffDirective);
+  const payoffOverrelease = evaluatePayoffOverrelease({
+    content,
+    payoffDirective,
+    payoffCheck: payoffMatch,
+  });
 
   return {
     endingHookCheck: {
@@ -1440,6 +2033,8 @@ export function evaluateChapterGoalDiscipline(
       matched: payoffMatch.matchLevel !== "none",
       matchLevel: payoffMatch.matchLevel,
       payoffType: payoffDirective.payoffType,
+      payoffDepth: payoffDirective.payoffDepth,
+      overReleased: payoffOverrelease.matched,
       ...(payoffMatch.evidence ? { evidence: payoffMatch.evidence } : {}),
     },
   };
@@ -1451,29 +2046,32 @@ export function toDisciplineWarnings(
 ): ReadonlyArray<PostWriteViolation> {
   const warnings: PostWriteViolation[] = [];
 
-  if (!checks.endingHookCheck.matched) {
-    warnings.push({
-      rule: "ending-hook-check",
-      severity: "warning",
-      description: language === "en"
-        ? `The ending does not clearly cash out the expected hook type: ${checks.endingHookCheck.expectedType}.`
-        : `章尾没有明显兑现预期的收尾钩子类型：${checks.endingHookCheck.expectedType}。`,
-      suggestion: language === "en"
-        ? "Strengthen the closing paragraphs with a clearer end-beat signal."
-        : "在结尾段补强更明确的章尾信号。",
-    });
-  }
+  // Legacy ending-hook-check is intentionally disabled.
+  // Ending compliance is governed exclusively by endingType.
 
   if (!checks.payoffCheck.matched) {
     warnings.push({
-      rule: checks.payoffCheck.payoffType ? "payoff-materialization-failure" : "payoff-check",
+      rule: "payoff-missing",
+      severity: "error",
+      description: language === "en"
+        ? `The promised payoff did not happen in this chapter: ${checks.payoffCheck.expectedPayoff}.`
+        : `本章 promised payoff 完全未发生：${checks.payoffCheck.expectedPayoff}。`,
+      suggestion: language === "en"
+        ? "Force a payoff scene now. At minimum, deliver a partial realization in this chapter."
+        : "必须立刻补一个 payoff 场景，本章至少要出现部分兑现。",
+    });
+  }
+
+  if (checks.payoffCheck.overReleased) {
+    warnings.push({
+      rule: "payoff-overrelease",
       severity: "warning",
       description: language === "en"
-        ? `The chapter does not truly materialize the promised payoff: ${checks.payoffCheck.expectedPayoff}.`
-        : `本章没有真正兑现 promised payoff：${checks.payoffCheck.expectedPayoff}。`,
+        ? "Layered reveal payoff appears over-released in one chapter with no unresolved unknown left."
+        : "layered reveal 的 payoff 在一章内释放过量，且没有保留新的未知。",
       suggestion: language === "en"
-        ? "Insert one concrete payoff scene in the final act so the promised object produces new information, a new resource, a breakthrough, a relationship shift, or a reversal."
-        : "在 Act3 插入一个具体 payoff scene，让承诺对象真正产出新信息、新资源、新突破、关系变化或反转结果。",
+        ? "Materialize only one reveal layer in this chapter and leave a deeper unknown for the next chapter."
+        : "本章只兑现一层揭示，并保留一个更深未知到下一章。",
     });
   }
 
@@ -1541,11 +2139,36 @@ export function evaluateMoodCadenceCompliance(
   const combatHits = countPatternHits(content, MOOD_COMBAT_PATTERNS);
   const calmHits = countPatternHits(content, MOOD_CALM_PATTERNS);
   const coverageRatio = measureMoodCoverage(content, MOOD_CALM_PATTERNS);
+  const structureOrder = moodDirective.targetMode === "breath"
+    ? evaluateMoodStructureOrder(content)
+    : {
+      frontHalfCombatDominant: false,
+      frontHalfCalmCoverageRatio: coverageRatio,
+      structureEvidence: undefined as string | undefined,
+    };
+  const semanticCheck = moodDirective.targetMode === "breath"
+    ? evaluateBreathSceneSemantics(content)
+    : {
+      matched: true,
+      failures: [] as Array<"scene1-combat-or-escalation" | "scene1-missing-recovery" | "scene2-missing-interaction" | "scene2-combat-dominant">,
+      evidence: undefined as string | undefined,
+    };
+  const scene1Isolation = moodDirective.targetMode === "breath"
+    ? evaluateScene1Isolation(content)
+    : {
+      matched: true,
+      evidence: undefined as string | undefined,
+    };
 
   const dominantMode = combatHits >= Math.max(3, calmHits + 2) ? "combat-heavy" : "mixed";
+  const structureMatched = !structureOrder.frontHalfCombatDominant;
+  const semanticMatched = semanticCheck.matched;
   const matched = Boolean(warmthEvidence)
     && coverageRatio >= moodDirective.moodCoverageMin
-    && dominantMode !== moodDirective.forbidDominantMode;
+    && dominantMode !== moodDirective.forbidDominantMode
+    && structureMatched
+    && semanticMatched
+    && scene1Isolation.matched;
 
   return {
     expectedMode: moodDirective.targetMode,
@@ -1553,6 +2176,15 @@ export function evaluateMoodCadenceCompliance(
     ...(warmthEvidence ? { evidence: warmthEvidence } : {}),
     coverageRatio,
     dominantMode,
+    structureMatched,
+    frontHalfCombatDominant: structureOrder.frontHalfCombatDominant,
+    frontHalfCalmCoverageRatio: structureOrder.frontHalfCalmCoverageRatio,
+    ...(structureOrder.structureEvidence ? { structureEvidence: structureOrder.structureEvidence } : {}),
+    semanticMatched,
+    semanticFailures: semanticCheck.failures,
+    ...(semanticCheck.evidence ? { semanticEvidence: semanticCheck.evidence } : {}),
+    scene1IsolationMatched: scene1Isolation.matched,
+    ...(scene1Isolation.evidence ? { scene1IsolationEvidence: scene1Isolation.evidence } : {}),
   };
 }
 
@@ -1560,11 +2192,15 @@ export function toMoodCadenceWarnings(
   check: MoodCadenceCheck | undefined,
   language: "zh" | "en",
 ): ReadonlyArray<PostWriteViolation> {
-  if (!check || check.matched) {
+  if (!check) {
     return [];
   }
 
-  return [{
+  if (check.matched) {
+    return [];
+  }
+
+  const warnings: PostWriteViolation[] = [{
     rule: "mood-cadence-violation",
     severity: "warning",
     description: language === "en"
@@ -1574,6 +2210,182 @@ export function toMoodCadenceWarnings(
       ? "Only rewrite the local scene layer, keep chapter facts intact, expand or insert breathing material so it covers roughly 25%-35% of the chapter, and reduce combat density so combat-heavy action no longer dominates."
       : "只重写局部场景层，保留章节事实；把扎营、疗伤、路途交谈、轻松互动或人物关系推进内容扩到约 25%-35% 篇幅，并降低战斗密度，避免让高压对抗继续主导整章。",
   }];
+
+  if (check.structureMatched === false) {
+    warnings.push({
+      rule: "mood-structure-failure",
+      severity: "warning",
+      description: language === "en"
+        ? `The front half remains combat-heavy (${Math.round(((check.frontHalfCalmCoverageRatio ?? 0)) * 100)}% calm coverage), which violates the breath chapter structure order.`
+        : `本章前半段仍是战斗主导（降调覆盖约 ${Math.round(((check.frontHalfCalmCoverageRatio ?? 0)) * 100)}%），不符合 breath 章节结构顺序。`,
+      suggestion: language === "en"
+        ? "Reorder the chapter: complete recovery/dialogue/relationship scenes first, then move to low-intensity forward motion; do not patch by adding rest lines after heavy combat."
+        : "请重排章节结构：先写恢复/对话/关系场景，再进入低强度前推；不要用“先战斗后补休整”补丁结构。",
+    });
+  }
+
+  if (check.scene1IsolationMatched === false) {
+    warnings.push({
+      rule: "scene1-violation",
+      severity: "error",
+      description: language === "en"
+        ? `The first 30% does not function as a pure recovery/character scene${check.scene1IsolationEvidence ? ` (${check.scene1IsolationEvidence})` : ""}.`
+        : `正文前 30% 没有成立为纯恢复/人物场景${check.scene1IsolationEvidence ? `（${check.scene1IsolationEvidence}）` : ""}。`,
+      suggestion: language === "en"
+        ? "Rewrite the opening 30% only: start with recovery or character interaction, and remove threat, rule pressure, pursuit pressure, storm signals, or conflict escalation from that section."
+        : "只重写开头 30%：先写恢复或人物互动，并移除威胁、规则压力、追杀压力、风暴信号或冲突升级。",
+    });
+  }
+
+  if (check.semanticMatched === false) {
+    warnings.push({
+      rule: "scene-semantic-failure",
+      severity: "warning",
+      description: language === "en"
+        ? `Scene semantics failed for breath mode (${(check.semanticFailures ?? []).join(", ") || "unknown semantic failure"}).`
+        : `breath 模式下 Scene 语义不合格（${(check.semanticFailures ?? []).join("、") || "未知语义失败"}）。`,
+      suggestion: language === "en"
+        ? "Rewrite Scene1/Scene2 semantically: Scene1 must be recovery/aftershock/environmental grounding without active combat escalation; Scene2 must center interaction/planning/emotional release instead of action."
+        : "请按语义重写 Scene1/Scene2：Scene1 必须是恢复/余波/环境与身体状态，不得主动战斗或冲突升级；Scene2 必须是对话/关系/计划/情绪释放，不得战斗主导。",
+    });
+  }
+
+  return warnings;
+}
+
+function evaluateMoodStructureOrder(content: string): {
+  readonly frontHalfCombatDominant: boolean;
+  readonly frontHalfCalmCoverageRatio: number;
+  readonly structureEvidence?: string;
+} {
+  const normalized = content.trim();
+  if (!normalized) {
+    return {
+      frontHalfCombatDominant: false,
+      frontHalfCalmCoverageRatio: 0,
+    };
+  }
+  const frontLength = Math.max(1, Math.floor(normalized.length * 0.6));
+  const frontSegment = normalized.slice(0, frontLength);
+  const frontCombatHits = countPatternHits(frontSegment, MOOD_COMBAT_PATTERNS);
+  const frontCalmHits = countPatternHits(frontSegment, MOOD_CALM_PATTERNS);
+  const frontHalfCalmCoverageRatio = measureMoodCoverage(frontSegment, MOOD_CALM_PATTERNS);
+  const frontHalfCombatDominant = frontCombatHits >= Math.max(2, frontCalmHits + 1)
+    && frontHalfCalmCoverageRatio < 0.2;
+
+  return {
+    frontHalfCombatDominant,
+    frontHalfCalmCoverageRatio,
+    ...(frontHalfCombatDominant
+      ? { structureEvidence: snippetAround(frontSegment, 0, Math.min(90, frontSegment.length)) }
+      : {}),
+  };
+}
+
+function evaluateScene1Isolation(content: string): {
+  readonly matched: boolean;
+  readonly evidence?: string;
+} {
+  const normalized = content.trim();
+  if (!normalized) {
+    return {
+      matched: false,
+      evidence: "empty content",
+    };
+  }
+
+  const frontLength = Math.max(1, Math.floor(normalized.length * 0.3));
+  const firstScene = normalized.slice(0, frontLength);
+  const recoveryHits = countPatternHits(firstScene, SCENE1_RECOVERY_PATTERNS);
+  const interactionHits = countPatternHits(firstScene, SCENE2_INTERACTION_PATTERNS);
+  const pressureEvidence = findRegexEvidence(firstScene, SCENE1_FORBIDDEN_PRESSURE_PATTERNS);
+  const hasScene1Purpose = recoveryHits > 0 || interactionHits > 0;
+
+  if (!hasScene1Purpose || pressureEvidence) {
+    const reasons = [
+      !hasScene1Purpose ? "missing recovery/character interaction" : undefined,
+      pressureEvidence ? `forbidden pressure: ${pressureEvidence}` : undefined,
+    ].filter((value): value is string => Boolean(value));
+    return {
+      matched: false,
+      evidence: reasons.join("; "),
+    };
+  }
+
+  return {
+    matched: true,
+  };
+}
+
+function evaluateBreathSceneSemantics(content: string): {
+  readonly matched: boolean;
+  readonly failures: ReadonlyArray<"scene1-combat-or-escalation" | "scene1-missing-recovery" | "scene2-missing-interaction" | "scene2-combat-dominant">;
+  readonly evidence?: string;
+} {
+  const sceneMap = extractSceneSemanticMap(content);
+  const failures: Array<"scene1-combat-or-escalation" | "scene1-missing-recovery" | "scene2-missing-interaction" | "scene2-combat-dominant"> = [];
+  const evidence: string[] = [];
+
+  const scene1 = sceneMap.Scene1;
+  if (scene1) {
+    const scene1Escalation = countPatternHits(scene1, SCENE1_ESCALATION_PATTERNS);
+    const scene1Recovery = countPatternHits(scene1, SCENE1_RECOVERY_PATTERNS);
+    if (scene1Escalation > 0) {
+      failures.push("scene1-combat-or-escalation");
+      const snippet = findRegexEvidence(scene1, SCENE1_ESCALATION_PATTERNS);
+      if (snippet) evidence.push(`Scene1:${snippet}`);
+    }
+    if (scene1Recovery === 0) {
+      failures.push("scene1-missing-recovery");
+      evidence.push("Scene1:missing recovery/aftershock/environment signal");
+    }
+  }
+
+  const scene2 = sceneMap.Scene2;
+  if (scene2) {
+    const interactionHits = countPatternHits(scene2, SCENE2_INTERACTION_PATTERNS);
+    const combatHits = countPatternHits(scene2, MOOD_COMBAT_PATTERNS);
+    if (interactionHits === 0) {
+      failures.push("scene2-missing-interaction");
+      evidence.push("Scene2:missing dialogue/relationship/planning/emotion signal");
+    }
+    if (combatHits >= Math.max(2, interactionHits + 1)) {
+      failures.push("scene2-combat-dominant");
+      const snippet = findRegexEvidence(scene2, MOOD_COMBAT_PATTERNS);
+      if (snippet) evidence.push(`Scene2:${snippet}`);
+    }
+  }
+
+  return {
+    matched: failures.length === 0,
+    failures,
+    ...(evidence.length > 0 ? { evidence: evidence.join(" | ") } : {}),
+  };
+}
+
+function extractSceneSemanticMap(content: string): Record<"Scene1" | "Scene2" | "Scene3", string> {
+  const normalized = content.replace(/\r\n/g, "\n");
+  const markers = [
+    { scene: "Scene1" as const, regex: /\[(Scene\s*1)\]/i },
+    { scene: "Scene2" as const, regex: /\[(Scene\s*2)\]/i },
+    { scene: "Scene3" as const, regex: /\[(Scene\s*3)\]/i },
+  ];
+  const indexes = markers
+    .map(({ scene, regex }) => ({ scene, index: normalized.search(regex) }))
+    .filter((entry) => entry.index >= 0)
+    .sort((left, right) => left.index - right.index);
+
+  const segments: Record<"Scene1" | "Scene2" | "Scene3", string> = {
+    Scene1: "",
+    Scene2: "",
+    Scene3: "",
+  };
+  for (let idx = 0; idx < indexes.length; idx += 1) {
+    const current = indexes[idx]!;
+    const nextStart = idx + 1 < indexes.length ? indexes[idx + 1]!.index : normalized.length;
+    segments[current.scene] = normalized.slice(current.index, nextStart);
+  }
+  return segments;
 }
 
 export function evaluateHookEmergenceCompliance(
@@ -1765,6 +2577,80 @@ export function toEndingIsomorphismWarnings(
   }];
 }
 
+export function evaluateEndingTypeCompliance(
+  content: string,
+  chapterIntent: string | undefined,
+): EndingTypeCheck | undefined {
+  const expectedType = extractEndingType(chapterIntent);
+  if (!expectedType) {
+    return undefined;
+  }
+
+  const endingRegion = extractEndingRegion(content);
+  if (!endingRegion.trim()) {
+    return {
+      expectedType,
+      matched: false,
+    };
+  }
+
+  if (expectedType === "calm_end") {
+    const conflictEvidence = findRegexEvidence(endingRegion, CALM_END_CONFLICT_PATTERNS);
+    if (conflictEvidence) {
+      return {
+        expectedType,
+        matched: false,
+        evidence: conflictEvidence,
+      };
+    }
+    const calmEvidence = findRegexEvidence(endingRegion, ENDING_TYPE_PATTERNS.calm_end);
+    return {
+      expectedType,
+      matched: Boolean(calmEvidence),
+      ...(calmEvidence ? { evidence: calmEvidence } : {}),
+    };
+  }
+
+  if (expectedType === "unresolved_end") {
+    const unresolvedEvidence = findRegexEvidence(endingRegion, ENDING_TYPE_PATTERNS.unresolved_end);
+    const questionHint = endingRegion.includes("？") || endingRegion.includes("?");
+    return {
+      expectedType,
+      matched: Boolean(unresolvedEvidence || questionHint),
+      ...((unresolvedEvidence ?? (questionHint ? "?" : undefined))
+        ? { evidence: unresolvedEvidence ?? "?" }
+        : {}),
+    };
+  }
+
+  const evidence = findRegexEvidence(endingRegion, ENDING_TYPE_PATTERNS[expectedType]);
+  return {
+    expectedType,
+    matched: Boolean(evidence),
+    ...(evidence ? { evidence } : {}),
+  };
+}
+
+export function toEndingTypeWarnings(
+  check: EndingTypeCheck | undefined,
+  language: "zh" | "en",
+): ReadonlyArray<PostWriteViolation> {
+  if (!check || check.matched) {
+    return [];
+  }
+
+  return [{
+    rule: "ending-type-mismatch",
+    severity: "error",
+    description: language === "en"
+      ? `Ending does not satisfy expected endingType: ${check.expectedType}.`
+      : `章尾没有兑现预期 endingType：${check.expectedType}。`,
+    suggestion: language === "en"
+      ? "Rewrite only the final 2-3 paragraphs to match the assigned ending type while preserving chapter facts."
+      : "只重写最后 2-3 段，使其符合分配的 endingType，同时保持章节事实不变。",
+  }];
+}
+
 function findPartialEscapeProgressEvidence(
   content: string,
   expectedPayoff: string,
@@ -1808,6 +2694,22 @@ function extractSceneDirective(chapterIntent: string | undefined): string | unde
   if (!chapterIntent) return undefined;
   const match = chapterIntent.match(/## Structured Directives[\s\S]*?- scene:\s*(.+)/i);
   return match?.[1]?.trim();
+}
+
+function extractEndingType(chapterIntent: string | undefined): EndingType | undefined {
+  if (!chapterIntent) return undefined;
+  const match = chapterIntent.match(/## Structured Directives[\s\S]*?- endingType:\s*(reveal_end|unresolved_end|resolution_end|twist_end|calm_end)/i);
+  const value = match?.[1]?.trim();
+  if (
+    value === "reveal_end"
+    || value === "unresolved_end"
+    || value === "resolution_end"
+    || value === "twist_end"
+    || value === "calm_end"
+  ) {
+    return value;
+  }
+  return undefined;
 }
 
 function extractMoodDirective(chapterIntent: string | undefined): MoodDirective | undefined {

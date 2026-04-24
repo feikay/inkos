@@ -4,13 +4,18 @@ import {
   detectParagraphLengthDrift,
   detectParagraphShapeWarnings,
   evaluateChapterGoalDiscipline,
+  evaluateEndingTypeCompliance,
   evaluateHookEmergenceCompliance,
   evaluateMoodCadenceCompliance,
+  evaluatePayoffImpact,
   evaluateEndingIsomorphism,
   evaluateHookDebtThrottle,
   evaluateResourceLedgerDiscipline,
   resolveDuplicateTitle,
   toDisciplineWarnings,
+  toEndingTypeWarnings,
+  toMoodCadenceWarnings,
+  toPayoffImpactWarnings,
   toEndingIsomorphismWarnings,
   toHookEmergenceWarnings,
   toHookDebtWarnings,
@@ -130,6 +135,65 @@ describe("validatePostWrite", () => {
     const content = "众人齐齐震惊，没有人想到他居然能赢。";
     const result = validatePostWrite(content, baseProfile, null);
     expect(findRule(result, "集体反应")).toBeDefined();
+  });
+
+  it("detects character exposition phrasing", () => {
+    const content = "他意识到再退一步就会彻底失去机会。这意味着今晚必须赌命。";
+    const result = validatePostWrite(content, baseProfile, null);
+    expect(findRule(result, "character-exposition")).toBeDefined();
+    expect(findRule(result, "character-exposition")?.severity).toBe("error");
+  });
+
+  it("detects direct emotion telling", () => {
+    const content = "他很愤怒，也很紧张，却还是往前走去。";
+    const result = validatePostWrite(content, baseProfile, null);
+    expect(findRule(result, "emotion-telling")).toBeDefined();
+    expect(findRule(result, "emotion-telling")?.severity).toBe("error");
+  });
+
+  it("detects perfect decision language", () => {
+    const content = "他毫不犹豫地做出最正确的选择，立刻找到了唯一最优解。";
+    const result = validatePostWrite(content, baseProfile, null);
+    expect(findRule(result, "perfect-decision")).toBeDefined();
+  });
+
+  it("detects world-exposition as a hard fail", () => {
+    const content = "按照这个世界的战力规则，三转之后才能压过二转，这意味着他现在绝无胜算。";
+    const result = validatePostWrite(content, baseProfile, null);
+    expect(findRule(result, "world-exposition")).toBeDefined();
+    expect(findRule(result, "world-exposition")?.severity).toBe("error");
+  });
+
+  it("does not flag pure behavior expression as character exposition", () => {
+    const content = "他停下脚步，没有回头。手指却已经扣紧了袖口，呼吸也压得更低。";
+    const result = validatePostWrite(content, baseProfile, null);
+    expect(findRule(result, "character-exposition")).toBeUndefined();
+    expect(findRule(result, "emotion-telling")).toBeUndefined();
+  });
+
+  it("detects cognitive-jump when direct realization appears without perception and reaction process", () => {
+    const content = "他意识到自己被盯上了。这说明对方已经摸到了他的路线。";
+    const result = validatePostWrite(content, baseProfile, null);
+    expect(findRule(result, "cognitive-jump")).toBeDefined();
+    expect(findRule(result, "cognitive-jump")?.severity).toBe("error");
+  });
+
+  it("does not flag cognitive-jump when realization is unfolded through perception and reaction", () => {
+    const content = "背后的脚步声忽然停了。他脚下一顿，没有回头，手指却先扣紧了袖口。下一息，他把身形偏向墙根。";
+    const result = validatePostWrite(content, baseProfile, null);
+    expect(findRule(result, "cognitive-jump")).toBeUndefined();
+  });
+
+  it("detects action-density-low when a realization chain carries only one sensory cue and one thin action", () => {
+    const content = "背后的脚步声忽然停了。他停下脚步。";
+    const result = validatePostWrite(content, baseProfile, null);
+    expect(findRule(result, "action-density-low")).toBeDefined();
+  });
+
+  it("does not flag action-density-low when the realization chain has multiple sensory cues and a physical reaction", () => {
+    const content = "背后的脚步声忽然停了，石壁上的回音也跟着断了一截，冷意顺着后颈慢慢爬上来。他脚下一顿，没有回头，手指却已经扣紧了袖口。";
+    const result = validatePostWrite(content, baseProfile, null);
+    expect(findRule(result, "action-density-low")).toBeUndefined();
   });
 
   it("detects consecutive '了' sentences", () => {
@@ -429,7 +493,7 @@ describe("validatePostWrite", () => {
     expect(checks.endingHookCheck.evidence).toContain("开始追踪");
   });
 
-  it("turns an undelivered payoff into a warning", () => {
+  it("turns a completely missing payoff into a hard fail", () => {
     const checks = evaluateChapterGoalDiscipline(
       "他一路逃命，只是暂时甩开了追兵，却没有拿到任何地图或补给。",
       {
@@ -451,7 +515,8 @@ describe("validatePostWrite", () => {
     const warnings = toDisciplineWarnings(checks, "zh");
     expect(checks.payoffCheck.matched).toBe(false);
     expect(checks.payoffCheck.matchLevel).toBe("none");
-    expect(warnings.some((warning) => warning.rule === "payoff-materialization-failure")).toBe(true);
+    expect(warnings.some((warning) => warning.rule === "payoff-missing")).toBe(true);
+    expect(warnings.some((warning) => warning.severity === "error")).toBe(true);
   });
 
   it("fails vague mystery language and only passes when the promised reveal is concretely materialized", () => {
@@ -484,6 +549,62 @@ describe("validatePostWrite", () => {
     expect(passedChecks.payoffCheck.evidence).toContain("来自葬渊祭司一脉");
   });
 
+  it("flags layered reveal overrelease when one chapter fully explains identity, whereabouts, and cause without leaving unknowns", () => {
+    const chapterGoal = {
+      mainConflict: "父母线索终于被逼到台前。",
+      protagonistGoal: "揭开父母身份和下落。",
+      activeCharacters: ["楚夜"],
+      foreshadowToTouch: ["parents-hook"],
+      payoffToDeliver: "揭开父母身份/下落",
+      payoffDirective: {
+        promisedPayoff: "揭开父母身份/下落",
+        payoffType: "reveal" as const,
+        payoffDepth: "layered" as const,
+        mandatoryByFinalAct: true,
+      },
+      endingHookType: "reveal" as const,
+      nextChapterPull: "真相还会继续扩展。",
+    };
+
+    const checks = evaluateChapterGoalDiscipline(
+      "碑灵一口气说清：楚夜父母是旧祭司血脉，下落在葬渊北阵眼，之所以被困是当年替代封阵，而解救方法是以三枚祭火印重开阵门，全部真相都解释清楚。",
+      chapterGoal,
+    );
+    const warnings = toDisciplineWarnings(checks, "zh");
+
+    expect(checks.payoffCheck.matched).toBe(true);
+    expect(checks.payoffCheck.overReleased).toBe(true);
+    expect(warnings.some((warning) => warning.rule === "payoff-overrelease")).toBe(true);
+  });
+
+  it("passes layered reveal when only one layer is revealed and a deeper unknown remains", () => {
+    const chapterGoal = {
+      mainConflict: "父母线索终于被逼到台前。",
+      protagonistGoal: "揭开父母身份和下落。",
+      activeCharacters: ["楚夜"],
+      foreshadowToTouch: ["parents-hook"],
+      payoffToDeliver: "揭开父母身份/下落",
+      payoffDirective: {
+        promisedPayoff: "揭开父母身份/下落",
+        payoffType: "reveal" as const,
+        payoffDepth: "layered" as const,
+        mandatoryByFinalAct: true,
+      },
+      endingHookType: "reveal" as const,
+      nextChapterPull: "下一章会继续追下去。",
+    };
+
+    const checks = evaluateChapterGoalDiscipline(
+      "碑灵先揭开一层：楚夜父母确是旧祭司血脉。但他们如今具体被困何处仍不清楚，只留下北境阵纹的残线索。",
+      chapterGoal,
+    );
+    const warnings = toDisciplineWarnings(checks, "zh");
+
+    expect(checks.payoffCheck.matched).toBe(true);
+    expect(checks.payoffCheck.overReleased).toBe(false);
+    expect(warnings.some((warning) => warning.rule === "payoff-overrelease")).toBe(false);
+  });
+
   it("treats escape progress as a partial payoff without raising a warning", () => {
     const checks = evaluateChapterGoalDiscipline(
       "楚夜暂时甩开追兵，赢得喘息，但还没真正离开矿区。",
@@ -501,7 +622,178 @@ describe("validatePostWrite", () => {
     const warnings = toDisciplineWarnings(checks, "zh");
     expect(checks.payoffCheck.matchLevel).toBe("partial");
     expect(checks.payoffCheck.matched).toBe(true);
-    expect(warnings.some((warning) => warning.rule === "payoff-check")).toBe(false);
+    expect(warnings.some((warning) => warning.rule === "payoff-missing")).toBe(false);
+  });
+
+  it("flags payoff-impact-missing when payoff has only result without sensory/cost layers", () => {
+    const check = evaluatePayoffImpact(
+      "楚夜拿到了黑市腰牌，局势暂时稳住。",
+      {
+        payoffToDeliver: "拿到黑市腰牌",
+        payoffDirective: {
+          promisedPayoff: "拿到黑市腰牌",
+          payoffType: "resource",
+          mandatoryByFinalAct: true,
+        },
+      },
+    );
+    const warnings = toPayoffImpactWarnings(check, "zh");
+
+    expect(check?.impactMatched).toBe(true);
+    expect(check?.sensoryMatched).toBe(false);
+    expect(check?.costMatched).toBe(false);
+    expect(check?.matched).toBe(false);
+    expect(warnings.some((warning) => warning.rule === "payoff-resource-flat")).toBe(true);
+  });
+
+  it("flags payoff-impact-missing when payoff has result + sensory but still lacks cost", () => {
+    const check = evaluatePayoffImpact(
+      "楚夜掌心一阵灼痛，终于拿到黑市腰牌，局势立刻逆转。",
+      {
+        payoffToDeliver: "拿到黑市腰牌",
+        payoffDirective: {
+          promisedPayoff: "拿到黑市腰牌",
+          payoffType: "resource",
+          mandatoryByFinalAct: true,
+        },
+      },
+    );
+    const warnings = toPayoffImpactWarnings(check, "zh");
+
+    expect(check?.impactMatched).toBe(true);
+    expect(check?.sensoryMatched).toBe(true);
+    expect(check?.costMatched).toBe(false);
+    expect(check?.matched).toBe(false);
+    expect(warnings.some((warning) => warning.rule === "payoff-impact-missing.cost")).toBe(true);
+  });
+
+  it("flags payoff-impact-missing.sensory when payoff has result + cost but no sensory layer", () => {
+    const check = evaluatePayoffImpact(
+      "楚夜强行催动煞气付出寿元折损的代价，终于拿到黑市腰牌，封锁当场松动。",
+      {
+        payoffToDeliver: "拿到黑市腰牌",
+        payoffDirective: {
+          promisedPayoff: "拿到黑市腰牌",
+          payoffType: "resource",
+          mandatoryByFinalAct: true,
+        },
+      },
+    );
+    const warnings = toPayoffImpactWarnings(check, "zh");
+
+    expect(check?.impactMatched).toBe(true);
+    expect(check?.costMatched).toBe(true);
+    expect(check?.sensoryMatched).toBe(false);
+    expect(check?.matched).toBe(false);
+    expect(warnings.some((warning) => warning.rule === "payoff-impact-missing.sensory")).toBe(true);
+  });
+
+  it("flags payoff-impact-missing.moment when payoff has sensory/cost/result but no sharp turning instant", () => {
+    const check = evaluatePayoffImpact(
+      "楚夜喉间泛起血腥味，强行催动煞气付出寿元折损的代价，终于拿到黑市腰牌，封锁当场松动。",
+      {
+        payoffToDeliver: "拿到黑市腰牌",
+        payoffDirective: {
+          promisedPayoff: "拿到黑市腰牌",
+          payoffType: "resource",
+          mandatoryByFinalAct: true,
+        },
+      },
+    );
+    const warnings = toPayoffImpactWarnings(check, "zh");
+
+    expect(check?.sensoryMatched).toBe(true);
+    expect(check?.costMatched).toBe(true);
+    expect(check?.impactMatched).toBe(true);
+    expect(check?.momentMatched).toBe(false);
+    expect(check?.matched).toBe(false);
+    expect(warnings.some((warning) => warning.rule === "payoff-impact-missing.moment")).toBe(true);
+  });
+
+  it("flags payoff-ending-overlap when MOMENT lands at the tail without post-moment resolution", () => {
+    const check = evaluatePayoffImpact(
+      "楚夜喉间泛起血腥味，强行催动煞气付出经脉刺痛的代价，终于拿到黑市腰牌。就在这一刻，封锁突然崩裂。",
+      {
+        payoffToDeliver: "拿到黑市腰牌",
+        payoffDirective: {
+          promisedPayoff: "拿到黑市腰牌",
+          payoffType: "resource",
+          mandatoryByFinalAct: true,
+        },
+      },
+    );
+    const warnings = toPayoffImpactWarnings(check, "zh");
+
+    expect(check?.momentMatched).toBe(true);
+    expect(check?.momentAtEnding).toBe(true);
+    expect(check?.postMomentResolutionMatched).toBe(false);
+    expect(check?.matched).toBe(false);
+    expect(warnings.some((warning) => warning.rule === "payoff-ending-overlap")).toBe(true);
+  });
+
+  it("passes payoff impact when sensory/cost/impact are all present", () => {
+    const check = evaluatePayoffImpact(
+      "楚夜喉间泛起血腥味，强行催动煞气付出经脉刺痛的代价。就在这一刻，黑市腰牌在他掌心骤然发烫，追兵封锁当场松动。楚夜立刻压住翻涌气息，局势暂时稳住。",
+      {
+        payoffToDeliver: "拿到黑市腰牌",
+        payoffDirective: {
+          promisedPayoff: "拿到黑市腰牌",
+          payoffType: "resource",
+          mandatoryByFinalAct: true,
+        },
+      },
+    );
+    const warnings = toPayoffImpactWarnings(check, "zh");
+
+    expect(check?.sensoryMatched).toBe(true);
+    expect(check?.momentMatched).toBe(true);
+    expect(check?.postMomentResolutionMatched).toBe(true);
+    expect(check?.momentAtEnding).toBe(false);
+    expect(check?.costMatched).toBe(true);
+    expect(check?.impactMatched).toBe(true);
+    expect(check?.matched).toBe(true);
+    expect(warnings).toEqual([]);
+  });
+
+  it("flags payoff-resource-flat when a resource payoff is written as a smooth result instead of an acquisition event", () => {
+    const check = evaluatePayoffImpact(
+      "楚夜掌心发麻，寿元被硬生生削去一截。就在这一刻，地图信息出现在脑海里。楚夜勉强稳住气息。",
+      {
+        payoffToDeliver: "获得地图信息",
+        payoffDirective: {
+          promisedPayoff: "获得地图信息",
+          payoffType: "resource",
+          mandatoryByFinalAct: true,
+        },
+      },
+    );
+    const warnings = toPayoffImpactWarnings(check, "zh");
+
+    expect(check?.payoffType).toBe("resource");
+    expect(check?.resourceFlatMatched).toBe(true);
+    expect(check?.resourceTriggerMatched).toBe(false);
+    expect(check?.matched).toBe(false);
+    expect(warnings.some((warning) => warning.rule === "payoff-resource-flat")).toBe(true);
+  });
+
+  it("passes resource payoff when acquisition is written as a sharp triggered event", () => {
+    const check = evaluatePayoffImpact(
+      "楚夜掌心刺痛，强行灌入煞气付出经脉撕裂的代价。就在这一刻，他猛地扯开残图封蜡，地图信息随着燃亮的纹路骤然炸开，整条逃生路线被逼了出来。楚夜立刻压住翻涌气息，局势暂时稳住。",
+      {
+        payoffToDeliver: "获得地图信息",
+        payoffDirective: {
+          promisedPayoff: "获得地图信息",
+          payoffType: "resource",
+          mandatoryByFinalAct: true,
+        },
+      },
+    );
+    const warnings = toPayoffImpactWarnings(check, "zh");
+
+    expect(check?.resourceTriggerMatched).toBe(true);
+    expect(check?.resourceFlatMatched).toBe(false);
+    expect(check?.matched).toBe(true);
+    expect(warnings.some((warning) => warning.rule === "payoff-resource-flat")).toBe(false);
   });
 
   it("warns when consumption and backlash appear in prose but state and ledger stay unchanged", () => {
@@ -652,6 +944,73 @@ describe("evaluateEndingIsomorphism", () => {
   });
 });
 
+describe("evaluateEndingTypeCompliance", () => {
+  it("fails reveal_end when the ending only raises danger without a concrete reveal", () => {
+    const chapterIntent = [
+      "# Chapter Intent",
+      "",
+      "## Structured Directives",
+      "- endingType: reveal_end",
+    ].join("\n");
+    const content = [
+      "楚夜压住气息，准备从裂隙撤离。",
+      "",
+      "章尾时杀机骤然逼近，追兵已经锁定了他的行踪。",
+    ].join("\n\n");
+
+    const check = evaluateEndingTypeCompliance(content, chapterIntent);
+    const warnings = toEndingTypeWarnings(check, "zh");
+
+    expect(check?.expectedType).toBe("reveal_end");
+    expect(check?.matched).toBe(false);
+    expect(warnings.some((warning) => warning.rule === "ending-type-mismatch")).toBe(true);
+    expect(warnings[0]?.severity).toBe("error");
+  });
+
+  it("passes unresolved_end when the ending keeps an explicit unresolved question", () => {
+    const chapterIntent = [
+      "# Chapter Intent",
+      "",
+      "## Structured Directives",
+      "- endingType: unresolved_end",
+    ].join("\n");
+    const content = [
+      "楚夜把残卷压进怀里，没有再回头。",
+      "",
+      "可那道刻痕到底是谁留下的，他仍未查明。",
+    ].join("\n\n");
+
+    const check = evaluateEndingTypeCompliance(content, chapterIntent);
+    const warnings = toEndingTypeWarnings(check, "zh");
+
+    expect(check?.expectedType).toBe("unresolved_end");
+    expect(check?.matched).toBe(true);
+    expect(warnings).toEqual([]);
+  });
+
+  it("fails calm_end when the ending introduces fresh escalation", () => {
+    const chapterIntent = [
+      "# Chapter Intent",
+      "",
+      "## Structured Directives",
+      "- endingType: calm_end",
+    ].join("\n");
+    const content = [
+      "众人刚在河滩上停下，准备扎营。",
+      "",
+      "下一瞬追兵从山脊扑下，杀机贴着后背压了上来，危机直接升级。",
+    ].join("\n\n");
+
+    const check = evaluateEndingTypeCompliance(content, chapterIntent);
+    const warnings = toEndingTypeWarnings(check, "zh");
+
+    expect(check?.expectedType).toBe("calm_end");
+    expect(check?.matched).toBe(false);
+    expect(warnings.some((warning) => warning.rule === "ending-type-mismatch")).toBe(true);
+    expect(warnings[0]?.severity).toBe("error");
+  });
+});
+
 describe("evaluateMoodCadenceCompliance", () => {
   const breathDirective = [
     "# Chapter Intent",
@@ -698,6 +1057,106 @@ describe("evaluateMoodCadenceCompliance", () => {
 
     expect(check?.matched).toBe(true);
     expect(check?.coverageRatio).toBeGreaterThanOrEqual(0.25);
+  });
+
+  it("fails with mood-structure-failure when the front half stays combat-heavy even if later sections add breathing", () => {
+    const content = [
+      "追兵先一步堵死通道，楚夜被迫连战三轮，刀光与杀机在甬道里连续爆开，他只能硬顶封锁。",
+      "",
+      "第二轮围杀接上，交锋和对轰几乎占满了整段通路，楚夜边战边退，直到岩壁崩裂才勉强拉开缝隙。",
+      "",
+      "后半段他才和云岚扎营疗伤，分配药材，交换接下来的路线情报。",
+      "",
+      "两人短暂恢复后，带着低强度侦察计划继续前推。",
+    ].join("\n\n");
+
+    const check = evaluateMoodCadenceCompliance(content, breathDirective);
+    const warnings = toMoodCadenceWarnings(check, "zh");
+
+    expect(check?.coverageRatio).toBeGreaterThanOrEqual(0.25);
+    expect(check?.structureMatched).toBe(false);
+    expect(check?.matched).toBe(false);
+    expect(warnings.some((warning) => warning.rule === "mood-structure-failure")).toBe(true);
+  });
+
+  it("passes structure order when the front half is recovery/dialogue before low-intensity forward motion", () => {
+    const content = [
+      "楚夜和云岚先在碎岩后扎营，处理伤口，分配药材与食水，把呼吸和节奏慢慢稳下来。",
+      "",
+      "两人沿路交换情报，讨论下一步绕行方案，关系也在这段对话里明显推进。",
+      "",
+      "完成休整后，他们才低强度前推到石门边，确认新的刻痕与入口方向。",
+      "",
+      "章尾留下一道柔性威胁：门后并不安全，但他们先带着准备好的计划继续探路。",
+    ].join("\n\n");
+
+    const check = evaluateMoodCadenceCompliance(content, breathDirective);
+    const warnings = toMoodCadenceWarnings(check, "zh");
+
+    expect(check?.structureMatched).toBe(true);
+    expect(check?.matched).toBe(true);
+    expect(warnings.some((warning) => warning.rule === "mood-structure-failure")).toBe(false);
+  });
+
+  it("fails with scene-semantic-failure when Scene1 contains active combat/escalation", () => {
+    const content = [
+      "[Scene1]",
+      "楚夜刚落脚就拔刀冲杀，刀光爆发，追兵封锁升级，冲突瞬间拉满。",
+      "",
+      "[Scene2]",
+      "两人只匆匆说了两句便继续动作推进。",
+      "",
+      "[Scene3]",
+      "他们往前探查入口。",
+    ].join("\n\n");
+
+    const check = evaluateMoodCadenceCompliance(content, breathDirective);
+    const warnings = toMoodCadenceWarnings(check, "zh");
+
+    expect(check?.semanticMatched).toBe(false);
+    expect(check?.matched).toBe(false);
+    expect(check?.semanticFailures).toEqual(expect.arrayContaining(["scene1-combat-or-escalation"]));
+    expect(warnings.some((warning) => warning.rule === "scene-semantic-failure")).toBe(true);
+  });
+
+  it("emits scene1-violation as an error when the first 30% opens with pressure instead of recovery or character interaction", () => {
+    const content = [
+      "追兵的脚步声先压到洞口，规则压力顺着岩壁笼罩下来，风暴低鸣跟着逼近，楚夜刚抬手就被迫继续冲突升级。",
+      "",
+      "他后来才和云岚停下包扎伤口，交换路线情报，试图把呼吸慢慢稳住。",
+      "",
+      "最后两人低强度前推到石门边。",
+    ].join("\n\n");
+
+    const check = evaluateMoodCadenceCompliance(content, breathDirective);
+    const warnings = toMoodCadenceWarnings(check, "zh");
+    const violation = warnings.find((warning) => warning.rule === "scene1-violation");
+
+    expect(check?.scene1IsolationMatched).toBe(false);
+    expect(check?.matched).toBe(false);
+    expect(violation?.severity).toBe("error");
+  });
+
+  it("passes scene semantics when Scene1 is recovery and Scene2 is interaction-focused", () => {
+    const content = [
+      "[Scene1]",
+      "楚夜先扎营疗伤，包扎伤口，观察夜色与周围环境，慢慢把余波压住。",
+      "",
+      "[Scene2]",
+      "他与云岚交换情报，讨论计划与路线，关系在这段对话里明显推进，情绪也得到释放。",
+      "",
+      "[Scene3]",
+      "完成休整后，他们才低强度前推并留下软钩子。",
+    ].join("\n\n");
+
+    const check = evaluateMoodCadenceCompliance(content, breathDirective);
+    const warnings = toMoodCadenceWarnings(check, "zh");
+
+    expect(check?.semanticMatched).toBe(true);
+    expect(check?.scene1IsolationMatched).toBe(true);
+    expect(check?.semanticFailures).toEqual([]);
+    expect(warnings.some((warning) => warning.rule === "scene-semantic-failure")).toBe(false);
+    expect(warnings.some((warning) => warning.rule === "scene1-violation")).toBe(false);
   });
 });
 

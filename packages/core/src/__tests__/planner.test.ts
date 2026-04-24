@@ -163,6 +163,93 @@ describe("PlannerAgent", () => {
     await expect(readFile(result.runtimePath, "utf-8")).resolves.toContain("mentor conflict");
   });
 
+  it("auto-fills a minimal goal scaffold from state context when upstream goal sources are missing", async () => {
+    await Promise.all([
+      writeFile(
+        join(storyDir, "author_intent.md"),
+        "# Author Intent\n\n(TODO)\n",
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "current_focus.md"),
+        "# Current Focus\n\n（填写当前冲突）\n",
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "volume_outline.md"),
+        "# Volume Outline\n",
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "arc_map.yaml"),
+        "template: xuanhuan\n",
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "current_state.md"),
+        [
+          "# 当前状态",
+          "",
+          "| 字段 | 值 |",
+          "| --- | --- |",
+          "| 当前章节 | 9 |",
+          "| 当前目标 | 恢复伤势并稳定状态，讨论下一步行动 |",
+          "| 当前冲突 | 伤势未稳且追兵威胁仍在 |",
+        ].join("\n"),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "chapter_summaries.md"),
+        [
+          "# Chapter Summaries",
+          "",
+          "| 8 | 余波 | 楚夜 | 休整后确认补给 | 伤势反复 | H002 stalled | 压抑 | breathing |",
+          "| 9 | 短歇 | 楚夜,云岚 | 讨论下一步路线 | 追兵锁定痕迹 | H002 stalled | 冷硬 | breathing |",
+        ].join("\n"),
+        "utf-8",
+      ),
+    ]);
+
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await planner.planChapter({
+      book: {
+        ...book,
+        language: "zh",
+      },
+      bookDir,
+      chapterNumber: 10,
+    });
+
+    expect(result.intent.goal.trim().length).toBeGreaterThan(0);
+    expect(result.intent.goal).toContain("恢复伤势");
+    expect(result.intent.chapterGoal?.mainConflict.trim().length).toBeGreaterThan(0);
+    expect(result.intent.chapterGoal?.protagonistGoal.trim().length).toBeGreaterThan(0);
+  });
+
+  it("keeps an existing explicit goal unchanged", async () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await planner.planChapter({
+      book,
+      bookDir,
+      chapterNumber: 3,
+      externalContext: "Secure the first concrete clue about the vanished mentor.",
+    });
+
+    expect(result.intent.goal).toBe("Secure the first concrete clue about the vanished mentor.");
+  });
+
   it("injects webnovel template summaries into planning without requiring the raw yaml in prompts", async () => {
     await writeFile(
       join(storyDir, "volume_outline.md"),
@@ -222,12 +309,1149 @@ describe("PlannerAgent", () => {
       targetMode: "breath",
       requiredSceneQuota: 1,
       moodCoverageMin: 0.3,
+      forceSceneStructure: true,
+      sceneMinShare: 0.3,
+      scene1NoThreatEscalation: true,
       forbidDominantMode: "combat-heavy",
+      scenePlan: expect.objectContaining({
+        scene1: expect.stringContaining("pure"),
+        scene2: expect.stringContaining("low-intensity"),
+        scene3: expect.stringContaining("short"),
+      }),
     }));
     expect(result.intentMarkdown).toContain("targetMode: breath");
     expect(result.intentMarkdown).toContain("requiredSceneQuota: 1");
     expect(result.intentMarkdown).toContain("moodCoverageMin: 0.3");
     expect(result.intentMarkdown).toContain("forbidDominantMode: combat-heavy");
+    expect(result.intentMarkdown).toContain("scenePlan:");
+    expect(result.intentMarkdown).toContain("scene1:");
+    expect(result.intentMarkdown).toContain("scene2:");
+    expect(result.intentMarkdown).toContain("scene3:");
+    expect(result.intent.sceneDirective ?? "").toContain("Scene Isolation");
+    expect(result.intent.sceneDirective ?? "").toContain("scene1 至少占正文 30%");
+    expect(result.intent.sceneDirective ?? "").toContain("优先级：scene1 > payoff > hook");
+    expect(result.intent.sceneDirective ?? "").toContain("本章也必须至少部分兑现 payoff");
+    expect(result.intent.sceneDirective ?? "").toContain("不得阻止 payoff 发生与局势变化");
+  });
+
+  it("keeps payoff above unresolved_end and tells the chapter to resolve payoff before opening a new question", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const directives = (planner as unknown as {
+      applyPayoffEndingPriority: (input: {
+        directives: {
+          chapterMode?: "breath" | "escalation" | "combat" | "reveal";
+          endingType?: "reveal_end" | "unresolved_end" | "resolution_end" | "twist_end" | "calm_end";
+          sceneDirective?: string;
+        };
+        chapterGoal: {
+          payoffToDeliver: string;
+        };
+        language: "zh" | "en";
+      }) => { sceneDirective?: string };
+    }).applyPayoffEndingPriority({
+      directives: {
+        endingType: "unresolved_end",
+        sceneDirective: "保留未解悬念。",
+      },
+      chapterGoal: {
+        payoffToDeliver: "完成第一次觉醒",
+      },
+      language: "zh",
+    });
+
+    expect(directives.sceneDirective ?? "").toContain("payoff 优先级高于 endingType");
+    expect(directives.sceneDirective ?? "").toContain("不得阻止 payoff 发生与局势变化");
+    expect(directives.sceneDirective ?? "").toContain("必须先完成 payoff，再通过新威胁或新问题让局势保持未解");
+  });
+
+  it("splits composite payoff into one single chapter payoff and defers the rest", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      enforceSingleChapterPayoff: (input: {
+        chapterGoal: {
+          mainConflict: string;
+          protagonistGoal: string;
+          activeCharacters: string[];
+          foreshadowToTouch: string[];
+          payoffToDeliver: string;
+          endingHookType: "danger" | "reveal" | "pursuit" | "choice" | "breakthrough";
+          nextChapterPull: string;
+          payoffDirective?: {
+            promisedPayoff: string;
+            payoffType: "reveal" | "resource" | "breakthrough" | "relationship" | "reversal";
+            mandatoryByFinalAct: boolean;
+          };
+        };
+        language: "zh" | "en";
+      }) => {
+        chapterGoal: {
+          payoffToDeliver: string;
+          nextChapterPull: string;
+          payoffDirective?: { promisedPayoff: string };
+        };
+        directiveNote?: string;
+      };
+    }).enforceSingleChapterPayoff({
+      chapterGoal: {
+        mainConflict: "楚夜必须撑过觉醒余波。",
+        protagonistGoal: "完成觉醒。",
+        activeCharacters: ["楚夜"],
+        foreshadowToTouch: ["awakening-shadow"],
+        payoffToDeliver: "觉醒+地底阴影压制",
+        endingHookType: "danger",
+        nextChapterPull: "觉醒后局势会继续升级。",
+        payoffDirective: {
+          promisedPayoff: "觉醒+地底阴影压制",
+          payoffType: "breakthrough",
+          mandatoryByFinalAct: true,
+        },
+      },
+      language: "zh",
+    });
+
+    expect(governed.chapterGoal.payoffToDeliver).toBe("觉醒");
+    expect(governed.chapterGoal.payoffDirective?.promisedPayoff).toBe("觉醒");
+    expect(governed.chapterGoal.nextChapterPull).toContain("地底阴影压制");
+    expect(governed.directiveNote ?? "").toContain("本章 payoff 只保留“觉醒”");
+  });
+
+  it("keeps single payoff unchanged when it is already singular and finishable", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      enforceSingleChapterPayoff: (input: {
+        chapterGoal: {
+          mainConflict: string;
+          protagonistGoal: string;
+          activeCharacters: string[];
+          foreshadowToTouch: string[];
+          payoffToDeliver: string;
+          endingHookType: "danger" | "reveal" | "pursuit" | "choice" | "breakthrough";
+          nextChapterPull: string;
+        };
+        language: "zh" | "en";
+      }) => {
+        chapterGoal: {
+          payoffToDeliver: string;
+          nextChapterPull: string;
+        };
+        directiveNote?: string;
+      };
+    }).enforceSingleChapterPayoff({
+      chapterGoal: {
+        mainConflict: "楚夜必须撑过觉醒余波。",
+        protagonistGoal: "完成觉醒。",
+        activeCharacters: ["楚夜"],
+        foreshadowToTouch: ["awakening-shadow"],
+        payoffToDeliver: "完成第一次觉醒",
+        endingHookType: "breakthrough",
+        nextChapterPull: "觉醒后新的线索会浮现。",
+      },
+      language: "zh",
+    });
+
+    expect(governed.chapterGoal.payoffToDeliver).toBe("完成第一次觉醒");
+    expect(governed.chapterGoal.nextChapterPull).toBe("觉醒后新的线索会浮现。");
+    expect(governed.directiveNote).toBeUndefined();
+  });
+
+  it("adds a concrete payoffTrigger for breakthrough payoffs and writes trigger guidance into directives", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      applyBreakthroughPayoffTrigger: (input: {
+        chapterGoal: {
+          mainConflict: string;
+          protagonistGoal: string;
+          activeCharacters: string[];
+          foreshadowToTouch: string[];
+          payoffToDeliver: string;
+          payoffDirective?: {
+            promisedPayoff: string;
+            payoffType: "reveal" | "resource" | "breakthrough" | "relationship" | "reversal";
+            mandatoryByFinalAct: boolean;
+          };
+          endingHookType: "danger" | "reveal" | "pursuit" | "choice" | "breakthrough";
+          nextChapterPull: string;
+          payoffTrigger?: string;
+        };
+        language: "zh" | "en";
+        currentState: string;
+      }) => {
+        chapterGoal: {
+          payoffTrigger?: string;
+        };
+        directiveNote?: string;
+      };
+    }).applyBreakthroughPayoffTrigger({
+      chapterGoal: {
+        mainConflict: "楚夜在高压战斗中被反噬逼到濒死边缘。",
+        protagonistGoal: "完成第一次觉醒。",
+        activeCharacters: ["楚夜"],
+        foreshadowToTouch: ["awakening-shadow"],
+        payoffToDeliver: "觉醒",
+        payoffDirective: {
+          promisedPayoff: "觉醒",
+          payoffType: "breakthrough",
+          mandatoryByFinalAct: true,
+        },
+        endingHookType: "breakthrough",
+        nextChapterPull: "觉醒后更深处的黑影会盯上他。",
+      },
+      language: "zh",
+      currentState: "# 当前状态\n- 楚夜气血濒枯，骨火反噬正在失控。\n",
+    });
+
+    expect(governed.chapterGoal.payoffTrigger).toBeTruthy();
+    expect(governed.chapterGoal.payoffTrigger).toMatch(/濒死|临界点|反噬/u);
+    expect(governed.directiveNote ?? "").toContain("Trigger:");
+    expect(governed.directiveNote ?? "").toContain("禁止无触发直接觉醒或突破");
+  });
+
+  it("does not invent payoffTrigger for non-breakthrough payoffs", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      applyBreakthroughPayoffTrigger: (input: {
+        chapterGoal: {
+          mainConflict: string;
+          protagonistGoal: string;
+          activeCharacters: string[];
+          foreshadowToTouch: string[];
+          payoffToDeliver: string;
+          payoffDirective?: {
+            promisedPayoff: string;
+            payoffType: "reveal" | "resource" | "breakthrough" | "relationship" | "reversal";
+            mandatoryByFinalAct: boolean;
+          };
+          endingHookType: "danger" | "reveal" | "pursuit" | "choice" | "breakthrough";
+          nextChapterPull: string;
+          payoffTrigger?: string;
+        };
+        language: "zh" | "en";
+        currentState: string;
+      }) => {
+        chapterGoal: {
+          payoffTrigger?: string;
+        };
+        directiveNote?: string;
+      };
+    }).applyBreakthroughPayoffTrigger({
+      chapterGoal: {
+        mainConflict: "楚夜必须拿到黑市腰牌。",
+        protagonistGoal: "获得进入黑市的资格。",
+        activeCharacters: ["楚夜"],
+        foreshadowToTouch: ["black-market-pass"],
+        payoffToDeliver: "拿到黑市腰牌",
+        payoffDirective: {
+          promisedPayoff: "拿到黑市腰牌",
+          payoffType: "resource",
+          mandatoryByFinalAct: true,
+        },
+        endingHookType: "choice",
+        nextChapterPull: "拿到腰牌后，真正的交易才会开始。",
+      },
+      language: "zh",
+      currentState: "# 当前状态\n- 黑市入口就在前方。\n",
+    });
+
+    expect(governed.chapterGoal.payoffTrigger).toBeUndefined();
+    expect(governed.directiveNote).toBeUndefined();
+  });
+
+  it("rewrites range or abstract payoff into a concrete writable event and records payoff-non-event", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      enforceConcreteEventPayoff: (input: {
+        chapterGoal: {
+          mainConflict: string;
+          protagonistGoal: string;
+          activeCharacters: string[];
+          foreshadowToTouch: string[];
+          payoffToDeliver: string;
+          payoffDirective?: {
+            promisedPayoff: string;
+            payoffType: "reveal" | "resource" | "breakthrough" | "relationship" | "reversal";
+            mandatoryByFinalAct: boolean;
+          };
+          endingHookType: "danger" | "reveal" | "pursuit" | "choice" | "breakthrough";
+          nextChapterPull: string;
+        };
+        language: "zh" | "en";
+        currentState: string;
+      }) => {
+        chapterGoal: {
+          payoffToDeliver: string;
+          payoffDirective?: { promisedPayoff: string };
+        };
+        directiveNote?: string;
+        conflict?: { type: string; detail?: string };
+      };
+    }).enforceConcreteEventPayoff({
+      chapterGoal: {
+        mainConflict: "楚夜必须在祭坛前解开玉简秘密。",
+        protagonistGoal: "找到玉简真正的开启方式。",
+        activeCharacters: ["楚夜"],
+        foreshadowToTouch: ["jade-slip"],
+        payoffToDeliver: "13-17章",
+        payoffDirective: {
+          promisedPayoff: "13-17章",
+          payoffType: "resource",
+          mandatoryByFinalAct: true,
+        },
+        endingHookType: "reveal",
+        nextChapterPull: "玉简一旦启动，祭坛深处会有反应。",
+      },
+      language: "zh",
+      currentState: "# 当前状态\n- 楚夜手中的玉简与祭坛纹路正在共鸣。\n",
+    });
+
+    expect(governed.chapterGoal.payoffToDeliver).toBe("玉简核心机制被触发");
+    expect(governed.chapterGoal.payoffDirective?.promisedPayoff).toBe("玉简核心机制被触发");
+    expect(governed.directiveNote ?? "").toContain("payoff-non-event");
+    expect(governed.conflict?.type).toBe("payoff-non-event");
+    expect(governed.conflict?.detail).toContain("13-17章");
+  });
+
+  it("keeps a concrete event payoff unchanged when it is already single and writable", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      enforceConcreteEventPayoff: (input: {
+        chapterGoal: {
+          mainConflict: string;
+          protagonistGoal: string;
+          activeCharacters: string[];
+          foreshadowToTouch: string[];
+          payoffToDeliver: string;
+          payoffDirective?: {
+            promisedPayoff: string;
+            payoffType: "reveal" | "resource" | "breakthrough" | "relationship" | "reversal";
+            mandatoryByFinalAct: boolean;
+          };
+          endingHookType: "danger" | "reveal" | "pursuit" | "choice" | "breakthrough";
+          nextChapterPull: string;
+        };
+        language: "zh" | "en";
+        currentState: string;
+      }) => {
+        chapterGoal: {
+          payoffToDeliver: string;
+        };
+        directiveNote?: string;
+        conflict?: { type: string };
+      };
+    }).enforceConcreteEventPayoff({
+      chapterGoal: {
+        mainConflict: "楚夜必须解开残图上的锁孔。",
+        protagonistGoal: "打开地图锁孔。",
+        activeCharacters: ["楚夜"],
+        foreshadowToTouch: ["map-lock"],
+        payoffToDeliver: "地图锁孔第一次打开",
+        payoffDirective: {
+          promisedPayoff: "地图锁孔第一次打开",
+          payoffType: "resource",
+          mandatoryByFinalAct: true,
+        },
+        endingHookType: "choice",
+        nextChapterPull: "锁孔打开后，新的路线会显现。",
+      },
+      language: "zh",
+      currentState: "# 当前状态\n- 残图锁孔已经显出轮廓。\n",
+    });
+
+    expect(governed.chapterGoal.payoffToDeliver).toBe("地图锁孔第一次打开");
+    expect(governed.directiveNote).toBeUndefined();
+    expect(governed.conflict).toBeUndefined();
+  });
+
+  it("rewrites repeated reveal payoff into a deeper executable reveal when the information is already known", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      enforceExecutableRevealPayoff: (input: {
+        chapterGoal: {
+          mainConflict: string;
+          protagonistGoal: string;
+          activeCharacters: string[];
+          foreshadowToTouch: string[];
+          payoffToDeliver: string;
+          payoffDirective?: {
+            promisedPayoff: string;
+            payoffType: "reveal" | "resource" | "breakthrough" | "relationship" | "reversal";
+            mandatoryByFinalAct: boolean;
+          };
+          endingHookType: "danger" | "reveal" | "pursuit" | "choice" | "breakthrough";
+          nextChapterPull: string;
+        };
+        language: "zh" | "en";
+        currentState: string;
+        chapterSummaries: string;
+      }) => {
+        chapterGoal: {
+          payoffToDeliver: string;
+          payoffDirective?: { promisedPayoff: string };
+        };
+        directiveNote?: string;
+        conflict?: { type: string; detail?: string };
+      };
+    }).enforceExecutableRevealPayoff({
+      chapterGoal: {
+        mainConflict: "楚夜已经知道隐藏漏洞存在，但还不知道它能不能救下真名。",
+        protagonistGoal: "继续利用漏洞自救。",
+        activeCharacters: ["楚夜"],
+        foreshadowToTouch: ["true-name"],
+        payoffToDeliver: "发现隐藏漏洞",
+        payoffDirective: {
+          promisedPayoff: "发现隐藏漏洞",
+          payoffType: "reveal",
+          mandatoryByFinalAct: true,
+        },
+        endingHookType: "reveal",
+        nextChapterPull: "这个漏洞会不会带来更大代价，还没有答案。",
+      },
+      language: "zh",
+      currentState: "# 当前状态\n- 楚夜已经发现隐藏漏洞，但真名仍在继续消散。\n",
+      chapterSummaries: "# Chapter Summaries\n| 54 | 漏洞显形 | 楚夜 | 发现隐藏漏洞，却没能止住真名消散。 |\n",
+    });
+
+    expect(governed.chapterGoal.payoffToDeliver).toBe("发现漏洞无法阻止真名消散，只能转移代价");
+    expect(governed.chapterGoal.payoffDirective?.promisedPayoff).toBe("发现漏洞无法阻止真名消散，只能转移代价");
+    expect(governed.directiveNote ?? "").toContain("reveal-gap-check");
+    expect(governed.conflict?.type).toBe("reveal-gap-check");
+    expect(governed.conflict?.detail).toContain("发现隐藏漏洞");
+  });
+
+  it("keeps reveal payoff unchanged when the context still contains an unresolved information gap", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      enforceExecutableRevealPayoff: (input: {
+        chapterGoal: {
+          mainConflict: string;
+          protagonistGoal: string;
+          activeCharacters: string[];
+          foreshadowToTouch: string[];
+          payoffToDeliver: string;
+          payoffDirective?: {
+            promisedPayoff: string;
+            payoffType: "reveal" | "resource" | "breakthrough" | "relationship" | "reversal";
+            mandatoryByFinalAct: boolean;
+          };
+          endingHookType: "danger" | "reveal" | "pursuit" | "choice" | "breakthrough";
+          nextChapterPull: string;
+        };
+        language: "zh" | "en";
+        currentState: string;
+        chapterSummaries: string;
+      }) => {
+        chapterGoal: {
+          payoffToDeliver: string;
+        };
+        directiveNote?: string;
+        conflict?: { type: string };
+      };
+    }).enforceExecutableRevealPayoff({
+      chapterGoal: {
+        mainConflict: "漏洞已经显形，但它的限制条件仍然未知。",
+        protagonistGoal: "查清这个漏洞只在什么条件下有效。",
+        activeCharacters: ["楚夜"],
+        foreshadowToTouch: ["true-name"],
+        payoffToDeliver: "发现漏洞的限制条件",
+        payoffDirective: {
+          promisedPayoff: "发现漏洞的限制条件",
+          payoffType: "reveal",
+          mandatoryByFinalAct: true,
+        },
+        endingHookType: "reveal",
+        nextChapterPull: "只有弄清条件，下一步才敢押上代价。",
+      },
+      language: "zh",
+      currentState: "# 当前状态\n- 楚夜已经发现漏洞，但漏洞的限制条件尚未弄清。\n",
+      chapterSummaries: "# Chapter Summaries\n| 54 | 漏洞显形 | 楚夜 | 发现隐藏漏洞，限制条件仍未明。 |\n",
+    });
+
+    expect(governed.chapterGoal.payoffToDeliver).toBe("发现漏洞的限制条件");
+    expect(governed.directiveNote).toBeUndefined();
+    expect(governed.conflict).toBeUndefined();
+  });
+
+  it("trims multi-task chapter pressure down to one primary hook when payoff already exists", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      applySceneBudget: (input: {
+        chapterGoal: {
+          payoffToDeliver: string;
+        };
+        hookAgenda: {
+          pressureMap: Array<{ hookId: string }>;
+          mustAdvance: string[];
+          eligibleResolve: string[];
+          staleDebt: string[];
+          avoidNewHookFamilies: string[];
+        };
+        hookEmergence: {
+          pressureStates: ReadonlyArray<unknown>;
+          mustMaterializeHookNow: boolean;
+          targetHook?: { hookId: string };
+        };
+        directives: {
+          sceneDirective?: string;
+        };
+        language: "zh" | "en";
+      }) => {
+        hookAgenda: {
+          pressureMap: Array<{ hookId: string }>;
+          mustAdvance: string[];
+          eligibleResolve: string[];
+          staleDebt: string[];
+          avoidNewHookFamilies: string[];
+        };
+        directives: {
+          sceneDirective?: string;
+        };
+        mustAvoid: readonly string[];
+      };
+    }).applySceneBudget({
+      chapterGoal: {
+        payoffToDeliver: "完成第一次觉醒",
+      },
+      hookAgenda: {
+        pressureMap: [
+          { hookId: "H002" },
+          { hookId: "H007" },
+        ],
+        mustAdvance: ["H002", "H007"],
+        eligibleResolve: ["H007"],
+        staleDebt: ["H002", "H007"],
+        avoidNewHookFamilies: ["mystery"],
+      },
+      hookEmergence: {
+        pressureStates: [],
+        mustMaterializeHookNow: true,
+        targetHook: { hookId: "H002" },
+      },
+      directives: {
+        sceneDirective: "保留高压推进。",
+      },
+      language: "zh",
+    });
+
+    expect(governed.hookAgenda.mustAdvance).toEqual(["H002"]);
+    expect(governed.hookAgenda.eligibleResolve).toEqual([]);
+    expect(governed.hookAgenda.staleDebt).toEqual(["H002"]);
+    expect(governed.hookAgenda.pressureMap).toEqual([{ hookId: "H002" }]);
+    expect(governed.hookAgenda.avoidNewHookFamilies).toEqual(["mystery"]);
+    expect(governed.directives.sceneDirective ?? "").toContain("Scene Budget");
+    expect(governed.directives.sceneDirective ?? "").toContain("hook 推进只保留 H002");
+    expect(governed.mustAvoid).toEqual(expect.arrayContaining([
+      "本章不要并行推进多个 hook。",
+      "本章不要安排多次场景/地点跳跃。",
+      "本章不要堆叠多个高潮。",
+    ]));
+  });
+
+  it("splits stacked climax beats when breakthrough payoff also tries to carry an identity reversal", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      applyIntensityBudget: (input: {
+        chapterGoal: {
+          mainConflict: string;
+          protagonistGoal: string;
+          payoffToDeliver: string;
+          nextChapterPull: string;
+          payoffDirective?: {
+            promisedPayoff: string;
+            payoffType: "reveal" | "resource" | "breakthrough" | "relationship" | "reversal";
+          };
+        };
+        hookAgenda: {
+          pressureMap: Array<{ hookId: string }>;
+          mustAdvance: string[];
+          eligibleResolve: string[];
+          staleDebt: string[];
+          avoidNewHookFamilies: string[];
+        };
+        directives: {
+          sceneDirective?: string;
+        };
+        language: "zh" | "en";
+      }) => {
+        hookAgenda: {
+          pressureMap: Array<{ hookId: string }>;
+          mustAdvance: string[];
+          eligibleResolve: string[];
+          staleDebt: string[];
+          avoidNewHookFamilies: string[];
+        };
+        directives: {
+          sceneDirective?: string;
+        };
+        conflict?: { type: string; resolution: string; detail?: string };
+      };
+    }).applyIntensityBudget({
+      chapterGoal: {
+        mainConflict: "楚夜即将觉醒，同时发现自己的真实身份不是凡人。",
+        protagonistGoal: "完成觉醒并揭开身份反转。",
+        payoffToDeliver: "觉醒",
+        nextChapterPull: "身份反转的代价留到下一章。",
+        payoffDirective: {
+          promisedPayoff: "觉醒",
+          payoffType: "breakthrough",
+        },
+      },
+      hookAgenda: {
+        pressureMap: [
+          { hookId: "H002" },
+          { hookId: "H007" },
+        ],
+        mustAdvance: ["H002", "H007"],
+        eligibleResolve: ["H007"],
+        staleDebt: ["H002", "H007"],
+        avoidNewHookFamilies: [],
+      },
+      directives: {
+        sceneDirective: "保持主线推进。",
+      },
+      language: "zh",
+    });
+
+    expect(governed.hookAgenda.mustAdvance).toEqual(["H002"]);
+    expect(governed.hookAgenda.eligibleResolve).toEqual([]);
+    expect(governed.hookAgenda.staleDebt).toEqual(["H002"]);
+    expect(governed.hookAgenda.pressureMap).toEqual([{ hookId: "H002" }]);
+    expect(governed.directives.sceneDirective ?? "").toContain("Intensity Budget");
+    expect(governed.directives.sceneDirective ?? "").toContain("身份反转");
+    expect(governed.directives.sceneDirective ?? "").toContain("多高潮已拆分");
+    expect(governed.conflict).toEqual(expect.objectContaining({
+      type: "intensity_budget_split",
+    }));
+  });
+
+  it("keeps single payoff intensity budget unchanged when no competing climax is present", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      applyIntensityBudget: (input: {
+        chapterGoal: {
+          mainConflict: string;
+          protagonistGoal: string;
+          payoffToDeliver: string;
+          nextChapterPull: string;
+          payoffDirective?: {
+            promisedPayoff: string;
+            payoffType: "reveal" | "resource" | "breakthrough" | "relationship" | "reversal";
+          };
+        };
+        hookAgenda: {
+          pressureMap: Array<{ hookId: string }>;
+          mustAdvance: string[];
+          eligibleResolve: string[];
+          staleDebt: string[];
+          avoidNewHookFamilies: string[];
+        };
+        directives: {
+          sceneDirective?: string;
+        };
+        language: "zh" | "en";
+      }) => {
+        hookAgenda: {
+          pressureMap: Array<{ hookId: string }>;
+          mustAdvance: string[];
+          eligibleResolve: string[];
+          staleDebt: string[];
+          avoidNewHookFamilies: string[];
+        };
+        directives: {
+          sceneDirective?: string;
+        };
+        conflict?: { type: string };
+      };
+    }).applyIntensityBudget({
+      chapterGoal: {
+        mainConflict: "楚夜逼近觉醒临界。",
+        protagonistGoal: "完成第一次觉醒。",
+        payoffToDeliver: "觉醒",
+        nextChapterPull: "觉醒后的代价浮出。",
+        payoffDirective: {
+          promisedPayoff: "觉醒",
+          payoffType: "breakthrough",
+        },
+      },
+      hookAgenda: {
+        pressureMap: [{ hookId: "H002" }],
+        mustAdvance: ["H002"],
+        eligibleResolve: [],
+        staleDebt: [],
+        avoidNewHookFamilies: [],
+      },
+      directives: {
+        sceneDirective: "保持单线推进。",
+      },
+      language: "zh",
+    });
+
+    expect(governed.hookAgenda.mustAdvance).toEqual(["H002"]);
+    expect(governed.hookAgenda.pressureMap).toEqual([{ hookId: "H002" }]);
+    expect(governed.directives.sceneDirective).toBe("保持单线推进。");
+    expect(governed.conflict).toBeUndefined();
+  });
+
+  it("downgrades a must-resolve-now hook to soft-progress when a chapter payoff is present", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      applyPayoffHookGovernance: (input: {
+        chapterGoal: {
+          payoffToDeliver: string;
+          payoffDirective?: {
+            promisedPayoff: string;
+            payoffType: "reveal" | "resource" | "breakthrough" | "relationship" | "reversal";
+          };
+        };
+        directives: {
+          sceneDirective?: string;
+          hookExecutionPhase?: "any" | "late";
+        };
+        hookAgenda: {
+          pressureMap: Array<{ hookId: string; movement?: string; pressure?: string }>;
+          mustAdvance: string[];
+          eligibleResolve: string[];
+          staleDebt: string[];
+          avoidNewHookFamilies: string[];
+        };
+        hookEmergence: {
+          pressureStates: Array<{ hookId: string; state: string; timing: string; type: string; expectedPayoff: string; notes: string }>;
+          mustMaterializeHookNow: boolean;
+          targetHook?: { hookId: string };
+        };
+        language: "zh" | "en";
+      }) => {
+        directives: {
+          sceneDirective?: string;
+          hookExecutionPhase?: "any" | "late";
+        };
+        hookAgenda: {
+          pressureMap: Array<{ hookId: string; movement?: string; pressure?: string }>;
+          mustAdvance: string[];
+          eligibleResolve: string[];
+          staleDebt: string[];
+          avoidNewHookFamilies: string[];
+        };
+        hookEmergence: {
+          pressureStates: Array<{ hookId: string; state: string; timing: string; type: string; expectedPayoff: string; notes: string }>;
+          mustMaterializeHookNow: boolean;
+        };
+        conflict?: { type: string };
+      };
+    }).applyPayoffHookGovernance({
+      chapterGoal: {
+        payoffToDeliver: "完成第一次觉醒",
+        payoffDirective: {
+          promisedPayoff: "完成第一次觉醒",
+          payoffType: "breakthrough",
+        },
+      },
+      directives: {
+        sceneDirective: "保留主线推进。",
+        hookExecutionPhase: "any",
+      },
+      hookAgenda: {
+        pressureMap: [{ hookId: "H002", movement: "advance", pressure: "critical" }],
+        mustAdvance: ["H002"],
+        eligibleResolve: ["H002"],
+        staleDebt: ["H002"],
+        avoidNewHookFamilies: [],
+      },
+      hookEmergence: {
+        pressureStates: [
+          {
+            hookId: "H002",
+            state: "must-resolve-now",
+            timing: "near-term",
+            type: "poison-mystery",
+            expectedPayoff: "发现压制毒性新方法",
+            notes: "噬魂草毒性仍在扩散",
+          },
+        ],
+        mustMaterializeHookNow: true,
+        targetHook: { hookId: "H002" },
+      },
+      language: "zh",
+    });
+
+    expect(governed.hookEmergence.mustMaterializeHookNow).toBe(false);
+    expect(governed.hookEmergence.pressureStates[0]?.state).toBe("soft-progress");
+    expect(governed.hookAgenda.mustAdvance).toEqual([]);
+    expect(governed.hookAgenda.eligibleResolve).toEqual([]);
+    expect(governed.hookAgenda.staleDebt).toEqual(["H002"]);
+    expect(governed.directives.hookExecutionPhase).toBeUndefined();
+    expect(governed.directives.sceneDirective ?? "").toContain("payoff-hook-priority");
+    expect(governed.directives.sceneDirective ?? "").toContain("不得与 payoff 同章 fully materialize");
+    expect(governed.conflict).toEqual(expect.objectContaining({
+      type: "payoff_hook_priority",
+    }));
+  });
+
+  it("keeps must-resolve-now hook behavior unchanged when there is no payoff", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      applyPayoffHookGovernance: (input: {
+        chapterGoal: {
+          payoffToDeliver: string;
+        };
+        directives: {
+          sceneDirective?: string;
+          hookExecutionPhase?: "any" | "late";
+        };
+        hookAgenda: {
+          pressureMap: Array<{ hookId: string; movement?: string; pressure?: string }>;
+          mustAdvance: string[];
+          eligibleResolve: string[];
+          staleDebt: string[];
+          avoidNewHookFamilies: string[];
+        };
+        hookEmergence: {
+          pressureStates: Array<{ hookId: string; state: string; timing: string; type: string; expectedPayoff: string; notes: string }>;
+          mustMaterializeHookNow: boolean;
+          targetHook?: { hookId: string };
+        };
+        language: "zh" | "en";
+      }) => {
+        directives: {
+          sceneDirective?: string;
+          hookExecutionPhase?: "any" | "late";
+        };
+        hookAgenda: {
+          pressureMap: Array<{ hookId: string; movement?: string; pressure?: string }>;
+          mustAdvance: string[];
+          eligibleResolve: string[];
+          staleDebt: string[];
+          avoidNewHookFamilies: string[];
+        };
+        hookEmergence: {
+          pressureStates: Array<{ hookId: string; state: string; timing: string; type: string; expectedPayoff: string; notes: string }>;
+          mustMaterializeHookNow: boolean;
+          targetHook?: { hookId: string };
+        };
+        conflict?: { type: string };
+      };
+    }).applyPayoffHookGovernance({
+      chapterGoal: {
+        payoffToDeliver: "",
+      },
+      directives: {
+        sceneDirective: "保留主线推进。",
+        hookExecutionPhase: "any",
+      },
+      hookAgenda: {
+        pressureMap: [{ hookId: "H002", movement: "advance", pressure: "critical" }],
+        mustAdvance: ["H002"],
+        eligibleResolve: ["H002"],
+        staleDebt: ["H002"],
+        avoidNewHookFamilies: [],
+      },
+      hookEmergence: {
+        pressureStates: [
+          {
+            hookId: "H002",
+            state: "must-resolve-now",
+            timing: "near-term",
+            type: "poison-mystery",
+            expectedPayoff: "发现压制毒性新方法",
+            notes: "噬魂草毒性仍在扩散",
+          },
+        ],
+        mustMaterializeHookNow: true,
+        targetHook: { hookId: "H002" },
+      },
+      language: "zh",
+    });
+
+    expect(governed.hookEmergence.mustMaterializeHookNow).toBe(true);
+    expect(governed.hookEmergence.pressureStates[0]?.state).toBe("must-resolve-now");
+    expect(governed.hookAgenda.mustAdvance).toEqual(["H002"]);
+    expect(governed.hookAgenda.eligibleResolve).toEqual(["H002"]);
+    expect(governed.directives.hookExecutionPhase).toBe("any");
+    expect(governed.directives.sceneDirective).toBe("保留主线推进。");
+    expect(governed.conflict).toBeUndefined();
+  });
+
+  it("downgrades high-pressure payoffs when breath mode is active", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      enforceBreathCompatiblePayoff: (input: {
+        chapterGoal: {
+          mainConflict: string;
+          protagonistGoal: string;
+          activeCharacters: string[];
+          foreshadowToTouch: string[];
+          payoffToDeliver: string;
+          payoffDirective?: {
+            promisedPayoff: string;
+            payoffType: "reveal" | "resource" | "breakthrough" | "relationship" | "reversal";
+            mandatoryByFinalAct: boolean;
+          };
+          endingHookType: "danger" | "reveal" | "pursuit" | "choice" | "breakthrough";
+          nextChapterPull: string;
+        };
+        directives: {
+          chapterMode?: "breath" | "escalation" | "combat" | "reveal";
+          moodDirective?: { targetMode: "breath" };
+        };
+        language: "zh" | "en";
+        currentState: string;
+      }) => {
+        chapterGoal: {
+          payoffToDeliver: string;
+          nextChapterPull: string;
+          payoffDirective?: {
+            promisedPayoff: string;
+            payoffType: "reveal" | "resource" | "breakthrough" | "relationship" | "reversal";
+          };
+        };
+        directiveNote?: string;
+        conflict?: { type: string };
+      };
+    }).enforceBreathCompatiblePayoff({
+      chapterGoal: {
+        mainConflict: "地面阵纹亮起，规则压力笼罩全身。",
+        protagonistGoal: "在风暴爆发前确认阵纹异常。",
+        activeCharacters: ["楚夜"],
+        foreshadowToTouch: [],
+        payoffToDeliver: "地面阵纹亮起，规则压力笼罩全身",
+        payoffDirective: {
+          promisedPayoff: "地面阵纹亮起，规则压力笼罩全身",
+          payoffType: "reversal",
+          mandatoryByFinalAct: true,
+        },
+        endingHookType: "reveal",
+        nextChapterPull: "风暴将至。",
+      },
+      directives: {
+        chapterMode: "breath",
+        moodDirective: { targetMode: "breath" },
+      },
+      language: "zh",
+      currentState: "阵纹尚未完全激活。",
+    });
+
+    expect(governed.chapterGoal.payoffToDeliver).toBe("阵纹微弱波动，尚未完全激活");
+    expect(governed.chapterGoal.payoffDirective?.promisedPayoff).toBe("阵纹微弱波动，尚未完全激活");
+    expect(governed.chapterGoal.payoffDirective?.payoffType).toBe("reveal");
+    expect(governed.chapterGoal.nextChapterPull).toContain("不在本章完全爆发");
+    expect(governed.directiveNote ?? "").toContain("breath-payoff-downgrade");
+    expect(governed.directiveNote ?? "").toContain("不得在 scene1 fully materialize");
+    expect(governed.conflict?.type).toBe("breath-payoff-downgrade");
+  });
+
+  it("keeps recovery payoffs unchanged in breath mode", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      enforceBreathCompatiblePayoff: (input: {
+        chapterGoal: {
+          mainConflict: string;
+          protagonistGoal: string;
+          activeCharacters: string[];
+          foreshadowToTouch: string[];
+          payoffToDeliver: string;
+          payoffDirective?: {
+            promisedPayoff: string;
+            payoffType: "reveal" | "resource" | "breakthrough" | "relationship" | "reversal";
+            mandatoryByFinalAct: boolean;
+          };
+          endingHookType: "danger" | "reveal" | "pursuit" | "choice" | "breakthrough";
+          nextChapterPull: string;
+        };
+        directives: {
+          chapterMode?: "breath" | "escalation" | "combat" | "reveal";
+          moodDirective?: { targetMode: "breath" };
+        };
+        language: "zh" | "en";
+        currentState: string;
+      }) => { chapterGoal: { payoffToDeliver: string }; directiveNote?: string };
+    }).enforceBreathCompatiblePayoff({
+      chapterGoal: {
+        mainConflict: "旧伤反复，必须先稳住气血。",
+        protagonistGoal: "恢复伤势并讨论下一步。",
+        activeCharacters: ["楚夜"],
+        foreshadowToTouch: [],
+        payoffToDeliver: "伤势被暂时稳住",
+        payoffDirective: {
+          promisedPayoff: "伤势被暂时稳住",
+          payoffType: "resource",
+          mandatoryByFinalAct: true,
+        },
+        endingHookType: "reveal",
+        nextChapterPull: "确认下一步路线。",
+      },
+      directives: {
+        chapterMode: "breath",
+        moodDirective: { targetMode: "breath" },
+      },
+      language: "zh",
+      currentState: "旧伤仍在。",
+    });
+
+    expect(governed.chapterGoal.payoffToDeliver).toBe("伤势被暂时稳住");
+    expect(governed.directiveNote).toBeUndefined();
+  });
+
+  it("keeps single-task chapter budget unchanged when there is no competing hook load", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      applySceneBudget: (input: {
+        chapterGoal: {
+          payoffToDeliver: string;
+        };
+        hookAgenda: {
+          pressureMap: Array<{ hookId: string }>;
+          mustAdvance: string[];
+          eligibleResolve: string[];
+          staleDebt: string[];
+          avoidNewHookFamilies: string[];
+        };
+        hookEmergence: {
+          pressureStates: ReadonlyArray<unknown>;
+          mustMaterializeHookNow: boolean;
+          targetHook?: { hookId: string };
+        };
+        directives: {
+          sceneDirective?: string;
+        };
+        language: "zh" | "en";
+      }) => {
+        hookAgenda: {
+          pressureMap: Array<{ hookId: string }>;
+          mustAdvance: string[];
+          eligibleResolve: string[];
+          staleDebt: string[];
+          avoidNewHookFamilies: string[];
+        };
+        directives: {
+          sceneDirective?: string;
+        };
+      };
+    }).applySceneBudget({
+      chapterGoal: {
+        payoffToDeliver: "",
+      },
+      hookAgenda: {
+        pressureMap: [{ hookId: "H002" }],
+        mustAdvance: ["H002"],
+        eligibleResolve: [],
+        staleDebt: ["H002"],
+        avoidNewHookFamilies: [],
+      },
+      hookEmergence: {
+        pressureStates: [],
+        mustMaterializeHookNow: true,
+        targetHook: { hookId: "H002" },
+      },
+      directives: {
+        sceneDirective: "保留单线推进。",
+      },
+      language: "zh",
+    });
+
+    expect(governed.hookAgenda.mustAdvance).toEqual(["H002"]);
+    expect(governed.hookAgenda.staleDebt).toEqual(["H002"]);
+    expect(governed.hookAgenda.pressureMap).toEqual([{ hookId: "H002" }]);
+    expect(governed.directives.sceneDirective).toBe("保留单线推进。");
   });
 
   it("builds a structured chapter goal and writes it into the runtime intent", async () => {
@@ -266,13 +1490,77 @@ describe("PlannerAgent", () => {
       payoffToDeliver: expect.stringContaining("mentor vanished"),
       payoffDirective: expect.objectContaining({
         promisedPayoff: expect.stringContaining("mentor vanished"),
-        mandatoryByFinalAct: true,
+        payoffDepth: "layered",
+        payoffScope: "arc",
+        mandatoryByFinalAct: false,
       }),
+      maxRevealLayersPerChapter: 1,
       nextChapterPull: expect.any(String),
     }));
     expect(result.intentMarkdown).toContain("## Chapter Goal");
-    expect(result.intentMarkdown).toContain("endingHookType");
+    expect(result.intentMarkdown).toContain("endingType");
+    expect(result.intentMarkdown).not.toContain("endingHookType");
     expect(result.intentMarkdown).toContain("payoffDirective.promisedPayoff");
+    expect(result.intentMarkdown).toContain("payoffDirective.payoffDepth: layered");
+    expect(result.intentMarkdown).toContain("payoffDirective.payoffScope: arc");
+    expect(result.intentMarkdown).toContain("maxRevealLayersPerChapter: 1");
+    expect(result.intent.mustAvoid).toEqual(expect.arrayContaining([
+      "本章禁止完全解释该 payoff，只允许 partial reveal（一层）。",
+    ]));
+  });
+
+  it("keeps deep payoff directives chapter-scoped so full explanation can be allowed", async () => {
+    await Promise.all([
+      writeFile(
+        join(storyDir, "current_state.md"),
+        [
+          "# Current State",
+          "",
+          "| Field | Value |",
+          "| --- | --- |",
+          "| Current Chapter | 2 |",
+          "| Current Goal | Give the complete truth behind the vanished mentor case. |",
+          "| Current Conflict | Lin Yue has one chance to expose the full chain now. |",
+          "",
+        ].join("\n"),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "foreshadow_registry.json"),
+        JSON.stringify([
+          {
+            hookId: "mentor-truth",
+            startChapter: 1,
+            type: "mystery",
+            status: "open",
+            lastAdvancedChapter: 2,
+            expectedPayoff: "Complete reveal: fully explain the mentor's disappearance.",
+            notes: "Deliver the whole truth now.",
+          },
+        ], null, 2),
+        "utf-8",
+      ),
+    ]);
+
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await planner.planChapter({
+      book,
+      bookDir,
+      chapterNumber: 3,
+    });
+
+    expect(result.intent.chapterGoal?.payoffDirective).toEqual(expect.objectContaining({
+      payoffDepth: "deep",
+      payoffScope: "chapter",
+      mandatoryByFinalAct: true,
+    }));
+    expect(result.intent.chapterGoal?.maxRevealLayersPerChapter).toBeUndefined();
   });
 
   it("filters non-character fragments and rejects numeric payoff values in chapter goal output", async () => {
@@ -1359,7 +2647,101 @@ describe("PlannerAgent", () => {
       forbidDominantMode: "combat-heavy",
       note: expect.stringContaining("降调"),
     }));
-    expect(result.intent.moodDirective?.note).toContain("日常");
+    expect(result.intent.moodDirective?.note).toContain("纯人物/恢复场景");
+  });
+
+  it("downgrades a high-intensity goal when breath mode is active", async () => {
+    book = {
+      ...book,
+      genre: "other",
+      language: "zh",
+    };
+
+    await writeFile(
+      join(storyDir, "chapter_summaries.md"),
+      [
+        "# Chapter Summaries",
+        "",
+        "| chapter | title | characters | events | stateChanges | hookActivity | mood | chapterType |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| 1 | 暗巷追踪 | 周谨川 | 追踪目标 | None | none | 紧张、压抑 | 冲突章 |",
+        "| 2 | 旧楼对峙 | 周谨川 | 对峙升级 | None | none | 冷硬、逼仄 | 对抗章 |",
+        "| 3 | 夜色围堵 | 周谨川 | 围堵压迫 | None | none | 肃杀、凝重 | 追击章 |",
+        "| 4 | 地下通道 | 周谨川 | 逃脱冲突 | None | none | 压迫、窒息 | 逃亡章 |",
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await planner.planChapter({
+      book,
+      bookDir,
+      chapterNumber: 5,
+      externalContext: "生死抉择：选择谁先死。",
+    });
+
+    expect(result.intent.moodDirective?.targetMode).toBe("breath");
+    expect(result.intent.goalIntensity).toBe("medium");
+    expect(result.intent.goal).toContain("延后最终决断");
+    expect(result.intent.mustAvoid).toEqual(expect.arrayContaining([
+      "breath 章禁止生死抉择、终局对抗、核心反转、或必须立即行动的危机目标。",
+    ]));
+    expect(result.intent.conflicts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "goal_mood_arbitration" }),
+    ]));
+  });
+
+  it("keeps low-intensity recovery/planning goals intact in breath mode", async () => {
+    book = {
+      ...book,
+      genre: "other",
+      language: "zh",
+    };
+
+    await writeFile(
+      join(storyDir, "chapter_summaries.md"),
+      [
+        "# Chapter Summaries",
+        "",
+        "| chapter | title | characters | events | stateChanges | hookActivity | mood | chapterType |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| 1 | 暗巷追踪 | 周谨川 | 追踪目标 | None | none | 紧张、压抑 | 冲突章 |",
+        "| 2 | 旧楼对峙 | 周谨川 | 对峙升级 | None | none | 冷硬、逼仄 | 对抗章 |",
+        "| 3 | 夜色围堵 | 周谨川 | 围堵压迫 | None | none | 肃杀、凝重 | 追击章 |",
+        "| 4 | 地下通道 | 周谨川 | 逃脱冲突 | None | none | 压迫、窒息 | 逃亡章 |",
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await planner.planChapter({
+      book,
+      bookDir,
+      chapterNumber: 5,
+      externalContext: "先休整并讨论是否继续深入。",
+    });
+
+    expect(result.intent.moodDirective?.targetMode).toBe("breath");
+    expect(result.intent.goalIntensity).toBe("low");
+    expect(result.intent.goal).toContain("先休整并讨论是否继续深入");
+    expect(result.intent.goal).not.toContain("延后最终决断");
+    expect(result.intent.conflicts).toEqual(expect.not.arrayContaining([
+      expect.objectContaining({ type: "goal_mood_arbitration" }),
+    ]));
   });
 
   it("forces escalation after two consecutive breathing chapters", async () => {
@@ -1424,6 +2806,8 @@ describe("PlannerAgent", () => {
       chapterNumber: 10,
     });
 
+    expect(result.intent.chapterMode).toBe("escalation");
+    expect(result.intent.moodDirective).toBeUndefined();
     expect(result.intent.sceneDirective).toContain("Force tension escalation this chapter.");
     expect(result.intentMarkdown).toContain("Force tension escalation this chapter.");
     expect(result.intentMarkdown).toContain("Do not produce a third consecutive breathing chapter.");
@@ -1434,6 +2818,153 @@ describe("PlannerAgent", () => {
     ]));
     expect(result.intent.chapterGoal?.endingHookType).not.toBe("reveal");
     expect(["danger", "pursuit", "breakthrough"]).toContain(result.intent.chapterGoal?.endingHookType);
+  });
+
+  it("removes escalation directives when breath mode is active to keep chapter mode mutually exclusive", async () => {
+    book = {
+      ...book,
+      genre: "other",
+      language: "en",
+    };
+
+    await Promise.all([
+      writeFile(
+        join(storyDir, "volume_outline.md"),
+        "# Volume Outline\n\n## Chapter 10\nHold position and recover near the archive gate.\n",
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "chapter_summaries.md"),
+        [
+          "# Chapter Summaries",
+          "",
+          "| chapter | title | characters | events | stateChanges | hookActivity | mood | chapterType |",
+          "| --- | --- | --- | --- | --- | --- | --- | --- |",
+          "| 6 | Cold Drum | Taryn | Holds the outer line | None | none | tense | 日常/喘息、温情 |",
+          "| 7 | Narrow Light | Taryn | Tends injuries at a hidden camp | None | none | grim | 日常/喘息、温情 |",
+          "| 8 | Ash Bowl | Taryn | Regroups and shares supplies | None | none | oppressive | 日常/喘息、温情 |",
+          "| 9 | Quiet Stairs | Taryn | Discusses next move before departure | None | none | tense | 日常/喘息、温情 |",
+          "",
+        ].join("\n"),
+        "utf-8",
+      ),
+    ]);
+
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await planner.planChapter({
+      book,
+      bookDir,
+      chapterNumber: 10,
+    });
+
+    expect(result.intent.chapterMode).toBe("breath");
+    expect(result.intent.moodDirective?.targetMode).toBe("breath");
+    expect(result.intent.sceneDirective ?? "").not.toContain("Force tension escalation this chapter.");
+    expect(result.intent.sceneDirective ?? "").not.toContain("Force chapter type: escalation / confrontation / discovery-under-threat.");
+    expect(result.intentMarkdown).toContain("chapterMode: breath");
+    expect(result.intentMarkdown).not.toContain("Force tension escalation this chapter.");
+  });
+
+  it("rotates endingType when the previous chapter used the same unresolved ending shell", async () => {
+    book = {
+      ...book,
+      genre: "other",
+      language: "en",
+    };
+
+    await Promise.all([
+      writeFile(
+        join(storyDir, "runtime", "chapter-0009.intent.md"),
+        [
+          "# Chapter Intent",
+          "",
+          "## Structured Directives",
+          "- chapterMode: escalation",
+          "- endingType: unresolved_end",
+        ].join("\n"),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "chapter_summaries.md"),
+        [
+          "# Chapter Summaries",
+          "",
+          "| chapter | title | characters | events | stateChanges | hookActivity | mood | chapterType |",
+          "| --- | --- | --- | --- | --- | --- | --- | --- |",
+          "| 8 | Cold Ferry | Taryn | Holds the outer line | None | none | tense | confrontation |",
+          "| 9 | Narrow Light | Taryn | Keeps pressure on the gate | None | none | grim | confrontation |",
+        ].join("\n"),
+        "utf-8",
+      ),
+    ]);
+
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await planner.planChapter({
+      book,
+      bookDir,
+      chapterNumber: 10,
+      externalContext: "Force direct confrontation and keep pressure on the gate.",
+    });
+
+    expect(result.intent.endingType).not.toBe("unresolved_end");
+    expect(["calm_end", "reveal_end", "resolution_end", "twist_end"]).toContain(result.intent.endingType);
+  });
+
+  it("keeps endingType non-repeating across a five-chapter window", async () => {
+    book = {
+      ...book,
+      genre: "other",
+      language: "en",
+    };
+
+    await Promise.all([
+      writeFile(
+        join(storyDir, "chapter_summaries.md"),
+        [
+          "# Chapter Summaries",
+          "",
+          "| chapter | title | characters | events | stateChanges | hookActivity | mood | chapterType |",
+          "| --- | --- | --- | --- | --- | --- | --- | --- |",
+          "| 1 | Start | Taryn | Starts the route | None | none | mixed | transition |",
+          "| 2 | Bridge | Taryn | Keeps moving | None | none | mixed | transition |",
+          "| 3 | Gate | Taryn | Watches the archive gate | None | none | mixed | transition |",
+          "| 4 | Anchor | Taryn | Stabilizes supplies | None | none | mixed | transition |",
+        ].join("\n"),
+        "utf-8",
+      ),
+    ]);
+
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const endingTypes: string[] = [];
+    for (const chapterNumber of [5, 6, 7, 8, 9]) {
+      const result = await planner.planChapter({
+        book,
+        bookDir,
+        chapterNumber,
+      });
+      endingTypes.push(result.intent.endingType ?? "");
+    }
+
+    expect(endingTypes.every((item) => item.length > 0)).toBe(true);
+    expect(new Set(endingTypes).size).toBe(5);
   });
 
   it("does not emit a mood directive when recent moods are varied", async () => {
@@ -2277,11 +3808,12 @@ describe("PlannerAgent", () => {
       externalContext: "Keep the chapter on the mainline debt conflict.",
     });
 
-    expect(result.intent.hookAgenda.mustAdvance).toEqual(["stale-debt", "ready-payoff"]);
-    expect(result.intent.hookAgenda.eligibleResolve).toEqual(["ready-payoff"]);
+    expect(result.intent.hookAgenda.mustAdvance).toEqual([]);
+    expect(result.intent.hookAgenda.eligibleResolve).toEqual([]);
     expect(result.intent.hookAgenda.staleDebt).toEqual(["stale-debt"]);
     expect(result.intent.hookAgenda.avoidNewHookFamilies).toContain("relationship");
     expect(result.intent.hookAgenda.pressureMap).toEqual([]);
+    expect(result.intent.sceneDirective ?? "").toContain("payoff-hook-priority");
 
     const intentMarkdown = await readFile(result.runtimePath, "utf-8");
     expect(intentMarkdown).toContain("## Hook Agenda");
@@ -2395,8 +3927,8 @@ describe("PlannerAgent", () => {
       externalContext: "Keep the chapter on the route pressure.",
     });
 
-    expect(result.intent.hookAgenda.mustAdvance).toEqual(["stale-omega", "stale-sable"]);
-    expect(result.intent.hookAgenda.staleDebt).toEqual(["stale-omega", "stale-sable"]);
+    expect(result.intent.hookAgenda.mustAdvance).toEqual([]);
+    expect(result.intent.hookAgenda.staleDebt).toEqual(["stale-omega"]);
     expect(result.intent.hookAgenda.avoidNewHookFamilies).toEqual(expect.arrayContaining([
       "relationship",
       "mystery",
@@ -2589,7 +4121,7 @@ describe("PlannerAgent", () => {
     );
   });
 
-  it("marks overdue hooks as mustMaterializeHookNow in chapter intent markdown", async () => {
+  it("downgrades overdue hooks to soft-progress in chapter intent markdown when payoff is present", async () => {
     const stateDir = join(storyDir, "state");
     await mkdir(stateDir, { recursive: true });
 
@@ -2701,13 +4233,192 @@ describe("PlannerAgent", () => {
     });
 
     expect(result.intentMarkdown).toContain("### Hook Pressure States");
-    expect(result.intentMarkdown).toContain("H002: must-resolve-now");
-    expect(result.intentMarkdown).toContain("mustMaterializeHookNow: true");
-    expect(result.intentMarkdown).toContain("targetHookId: H002");
-    expect(result.intentMarkdown).toContain("targetHookState: must-resolve-now");
-    expect(result.intentMarkdown).toContain("targetHookExpectedPayoff: 发现压制毒性新方法");
-    expect(result.intent.mustAvoid).toEqual(expect.arrayContaining([
-      "不要再用“只提一嘴”的方式继续拖延 H002。",
+    expect(result.intentMarkdown).toContain("H002: soft-progress");
+    expect(result.intentMarkdown).toContain("mustMaterializeHookNow: false");
+    expect(result.intentMarkdown).not.toContain("targetHookId: H002");
+    expect(result.intentMarkdown).toContain("payoff-hook-priority");
+  });
+
+  it("downgrades must-resolve hooks to soft-progress when breath mood is active", async () => {
+    const stateDir = join(storyDir, "state");
+    await mkdir(stateDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(
+        join(storyDir, "foreshadow_registry.json"),
+        JSON.stringify([
+          {
+            hookId: "H002",
+            startChapter: 2,
+            type: "poison-mystery",
+            status: "open",
+            lastAdvancedChapter: 3,
+            expectedPayoff: "发现压制毒性新方法",
+            payoffTiming: "near-term",
+            notes: "噬魂草毒性仍在扩散",
+          },
+        ], null, 2),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "chapter_summaries.md"),
+        [
+          "# Chapter Summaries",
+          "",
+          "| 5 | 血线难收 | 楚夜 | 血战继续扩大 | 压力攀升 | H002 stalled | 压迫 | confrontation |",
+          "| 6 | 毒性未止 | 楚夜 | 噬魂草仍在侵蚀 | 毒性扩散 | H002 stalled | 紧张 | confrontation |",
+          "| 7 | 逼近的余毒 | 楚夜 | 噬魂草继续恶化 | 仍无解法 | H002 stalled | 压迫 | confrontation |",
+        ].join("\n"),
+        "utf-8",
+      ),
+      writeFile(
+        join(stateDir, "manifest.json"),
+        JSON.stringify({
+          schemaVersion: 2,
+          language: "zh",
+          lastAppliedChapter: 7,
+          projectionVersion: 1,
+          migrationWarnings: [],
+        }, null, 2),
+        "utf-8",
+      ),
+      writeFile(
+        join(stateDir, "current_state.json"),
+        JSON.stringify({
+          chapter: 7,
+          facts: [],
+        }, null, 2),
+        "utf-8",
+      ),
+      writeFile(
+        join(stateDir, "chapter_summaries.json"),
+        JSON.stringify({
+          rows: [
+            {
+              chapter: 5,
+              title: "血线难收",
+              characters: "楚夜",
+              events: "血战继续扩大",
+              stateChanges: "压力攀升",
+              hookActivity: "H002 stalled",
+              mood: "压迫",
+              chapterType: "confrontation",
+            },
+            {
+              chapter: 6,
+              title: "毒性未止",
+              characters: "楚夜",
+              events: "噬魂草仍在侵蚀",
+              stateChanges: "毒性扩散",
+              hookActivity: "H002 stalled",
+              mood: "紧张",
+              chapterType: "confrontation",
+            },
+            {
+              chapter: 7,
+              title: "逼近的余毒",
+              characters: "楚夜",
+              events: "噬魂草继续恶化",
+              stateChanges: "仍无解法",
+              hookActivity: "H002 stalled",
+              mood: "压迫",
+              chapterType: "confrontation",
+            },
+          ],
+        }, null, 2),
+        "utf-8",
+      ),
+      writeFile(
+        join(stateDir, "hooks.json"),
+        JSON.stringify({
+          hooks: [
+            {
+              hookId: "H002",
+              startChapter: 2,
+              type: "poison-mystery",
+              status: "open",
+              lastAdvancedChapter: 3,
+              expectedPayoff: "发现压制毒性新方法",
+              payoffTiming: "near-term",
+              notes: "噬魂草毒性仍在扩散",
+            },
+          ],
+        }, null, 2),
+        "utf-8",
+      ),
+    ]);
+
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await planner.planChapter({
+      book,
+      bookDir,
+      chapterNumber: 8,
+    });
+
+    expect(result.intent.moodDirective?.targetMode).toBe("breath");
+    expect(result.intent.hookExecutionPhase).toBeUndefined();
+    expect(result.intent.directivePriority?.ordered).toEqual([
+      "mood-structure",
+      "scene-plan",
+      "payoff",
+      "hook-emergence",
+    ]);
+    expect(result.intentMarkdown).toContain("H002: soft-progress");
+    expect(result.intentMarkdown).toContain("mustMaterializeHookNow: false");
+    expect(result.intentMarkdown).not.toContain("hookExecutionPhase: late");
+    expect(result.intentMarkdown).not.toContain("targetHookId: H002");
+    expect(result.intentMarkdown).toContain("breath-hook-downgrade");
+    expect(result.intent.sceneDirective).toContain("minor signal");
+    expect(result.intent.conflicts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "breath_hook_downgrade" }),
     ]));
+    expect(result.intentMarkdown).toContain("directivePriority:");
+  });
+
+  it("forces a pure character scene first when breath mode is active", async () => {
+    book = {
+      ...book,
+      genre: "other",
+      language: "zh",
+    };
+
+    await writeFile(
+      join(storyDir, "chapter_summaries.md"),
+      [
+        "# Chapter Summaries",
+        "",
+        "| chapter | title | characters | events | stateChanges | hookActivity | mood | chapterType |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| 1 | 暗巷追踪 | 周谨川 | 追踪目标 | None | none | 紧张、压抑 | 冲突章 |",
+        "| 2 | 旧楼对峙 | 周谨川 | 对峙升级 | None | none | 冷硬、逼仄 | 对抗章 |",
+        "| 3 | 夜色围堵 | 周谨川 | 围堵压迫 | None | none | 肃杀、凝重 | 追击章 |",
+        "| 4 | 地下通道 | 周谨川 | 逃脱冲突 | None | none | 压迫、窒息 | 逃亡章 |",
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await planner.planChapter({
+      book,
+      bookDir,
+      chapterNumber: 5,
+    });
+
+    expect(result.intent.moodDirective?.scenePlan?.scene1 ?? "").toContain("纯人物");
+    expect(result.intent.sceneDirective ?? "").toContain("禁止 hook 推进、新威胁、规则压力、风暴爆发");
+    expect(result.intent.sceneDirective ?? "").toContain("scene2 才允许低强度推进");
   });
 });

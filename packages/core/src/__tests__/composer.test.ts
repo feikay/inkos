@@ -93,6 +93,7 @@ describe("ComposerAgent", () => {
       intent: {
         chapter: 4,
         goal: "Bring the focus back to the mentor conflict.",
+        goalIntensity: "medium",
         outlineNode: "Track the merchant guild trail.",
         mustKeep: [
           "Lin Yue still hides the broken oath token.",

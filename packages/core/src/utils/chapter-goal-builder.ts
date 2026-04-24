@@ -179,11 +179,23 @@ export function buildChapterGoal(input: BuildChapterGoalInput): ChapterGoal {
 }
 
 function buildPayoffDirective(promisedPayoff: string): PayoffDirective {
+  const payoffType = inferPayoffType(promisedPayoff);
+  const payoffDepth = inferPayoffDepth(promisedPayoff, payoffType);
+  const payoffScope = payoffDepth === "layered" ? "arc" : "chapter";
   return {
     promisedPayoff,
-    payoffType: inferPayoffType(promisedPayoff),
-    mandatoryByFinalAct: true,
+    payoffType,
+    payoffDepth,
+    payoffScope,
+    mandatoryByFinalAct: payoffScope === "chapter",
   };
+}
+
+function inferPayoffDepth(payoff: string, payoffType: PayoffType): PayoffDirective["payoffDepth"] {
+  if (payoffType === "reveal" && /全部|彻底|完整|一次说清|all\b|complete\b|full\b/i.test(payoff)) {
+    return "deep";
+  }
+  return "layered";
 }
 
 function inferPayoffType(payoff: string): PayoffType {

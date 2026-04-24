@@ -9,6 +9,7 @@ import {
   type ChapterConflict,
   type ChapterGoal,
   type ChapterIntent,
+  type EndingType,
   type MoodDirective,
 } from "../models/input-governance.js";
 import type { StoredHook } from "../state/memory-db.js";
@@ -18,6 +19,7 @@ import {
   renderSummarySnapshot,
   retrieveMemorySelection,
 } from "../utils/memory-retrieval.js";
+import { parseCurrentStateFacts, parsePendingHooksMarkdown } from "../utils/story-markdown.js";
 import { analyzeChapterCadence } from "../utils/chapter-cadence.js";
 import { buildPlannerHookAgenda } from "../utils/hook-agenda.js";
 import { buildChapterGoal } from "../utils/chapter-goal-builder.js";
@@ -67,7 +69,7 @@ interface PlannerHookThrottle {
 
 interface HookPressureStateEntry {
   readonly hookId: string;
-  readonly state: "normal" | "due" | "overdue" | "must-resolve-now";
+  readonly state: "normal" | "due" | "overdue" | "must-resolve-now" | "soft-progress";
   readonly timing: string;
   readonly type: string;
   readonly expectedPayoff: string;
@@ -77,6 +79,7 @@ interface HookPressureStateEntry {
 interface HookEmergenceDirective {
   readonly pressureStates: ReadonlyArray<HookPressureStateEntry>;
   readonly mustMaterializeHookNow: boolean;
+  readonly hookExecutionPhase?: "any" | "late";
   readonly targetHook?: HookPressureStateEntry;
 }
 
@@ -87,6 +90,15 @@ interface PlannerCurrentStateResolution {
 
 interface ContinuityGoalResolution {
   readonly goal: string;
+  readonly conflict?: ChapterConflict;
+}
+
+type GoalIntensity = "low" | "medium" | "high";
+
+interface GoalArbitrationResult {
+  readonly goal: string;
+  readonly goalIntensity: GoalIntensity;
+  readonly mustAvoid: ReadonlyArray<string>;
   readonly conflict?: ChapterConflict;
 }
 
@@ -190,7 +202,15 @@ export class PlannerAgent extends BaseAgent {
       outlineNode,
       preferLatestStateAnchor,
     });
-    const goal = continuityGoal.goal;
+    let goal = this.ensureGoalFallback({
+      goal: continuityGoal.goal,
+      currentState,
+      chapterSummaries,
+      pendingHooksRaw,
+      chapterNumber: input.chapterNumber,
+      language,
+      moodDirective: undefined,
+    });
     const parsedRules = parseBookRules(bookRulesRaw);
     const mustKeepBase = this.unique([
       ...this.collectMustKeep(currentState, storyBible),
@@ -223,7 +243,7 @@ export class PlannerAgent extends BaseAgent {
     const activeHookCount = memorySelection.activeHooks.filter(
       (hook) => hook.status !== "resolved" && hook.status !== "deferred",
     ).length;
-    const hookAgenda = buildPlannerHookAgenda({
+    let hookAgenda = buildPlannerHookAgenda({
       hooks: memorySelection.activeHooks,
       chapterNumber: input.chapterNumber,
       targetChapters: input.book.targetChapters,
@@ -235,19 +255,11 @@ export class PlannerAgent extends BaseAgent {
       chapterNumber: input.chapterNumber,
       hookAgenda,
     });
-    const hookEmergence = this.buildHookEmergenceDirective({
+    let hookEmergence = this.buildHookEmergenceDirective({
       hooks: memorySelection.activeHooks,
       chapterNumber: input.chapterNumber,
       targetChapters: input.book.targetChapters,
     });
-    const mustKeep = this.unique([
-      ...mustKeepBase,
-      ...this.buildHookEmergenceMustKeep(hookEmergence, language),
-    ]).slice(0, 6);
-    const mustAvoid = this.unique([
-      ...mustAvoidBase,
-      ...this.buildHookEmergenceMustAvoid(hookEmergence, language),
-    ]).slice(0, 8);
     const recentSummaries = parseChapterSummariesMarkdown(chapterSummaries)
       .filter((summary) => summary.chapter < input.chapterNumber)
       .sort((left, right) => left.chapter - right.chapter)
@@ -261,6 +273,47 @@ export class PlannerAgent extends BaseAgent {
         chapterType: summary.chapterType,
       })),
     });
+    const recentEndingTypes = await this.readRecentEndingTypes(storyDir, input.chapterNumber, 4);
+    const lastEndingType = recentEndingTypes.at(-1);
+    let directives = this.buildStructuredDirectives({
+      chapterNumber: input.chapterNumber,
+      language: input.book.language,
+      volumeOutline,
+      outlineNode,
+      matchedOutlineAnchor,
+      cadence,
+      arcMapDirective: arcMap.arcDirective,
+      hookEmergence,
+      goalIntensity: this.inferGoalIntensity(goal),
+      lastEndingType,
+      recentEndingTypes,
+    });
+    const breathHookGovernance = this.applyBreathHookGovernance({
+      directives,
+      hookAgenda,
+      hookEmergence,
+      language,
+    });
+    directives = breathHookGovernance.directives;
+    hookAgenda = breathHookGovernance.hookAgenda;
+    hookEmergence = breathHookGovernance.hookEmergence;
+    goal = this.ensureGoalFallback({
+      goal,
+      currentState,
+      chapterSummaries,
+      pendingHooksRaw,
+      chapterNumber: input.chapterNumber,
+      language,
+      moodDirective: directives.moodDirective,
+    });
+    const goalArbitration = this.arbitrateGoalWithMood({
+      goal,
+      goalIntensity: this.inferGoalIntensity(goal),
+      moodDirective: directives.moodDirective,
+      language,
+    });
+    goal = goalArbitration.goal;
+
     const rawChapterGoal = buildChapterGoal({
       language,
       chapterNumber: input.chapterNumber,
@@ -277,15 +330,90 @@ export class PlannerAgent extends BaseAgent {
       genreProfile,
       powerSystem,
     });
-    const chapterGoal = this.applyCadenceChapterGoalOverrides(rawChapterGoal, cadence);
-    const directives = this.buildStructuredDirectives({
+    const cadenceAdjustedChapterGoal = this.applyCadenceChapterGoalOverrides(rawChapterGoal, cadence);
+    const resilientChapterGoal = this.ensureChapterGoalFallback({
+      chapterGoal: cadenceAdjustedChapterGoal,
+      goal,
+      currentState,
+      chapterSummaries,
+      pendingHooksRaw,
       chapterNumber: input.chapterNumber,
-      language: input.book.language,
-      volumeOutline,
-      outlineNode,
-      matchedOutlineAnchor,
-      cadence,
-      arcMapDirective: arcMap.arcDirective,
+      language,
+      moodDirective: directives.moodDirective,
+    });
+    const singlePayoffGovernance = this.enforceSingleChapterPayoff({
+      chapterGoal: resilientChapterGoal,
+      language,
+    });
+    const concreteEventPayoffGovernance = this.enforceConcreteEventPayoff({
+      chapterGoal: singlePayoffGovernance.chapterGoal,
+      language,
+      currentState,
+    });
+    const revealExecutablePayoffGovernance = this.enforceExecutableRevealPayoff({
+      chapterGoal: concreteEventPayoffGovernance.chapterGoal,
+      language,
+      currentState,
+      chapterSummaries,
+    });
+    const breathPayoffGovernance = this.enforceBreathCompatiblePayoff({
+      chapterGoal: revealExecutablePayoffGovernance.chapterGoal,
+      directives,
+      language,
+      currentState,
+    });
+    const breakthroughPayoffGovernance = this.applyBreakthroughPayoffTrigger({
+      chapterGoal: breathPayoffGovernance.chapterGoal,
+      language,
+      currentState,
+    });
+    const payoffGovernance = this.applyPayoffDirectiveGovernance(breakthroughPayoffGovernance.chapterGoal, language);
+    const chapterGoal = payoffGovernance.chapterGoal;
+    const payoffHookGovernance = this.applyPayoffHookGovernance({
+      chapterGoal,
+      directives,
+      hookAgenda,
+      hookEmergence,
+      language,
+    });
+    directives = payoffHookGovernance.directives;
+    hookAgenda = payoffHookGovernance.hookAgenda;
+    hookEmergence = payoffHookGovernance.hookEmergence;
+    const mustKeep = this.unique([
+      ...mustKeepBase,
+      ...this.buildHookEmergenceMustKeep(hookEmergence, language),
+    ]).slice(0, 6);
+    const mustAvoid = this.unique([
+      ...mustAvoidBase,
+      ...this.buildHookEmergenceMustAvoid(hookEmergence, language),
+    ]).slice(0, 8);
+    const payoffDirectives = this.applySinglePayoffDirectiveNote({
+      directives,
+      directiveNote: this.unique([
+        singlePayoffGovernance.directiveNote,
+        concreteEventPayoffGovernance.directiveNote,
+        revealExecutablePayoffGovernance.directiveNote,
+        breathPayoffGovernance.directiveNote,
+        breakthroughPayoffGovernance.directiveNote,
+      ].filter((value): value is string => Boolean(value && value.trim().length > 0))).join(" "),
+    });
+    const payoffPrioritizedDirectives = this.applyPayoffEndingPriority({
+      directives: payoffDirectives,
+      chapterGoal,
+      language,
+    });
+    const intensityBudget = this.applyIntensityBudget({
+      chapterGoal,
+      hookAgenda,
+      directives: payoffPrioritizedDirectives,
+      language,
+    });
+    const sceneBudget = this.applySceneBudget({
+      chapterGoal,
+      hookAgenda: intensityBudget.hookAgenda,
+      hookEmergence,
+      directives: intensityBudget.directives,
+      language,
     });
     const throttleConflicts = this.buildHookDebtThrottleConflicts(hookThrottle, chapterGoal.foreshadowToTouch);
     const cadenceMustAvoid = this.buildCadenceMustAvoid(language, cadence);
@@ -293,22 +421,33 @@ export class PlannerAgent extends BaseAgent {
     const intent = ChapterIntentSchema.parse({
       chapter: input.chapterNumber,
       goal,
+      goalIntensity: goalArbitration.goalIntensity,
       outlineNode,
-      ...directives,
+      ...sceneBudget.directives,
       mustKeep,
       mustAvoid: this.unique([
         ...mustAvoid,
         ...cadenceMustAvoid,
         ...this.buildHookDebtMustAvoid(hookThrottle, language),
+        ...goalArbitration.mustAvoid,
+        ...payoffGovernance.mustAvoid,
+        ...sceneBudget.mustAvoid,
       ]).slice(0, 8),
       styleEmphasis,
       conflicts: [
         ...conflicts,
         ...(continuityGoal.conflict ? [continuityGoal.conflict] : []),
+        ...(goalArbitration.conflict ? [goalArbitration.conflict] : []),
+        ...(concreteEventPayoffGovernance.conflict ? [concreteEventPayoffGovernance.conflict] : []),
+        ...(revealExecutablePayoffGovernance.conflict ? [revealExecutablePayoffGovernance.conflict] : []),
+        ...(breathPayoffGovernance.conflict ? [breathPayoffGovernance.conflict] : []),
+        ...(breathHookGovernance.conflict ? [breathHookGovernance.conflict] : []),
+        ...(payoffHookGovernance.conflict ? [payoffHookGovernance.conflict] : []),
+        ...(intensityBudget.conflict ? [intensityBudget.conflict] : []),
         ...throttleConflicts,
       ],
       chapterGoal,
-      hookAgenda,
+      hookAgenda: sceneBudget.hookAgenda,
     });
 
     const runtimePath = join(runtimeDir, `chapter-${String(input.chapterNumber).padStart(4, "0")}.intent.md`);
@@ -331,6 +470,40 @@ export class PlannerAgent extends BaseAgent {
         ...(memorySelection.dbPath ? [memorySelection.dbPath] : []),
       ]),
       runtimePath,
+    };
+  }
+
+  private applyPayoffEndingPriority(input: {
+    readonly directives: Pick<ChapterIntent, "chapterMode" | "endingType" | "sceneDirective" | "arcDirective" | "moodDirective" | "directivePriority" | "hookExecutionPhase" | "titleDirective">;
+    readonly chapterGoal: ChapterGoal;
+    readonly language: "zh" | "en";
+  }): Pick<ChapterIntent, "chapterMode" | "endingType" | "sceneDirective" | "arcDirective" | "moodDirective" | "directivePriority" | "hookExecutionPhase" | "titleDirective"> {
+    const promisedPayoff = this.normalizeMeaningfulText(input.chapterGoal.payoffToDeliver);
+    if (!promisedPayoff) {
+      return input.directives;
+    }
+
+    const payoffPriorityLine = input.language === "en"
+      ? "When a payoff is promised, payoff priority is higher than endingType, and the payoff MUST happen in this chapter at least partially."
+      : "当存在 payoffToDeliver 时，payoff 优先级高于 endingType，本章也必须至少部分兑现 payoff。";
+    const endingCompatibilityLine = input.language === "en"
+      ? "EndingType may shape closure, but must not block payoff realization or visible situation change."
+      : "endingType 只控制收束方式，不得阻止 payoff 发生与局势变化。";
+    const unresolvedCompatibilityLine = input.language === "en" && input.directives.endingType === "unresolved_end"
+      ? "For unresolved_end with payoff: complete the payoff first, then leave the situation unresolved by introducing a new threat or question."
+      : input.language === "zh" && input.directives.endingType === "unresolved_end"
+        ? "当 endingType=unresolved_end 且存在 payoff 时：必须先完成 payoff，再通过新威胁或新问题让局势保持未解。"
+        : undefined;
+    const mergedSceneDirective = this.unique([
+      input.directives.sceneDirective,
+      payoffPriorityLine,
+      endingCompatibilityLine,
+      unresolvedCompatibilityLine,
+    ].filter((value): value is string => Boolean(value && value.trim().length > 0))).join(" ");
+
+    return {
+      ...input.directives,
+      sceneDirective: mergedSceneDirective,
     };
   }
 
@@ -480,6 +653,39 @@ export class PlannerAgent extends BaseAgent {
       })),
     });
     return renderCurrentStateProjection(projected, input.language);
+  }
+
+  private async readRecentEndingTypes(
+    storyDir: string,
+    chapterNumber: number,
+    lookback: number,
+  ): Promise<ReadonlyArray<EndingType>> {
+    const start = Math.max(1, chapterNumber - lookback);
+    const endings: EndingType[] = [];
+    for (let chapter = start; chapter < chapterNumber; chapter += 1) {
+      const runtimePath = join(storyDir, "runtime", `chapter-${String(chapter).padStart(4, "0")}.intent.md`);
+      const raw = await this.readFileOrDefault(runtimePath);
+      const endingType = this.extractEndingTypeFromIntentMarkdown(raw);
+      if (endingType) {
+        endings.push(endingType);
+      }
+    }
+    return endings;
+  }
+
+  private extractEndingTypeFromIntentMarkdown(markdown: string): EndingType | undefined {
+    const match = markdown.match(/^\s*-\s*endingType:\s*(reveal_end|unresolved_end|resolution_end|twist_end|calm_end)\s*$/imu);
+    const value = match?.[1];
+    if (
+      value === "reveal_end"
+      || value === "unresolved_end"
+      || value === "resolution_end"
+      || value === "twist_end"
+      || value === "calm_end"
+    ) {
+      return value;
+    }
+    return undefined;
   }
 
   private deriveStateFromChapterSummaries(input: {
@@ -657,8 +863,35 @@ export class PlannerAgent extends BaseAgent {
     readonly matchedOutlineAnchor: boolean;
     readonly cadence: ReturnType<typeof analyzeChapterCadence>;
     readonly arcMapDirective?: string;
-  }): Pick<ChapterIntent, "sceneDirective" | "arcDirective" | "moodDirective" | "titleDirective"> {
+    readonly hookEmergence: HookEmergenceDirective;
+    readonly goalIntensity: GoalIntensity;
+    readonly lastEndingType?: EndingType;
+    readonly recentEndingTypes: ReadonlyArray<EndingType>;
+  }): Pick<ChapterIntent, "chapterMode" | "endingType" | "sceneDirective" | "arcDirective" | "moodDirective" | "directivePriority" | "hookExecutionPhase" | "titleDirective"> {
+    const rawMoodDirective = this.buildMoodDirective(input.language, input.cadence);
+    const rawSceneDirective = this.buildSceneDirective(input.language, input.cadence);
+    const chapterMode = this.resolveChapterMode({
+      moodDirective: rawMoodDirective,
+      sceneDirective: rawSceneDirective,
+    });
+    const sceneDirective = chapterMode === "breath"
+      ? this.buildBreathSceneIsolationDirective(
+        this.removeEscalationFromSceneDirective(rawSceneDirective),
+        input.language,
+      )
+      : rawSceneDirective;
+    const moodDirective = chapterMode !== "breath" && rawMoodDirective?.targetMode === "breath"
+      ? undefined
+      : rawMoodDirective;
+    const endingType = this.resolveEndingType({
+      chapterMode,
+      goalIntensity: input.goalIntensity,
+      lastEndingType: input.lastEndingType,
+      recentEndingTypes: input.recentEndingTypes,
+    });
     return {
+      chapterMode,
+      endingType,
       arcDirective: this.buildArcDirective(
         input.language,
         input.volumeOutline,
@@ -666,10 +899,231 @@ export class PlannerAgent extends BaseAgent {
         input.matchedOutlineAnchor,
         input.arcMapDirective,
       ),
-      sceneDirective: this.buildSceneDirective(input.language, input.cadence),
-      moodDirective: this.buildMoodDirective(input.language, input.cadence),
+      sceneDirective,
+      moodDirective,
+      directivePriority: {
+        ordered: chapterMode === "breath"
+          ? ["mood-structure", "scene-plan", "payoff", "hook-emergence"]
+          : ["mood-structure", "scene-plan", "hook-emergence", "payoff"],
+      },
       titleDirective: this.buildTitleDirective(input.language, input.cadence),
     };
+  }
+
+  private applyBreathHookGovernance(input: {
+    readonly directives: Pick<ChapterIntent, "chapterMode" | "endingType" | "sceneDirective" | "arcDirective" | "moodDirective" | "directivePriority" | "hookExecutionPhase" | "titleDirective">;
+    readonly hookAgenda: ChapterIntent["hookAgenda"];
+    readonly hookEmergence: HookEmergenceDirective;
+    readonly language: "zh" | "en";
+  }): {
+    readonly directives: Pick<ChapterIntent, "chapterMode" | "endingType" | "sceneDirective" | "arcDirective" | "moodDirective" | "directivePriority" | "hookExecutionPhase" | "titleDirective">;
+    readonly hookAgenda: ChapterIntent["hookAgenda"];
+    readonly hookEmergence: HookEmergenceDirective;
+    readonly conflict?: ChapterConflict;
+  } {
+    const isBreathChapter = input.directives.chapterMode === "breath"
+      || input.directives.moodDirective?.targetMode === "breath";
+    if (!isBreathChapter) {
+      return input;
+    }
+
+    const downgradedPressureStates = input.hookEmergence.pressureStates.map((entry) => (
+      entry.state === "must-resolve-now"
+        ? { ...entry, state: "soft-progress" as const }
+        : entry
+    ));
+    const hadHardHook = input.hookEmergence.mustMaterializeHookNow
+      || input.hookEmergence.pressureStates.some((entry) => entry.state === "must-resolve-now");
+    const hadHardAgenda = input.hookAgenda.mustAdvance.length > 0 || input.hookAgenda.eligibleResolve.length > 0;
+    const downgradedHookAgenda: ChapterIntent["hookAgenda"] = {
+      ...input.hookAgenda,
+      mustAdvance: [],
+      eligibleResolve: [],
+      pressureMap: input.hookAgenda.pressureMap.map((entry) => ({
+        ...entry,
+        movement: entry.movement === "advance" || entry.movement === "partial-payoff" || entry.movement === "full-payoff"
+          ? "refresh"
+          : entry.movement,
+        pressure: entry.pressure === "critical" || entry.pressure === "high"
+          ? "medium"
+          : entry.pressure,
+      })),
+    };
+
+    if (!hadHardHook && !hadHardAgenda) {
+      return {
+        ...input,
+        hookAgenda: downgradedHookAgenda,
+        hookEmergence: {
+          ...input.hookEmergence,
+          pressureStates: downgradedPressureStates,
+          mustMaterializeHookNow: false,
+          hookExecutionPhase: undefined,
+          targetHook: undefined,
+        },
+      };
+    }
+
+    const directiveNote = input.language === "zh"
+      ? "breath-hook-downgrade：mood directive 优先于 hook emergence；must-resolve-now hook 本章降级为 soft-progress，只允许 minor signal / resource hint / 感知变化，不得产生状态跃迁、强制回收或完全兑现。"
+      : "breath-hook-downgrade: mood directive has priority over hook emergence; must-resolve-now hooks are downgraded to soft-progress this chapter. Allow only minor signal / resource hint / perception shift, not state jumps, forced resolution, or full payoff.";
+
+    return {
+      directives: {
+        ...input.directives,
+        hookExecutionPhase: undefined,
+        sceneDirective: this.unique([
+          input.directives.sceneDirective,
+          directiveNote,
+        ].filter((value): value is string => Boolean(value && value.trim().length > 0))).join(" "),
+      },
+      hookAgenda: downgradedHookAgenda,
+      hookEmergence: {
+        pressureStates: downgradedPressureStates,
+        mustMaterializeHookNow: false,
+      },
+      conflict: {
+        type: "breath_hook_downgrade",
+        resolution: "mood directive has priority over hook emergence in breath mode",
+        detail: directiveNote,
+      },
+    };
+  }
+
+  private applyPayoffHookGovernance(input: {
+    readonly chapterGoal: ChapterGoal;
+    readonly directives: Pick<ChapterIntent, "chapterMode" | "endingType" | "sceneDirective" | "arcDirective" | "moodDirective" | "directivePriority" | "hookExecutionPhase" | "titleDirective">;
+    readonly hookAgenda: ChapterIntent["hookAgenda"];
+    readonly hookEmergence: HookEmergenceDirective;
+    readonly language: "zh" | "en";
+  }): {
+    readonly directives: Pick<ChapterIntent, "chapterMode" | "endingType" | "sceneDirective" | "arcDirective" | "moodDirective" | "directivePriority" | "hookExecutionPhase" | "titleDirective">;
+    readonly hookAgenda: ChapterIntent["hookAgenda"];
+    readonly hookEmergence: HookEmergenceDirective;
+    readonly conflict?: ChapterConflict;
+  } {
+    const promisedPayoff = this.normalizeMeaningfulText(
+      input.chapterGoal.payoffDirective?.promisedPayoff ?? input.chapterGoal.payoffToDeliver,
+    );
+    if (!promisedPayoff || !input.hookEmergence.mustMaterializeHookNow) {
+      return input;
+    }
+
+    const downgradedPressureStates = input.hookEmergence.pressureStates.map((entry) => (
+      entry.state === "must-resolve-now"
+        ? { ...entry, state: "soft-progress" as const }
+        : entry
+    ));
+    const primaryHookId = input.hookEmergence.targetHook?.hookId
+      ?? this.pickPrimaryHookForSceneBudget(input.hookAgenda);
+    const downgradedHookAgenda: ChapterIntent["hookAgenda"] = {
+      ...input.hookAgenda,
+      mustAdvance: [],
+      eligibleResolve: [],
+      staleDebt: primaryHookId
+        ? input.hookAgenda.staleDebt.filter((hookId) => hookId === primaryHookId)
+        : input.hookAgenda.staleDebt,
+      pressureMap: primaryHookId
+        ? input.hookAgenda.pressureMap
+          .filter((entry) => entry.hookId === primaryHookId)
+          .map((entry) => ({
+            ...entry,
+            movement: entry.movement === "advance" || entry.movement === "partial-payoff" || entry.movement === "full-payoff"
+              ? "refresh"
+              : entry.movement,
+            pressure: entry.pressure === "critical" || entry.pressure === "high"
+              ? "medium"
+              : entry.pressure,
+          }))
+        : input.hookAgenda.pressureMap.map((entry) => ({
+          ...entry,
+          movement: entry.movement === "advance" || entry.movement === "partial-payoff" || entry.movement === "full-payoff"
+            ? "refresh"
+            : entry.movement,
+          pressure: entry.pressure === "critical" || entry.pressure === "high"
+            ? "medium"
+            : entry.pressure,
+        })),
+    };
+
+    const directiveNote = input.language === "zh"
+      ? "payoff-hook-priority：当本章存在 payoffToDeliver 时，payoff 优先于 must-resolve-now hook；该 hook 本章降级为 soft-progress，只允许轻微信号、资源提示或感知变化，不得与 payoff 同章 fully materialize。"
+      : "payoff-hook-priority: when a chapter has payoffToDeliver, payoff takes priority over a must-resolve-now hook; the hook is downgraded to soft-progress this chapter and may only surface as a minor signal, resource hint, or perception shift, never fully materializing alongside the payoff.";
+
+    return {
+      directives: {
+        ...input.directives,
+        hookExecutionPhase: undefined,
+        sceneDirective: this.unique([
+          input.directives.sceneDirective,
+          directiveNote,
+        ].filter((value): value is string => Boolean(value && value.trim().length > 0))).join(" "),
+      },
+      hookAgenda: downgradedHookAgenda,
+      hookEmergence: {
+        pressureStates: downgradedPressureStates,
+        mustMaterializeHookNow: false,
+      },
+      conflict: {
+        type: "payoff_hook_priority",
+        resolution: "payoff takes priority and the urgent hook is deferred to soft-progress",
+        detail: primaryHookId
+          ? `${promisedPayoff} > ${primaryHookId}`
+          : promisedPayoff,
+      },
+    };
+  }
+
+  private resolveEndingType(input: {
+    readonly chapterMode?: ChapterIntent["chapterMode"];
+    readonly goalIntensity: GoalIntensity;
+    readonly lastEndingType?: EndingType;
+    readonly recentEndingTypes: ReadonlyArray<EndingType>;
+  }): EndingType {
+    const base = this.selectBaseEndingType(input.chapterMode, input.goalIntensity);
+    const recentSet = new Set(input.recentEndingTypes);
+
+    const preferredOrder: ReadonlyArray<EndingType> = [
+      "calm_end",
+      "reveal_end",
+      "resolution_end",
+      "twist_end",
+      "unresolved_end",
+    ];
+
+    if (base !== input.lastEndingType && !recentSet.has(base)) {
+      return base;
+    }
+
+    const nonRecent = preferredOrder.find((candidate) => candidate !== input.lastEndingType && !recentSet.has(candidate));
+    if (nonRecent) {
+      return nonRecent;
+    }
+
+    const nonDuplicate = preferredOrder.find((candidate) => candidate !== input.lastEndingType);
+    return nonDuplicate ?? base;
+  }
+
+  private selectBaseEndingType(
+    chapterMode: ChapterIntent["chapterMode"] | undefined,
+    goalIntensity: GoalIntensity,
+  ): EndingType {
+    if (chapterMode === "breath") {
+      return "calm_end";
+    }
+    if (chapterMode === "reveal") {
+      return "reveal_end";
+    }
+    if (chapterMode === "escalation" || chapterMode === "combat") {
+      return goalIntensity === "high" ? "unresolved_end" : "twist_end";
+    }
+    if (goalIntensity === "high") {
+      return "unresolved_end";
+    }
+    if (goalIntensity === "medium") {
+      return "twist_end";
+    }
+    return "resolution_end";
   }
 
   private deriveGoal(
@@ -696,6 +1150,199 @@ export class PlannerAgent extends BaseAgent {
     const arcHint = this.extractFirstDirective(arcGoalHint);
     if (arcHint) return arcHint;
     return `Advance chapter ${chapterNumber} with clear narrative focus.`;
+  }
+
+  private ensureGoalFallback(input: {
+    readonly goal: string;
+    readonly currentState: string;
+    readonly chapterSummaries: string;
+    readonly pendingHooksRaw: string;
+    readonly chapterNumber: number;
+    readonly language: "zh" | "en";
+    readonly moodDirective?: MoodDirective;
+  }): string {
+    const candidate = this.normalizeMeaningfulText(input.goal);
+    if (candidate && !this.isGenericGoalTemplate(candidate)) {
+      return candidate;
+    }
+    return this.deriveMinimalGoalFromStateContext(input);
+  }
+
+  private ensureChapterGoalFallback(input: {
+    readonly chapterGoal: ChapterGoal;
+    readonly goal: string;
+    readonly currentState: string;
+    readonly chapterSummaries: string;
+    readonly pendingHooksRaw: string;
+    readonly chapterNumber: number;
+    readonly language: "zh" | "en";
+    readonly moodDirective?: MoodDirective;
+  }): ChapterGoal {
+    const fallbackMainConflict = this.deriveMinimalMainConflictFromStateContext(input);
+    const fallbackProtagonistGoal = this.deriveMinimalGoalFromStateContext({
+      goal: input.goal,
+      currentState: input.currentState,
+      chapterSummaries: input.chapterSummaries,
+      pendingHooksRaw: input.pendingHooksRaw,
+      chapterNumber: input.chapterNumber,
+      language: input.language,
+      moodDirective: input.moodDirective,
+    });
+    const mainConflict = this.normalizeMeaningfulText(input.chapterGoal.mainConflict) ?? fallbackMainConflict;
+    const protagonistGoal = this.normalizeMeaningfulText(input.chapterGoal.protagonistGoal) ?? fallbackProtagonistGoal;
+    return {
+      ...input.chapterGoal,
+      mainConflict,
+      protagonistGoal,
+    };
+  }
+
+  private deriveMinimalGoalFromStateContext(input: {
+    readonly goal: string;
+    readonly currentState: string;
+    readonly chapterSummaries: string;
+    readonly pendingHooksRaw: string;
+    readonly chapterNumber: number;
+    readonly language: "zh" | "en";
+    readonly moodDirective?: MoodDirective;
+  }): string {
+    const stateFacts = parseCurrentStateFacts(input.currentState, Math.max(0, input.chapterNumber - 1));
+    const latestSummary = parseChapterSummariesMarkdown(input.chapterSummaries)
+      .filter((summary) => summary.chapter < input.chapterNumber)
+      .sort((left, right) => right.chapter - left.chapter)[0];
+    const pendingHook = parsePendingHooksMarkdown(input.pendingHooksRaw)
+      .filter((hook) => !/^(resolved|deferred|closed|done|已解决|已回收)$/i.test(hook.status.trim()))
+      .sort((left, right) => left.lastAdvancedChapter - right.lastAdvancedChapter || left.startChapter - right.startChapter)[0];
+
+    const stateGoal = this.findStateFactValue(stateFacts, ["current goal", "当前目标"]);
+    const summaryGoal = this.normalizeMeaningfulText(latestSummary?.events);
+    const hookGoal = this.normalizeMeaningfulText(pendingHook?.expectedPayoff) ?? this.normalizeMeaningfulText(pendingHook?.notes);
+    const breathDefault = input.language === "zh"
+      ? "恢复伤势、稳定状态，并讨论下一步行动。"
+      : "Recover, stabilize, and align on the next step.";
+    const genericDefault = input.language === "zh"
+      ? "推动本章形成一个清晰且可执行的低强度目标。"
+      : `Advance chapter ${input.chapterNumber} with one clear, executable goal.`;
+
+    return this.firstMeaningful([
+      stateGoal,
+      summaryGoal,
+      hookGoal,
+      this.normalizeMeaningfulText(input.goal),
+      input.moodDirective?.targetMode === "breath" ? breathDefault : undefined,
+      genericDefault,
+    ]) ?? genericDefault;
+  }
+
+  private deriveMinimalMainConflictFromStateContext(input: {
+    readonly currentState: string;
+    readonly chapterSummaries: string;
+    readonly pendingHooksRaw: string;
+    readonly chapterNumber: number;
+    readonly language: "zh" | "en";
+    readonly moodDirective?: MoodDirective;
+  }): string {
+    const stateFacts = parseCurrentStateFacts(input.currentState, Math.max(0, input.chapterNumber - 1));
+    const latestSummary = parseChapterSummariesMarkdown(input.chapterSummaries)
+      .filter((summary) => summary.chapter < input.chapterNumber)
+      .sort((left, right) => right.chapter - left.chapter)[0];
+    const pendingHook = parsePendingHooksMarkdown(input.pendingHooksRaw)
+      .filter((hook) => !/^(resolved|deferred|closed|done|已解决|已回收)$/i.test(hook.status.trim()))
+      .sort((left, right) => left.lastAdvancedChapter - right.lastAdvancedChapter || left.startChapter - right.startChapter)[0];
+
+    const stateConflict = this.findStateFactValue(stateFacts, ["current conflict", "当前冲突"]);
+    const summaryConflict = this.normalizeMeaningfulText(latestSummary?.stateChanges)
+      ?? this.normalizeMeaningfulText(latestSummary?.events);
+    const hookPressure = this.normalizeMeaningfulText(pendingHook?.notes)
+      ?? this.normalizeMeaningfulText(pendingHook?.expectedPayoff);
+    const breathDefault = input.language === "zh"
+      ? "伤势与外部压力仍在，必须在短暂喘息中稳住局面。"
+      : "Injury and external pressure remain, so the chapter must stabilize during a brief breathing window.";
+    const genericDefault = input.language === "zh"
+      ? "本章需要围绕一条可持续升级的核心冲突推进。"
+      : "The chapter needs one core conflict that can escalate in a controlled way.";
+
+    return this.firstMeaningful([
+      stateConflict,
+      summaryConflict,
+      hookPressure,
+      input.moodDirective?.targetMode === "breath" ? breathDefault : undefined,
+      genericDefault,
+    ]) ?? genericDefault;
+  }
+
+  private findStateFactValue(
+    facts: ReadonlyArray<{ predicate: string; object: string }>,
+    labels: ReadonlyArray<string>,
+  ): string | undefined {
+    const match = facts.find((fact) =>
+      labels.some((label) => fact.predicate.trim().toLowerCase() === label.trim().toLowerCase()),
+    );
+    return this.normalizeMeaningfulText(match?.object);
+  }
+
+  private normalizeMeaningfulText(value: string | undefined): string | undefined {
+    if (!value) return undefined;
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    if (this.isTemplatePlaceholder(trimmed)) return undefined;
+    if (
+      /^(?:\(|（)?\s*(todo|tbd|none|null|n\/a|无|空白|待补充|未定义|状态未同步)\s*(?:\)|）)?$/iu.test(trimmed)
+    ) {
+      return undefined;
+    }
+    return trimmed;
+  }
+
+  private isGenericGoalTemplate(goal: string): boolean {
+    return /^advance chapter \d+ with clear narrative focus\.?$/i.test(goal.trim());
+  }
+
+  private inferGoalIntensity(goal: string): GoalIntensity {
+    const normalized = goal.trim();
+    if (!normalized) return "medium";
+
+    if (/(生死抉择|终局对抗|核心反转|必须立即行动|立刻行动|谁先死|final confrontation|life[- ]or[- ]death|must act now|core reversal|last stand)/i.test(normalized)) {
+      return "high";
+    }
+    if (/(休整|恢复|疗伤|讨论|计划|交换情报|温和推进|低强度|breath|recovery|regroup|discussion|planning|low[- ]intensity)/i.test(normalized)) {
+      return "low";
+    }
+    return "medium";
+  }
+
+  private arbitrateGoalWithMood(input: {
+    readonly goal: string;
+    readonly goalIntensity: GoalIntensity;
+    readonly moodDirective?: MoodDirective;
+    readonly language: "zh" | "en";
+  }): GoalArbitrationResult {
+    if (input.moodDirective?.targetMode !== "breath" || input.goalIntensity !== "high") {
+      return {
+        goal: input.goal,
+        goalIntensity: input.goalIntensity,
+        mustAvoid: [],
+      };
+    }
+
+    const downgradedGoal = input.language === "zh"
+      ? `先进行休整与讨论，延后最终决断：${input.goal}`
+      : `Prioritize regroup and deliberation first, and defer final life-or-death decisions: ${input.goal}`;
+
+    return {
+      goal: downgradedGoal,
+      goalIntensity: "medium",
+      mustAvoid: [
+        input.language === "zh"
+          ? "breath 章禁止生死抉择、终局对抗、核心反转、或必须立即行动的危机目标。"
+          : "Breath chapters must not center on life-or-death choices, final confrontation, core reversal, or immediate must-act-now crisis goals.",
+      ],
+      conflict: {
+        type: "goal_mood_arbitration",
+        resolution: "downgrade high-intensity goal to breath-compatible deliberation",
+        detail: downgradedGoal,
+      },
+    };
   }
 
   private collectMustKeep(currentState: string, storyBible: string): string[] {
@@ -915,6 +1562,43 @@ export class PlannerAgent extends BaseAgent {
         ];
   }
 
+  private resolveChapterMode(input: {
+    readonly moodDirective?: MoodDirective;
+    readonly sceneDirective?: string;
+  }): NonNullable<ChapterIntent["chapterMode"]> | undefined {
+    if (input.moodDirective?.targetMode === "breath") {
+      return "breath";
+    }
+
+    const scene = input.sceneDirective?.toLowerCase() ?? "";
+    if (/(force tension escalation|force chapter type:\s*escalation|force confrontation|escalation override|强制升压|对抗升级)/i.test(scene)) {
+      return "escalation";
+    }
+    if (/(confrontation|combat|battle|厮杀|战斗|对抗)/i.test(scene)) {
+      return "combat";
+    }
+    if (/(reveal|揭示|揭晓|真相)/i.test(scene)) {
+      return "reveal";
+    }
+    return undefined;
+  }
+
+  private removeEscalationFromSceneDirective(sceneDirective: string | undefined): string | undefined {
+    if (!sceneDirective) {
+      return undefined;
+    }
+
+    const stripped = sceneDirective
+      .replace(/Force tension escalation this chapter\.\s*/giu, "")
+      .replace(/Do not produce a third consecutive breathing chapter\.\s*/giu, "")
+      .replace(/Force chapter type:\s*escalation\s*\/\s*confrontation\s*\/\s*discovery-under-threat\.\s*/giu, "")
+      .replace(/Force confrontation\.\s*/giu, "")
+      .replace(/escalation override\.?\s*/giu, "")
+      .trim();
+
+    return stripped.length > 0 ? stripped : undefined;
+  }
+
   private applyCadenceChapterGoalOverrides(
     chapterGoal: ChapterGoal,
     cadence: ReturnType<typeof analyzeChapterCadence>,
@@ -931,6 +1615,981 @@ export class PlannerAgent extends BaseAgent {
       ...chapterGoal,
       endingHookType: this.pickEscalationEndingHookType(chapterGoal),
     };
+  }
+
+  private applyPayoffDirectiveGovernance(
+    chapterGoal: ChapterGoal,
+    language: "zh" | "en",
+  ): {
+    readonly chapterGoal: ChapterGoal;
+    readonly mustAvoid: ReadonlyArray<string>;
+  } {
+    const payoffDirective = chapterGoal.payoffDirective;
+    if (!payoffDirective) {
+      return {
+        chapterGoal,
+        mustAvoid: [],
+      };
+    }
+
+    const payoffDepth = payoffDirective.payoffDepth ?? "layered";
+    const payoffScope = payoffDirective.payoffScope ?? (payoffDepth === "layered" ? "arc" : "chapter");
+    const isLayeredArc = payoffDepth === "layered" && payoffScope === "arc";
+    const governedGoal: ChapterGoal = {
+      ...chapterGoal,
+      payoffDirective: {
+        ...payoffDirective,
+        payoffDepth,
+        payoffScope,
+        // Semantics: mandatoryByFinalAct now means "must be realized by the end of the payoffScope".
+        // For layered+arc promises, do not force full chapter-level realization.
+        mandatoryByFinalAct: isLayeredArc ? false : payoffDirective.mandatoryByFinalAct,
+      },
+      ...(isLayeredArc ? { maxRevealLayersPerChapter: 1 } : {}),
+    };
+
+    if (!isLayeredArc) {
+      return {
+        chapterGoal: governedGoal,
+        mustAvoid: [],
+      };
+    }
+
+    return {
+      chapterGoal: governedGoal,
+      mustAvoid: [
+        language === "zh"
+          ? "本章禁止完全解释该 payoff，只允许 partial reveal（一层）。"
+          : "Do not fully explain this payoff in one chapter; allow only a partial reveal (one layer).",
+      ],
+    };
+  }
+
+  private enforceSingleChapterPayoff(input: {
+    readonly chapterGoal: ChapterGoal;
+    readonly language: "zh" | "en";
+  }): {
+    readonly chapterGoal: ChapterGoal;
+    readonly directiveNote?: string;
+  } {
+    const payoff = this.normalizeMeaningfulText(input.chapterGoal.payoffToDeliver);
+    if (!payoff) {
+      return {
+        chapterGoal: input.chapterGoal,
+      };
+    }
+
+    const segments = this.splitCompositePayoff(payoff);
+    if (segments.length <= 1) {
+      return {
+        chapterGoal: input.chapterGoal,
+      };
+    }
+
+    const primaryPayoff = this.pickPrimaryPayoffSegment(segments);
+    const deferredPayoffs = segments.filter((segment) => segment !== primaryPayoff);
+    if (deferredPayoffs.length === 0) {
+      return {
+        chapterGoal: input.chapterGoal,
+      };
+    }
+
+    const deferredText = deferredPayoffs.join(input.language === "zh" ? "、" : " and ");
+    const rewrittenPull = this.composeDeferredPayoffPull({
+      language: input.language,
+      primaryPayoff,
+      deferredText,
+      existingPull: input.chapterGoal.nextChapterPull,
+    });
+    const directiveNote = input.language === "zh"
+      ? `本章 payoff 只保留“${primaryPayoff}”；“${deferredText}”转入后续推进，不要试图在单章内同时完成。`
+      : `Keep this chapter payoff to "${primaryPayoff}" only; defer "${deferredText}" into follow-up pressure instead of completing both in one chapter.`;
+
+    return {
+      chapterGoal: {
+        ...input.chapterGoal,
+        payoffToDeliver: primaryPayoff,
+        nextChapterPull: rewrittenPull,
+        ...(input.chapterGoal.payoffDirective
+          ? {
+            payoffDirective: {
+              ...input.chapterGoal.payoffDirective,
+              promisedPayoff: primaryPayoff,
+            },
+          }
+          : {}),
+      },
+      directiveNote,
+    };
+  }
+
+  private applySinglePayoffDirectiveNote(
+    input: {
+      readonly directives: Pick<ChapterIntent, "chapterMode" | "endingType" | "sceneDirective" | "arcDirective" | "moodDirective" | "directivePriority" | "hookExecutionPhase" | "titleDirective">;
+      readonly directiveNote?: string;
+    },
+  ): Pick<ChapterIntent, "chapterMode" | "endingType" | "sceneDirective" | "arcDirective" | "moodDirective" | "directivePriority" | "hookExecutionPhase" | "titleDirective"> {
+    if (!input.directiveNote) {
+      return input.directives;
+    }
+
+    return {
+      ...input.directives,
+      sceneDirective: this.unique([
+        input.directives.sceneDirective,
+        input.directiveNote,
+      ].filter((value): value is string => Boolean(value && value.trim().length > 0))).join(" "),
+    };
+  }
+
+  private enforceConcreteEventPayoff(input: {
+    readonly chapterGoal: ChapterGoal;
+    readonly language: "zh" | "en";
+    readonly currentState: string;
+  }): {
+    readonly chapterGoal: ChapterGoal;
+    readonly directiveNote?: string;
+    readonly conflict?: ChapterConflict;
+  } {
+    const payoff = this.normalizeMeaningfulText(input.chapterGoal.payoffToDeliver);
+    if (!payoff || this.isConcreteEventPayoff(payoff)) {
+      return {
+        chapterGoal: input.chapterGoal,
+      };
+    }
+
+    const rewrittenPayoff = this.deriveConcreteEventPayoff({
+      chapterGoal: input.chapterGoal,
+      currentState: input.currentState,
+      language: input.language,
+    });
+    if (!rewrittenPayoff || rewrittenPayoff === payoff) {
+      return {
+        chapterGoal: input.chapterGoal,
+      };
+    }
+
+    return {
+      chapterGoal: {
+        ...input.chapterGoal,
+        payoffToDeliver: rewrittenPayoff,
+        ...(input.chapterGoal.payoffDirective
+          ? {
+            payoffDirective: {
+              ...input.chapterGoal.payoffDirective,
+              promisedPayoff: rewrittenPayoff,
+            },
+          }
+          : {}),
+      },
+      directiveNote: input.language === "zh"
+        ? `payoff-non-event：原 payoff“${payoff}”不可直接书写，已改为具体事件“${rewrittenPayoff}”。`
+        : `payoff-non-event: original payoff "${payoff}" was not directly writable, so it was rewritten as the concrete event "${rewrittenPayoff}".`,
+      conflict: {
+        type: "payoff-non-event",
+        resolution: "rewrite payoff as one concrete, writable event",
+        detail: `${payoff} -> ${rewrittenPayoff}`,
+      },
+    };
+  }
+
+  private enforceExecutableRevealPayoff(input: {
+    readonly chapterGoal: ChapterGoal;
+    readonly language: "zh" | "en";
+    readonly currentState: string;
+    readonly chapterSummaries: string;
+  }): {
+    readonly chapterGoal: ChapterGoal;
+    readonly directiveNote?: string;
+    readonly conflict?: ChapterConflict;
+  } {
+    const payoffType = input.chapterGoal.payoffDirective?.payoffType;
+    const payoff = this.normalizeMeaningfulText(input.chapterGoal.payoffToDeliver);
+    if (payoffType !== "reveal" || !payoff) {
+      return {
+        chapterGoal: input.chapterGoal,
+      };
+    }
+
+    if (this.hasExecutableRevealGap({
+      payoff,
+      currentState: input.currentState,
+      chapterSummaries: input.chapterSummaries,
+    })) {
+      return {
+        chapterGoal: input.chapterGoal,
+      };
+    }
+
+    const rewrittenPayoff = this.deriveExecutableRevealPayoff({
+      chapterGoal: input.chapterGoal,
+      currentState: input.currentState,
+      chapterSummaries: input.chapterSummaries,
+      language: input.language,
+    });
+    if (!rewrittenPayoff || rewrittenPayoff === payoff) {
+      return {
+        chapterGoal: input.chapterGoal,
+      };
+    }
+
+    return {
+      chapterGoal: {
+        ...input.chapterGoal,
+        payoffToDeliver: rewrittenPayoff,
+        ...(input.chapterGoal.payoffDirective
+          ? {
+            payoffDirective: {
+              ...input.chapterGoal.payoffDirective,
+              promisedPayoff: rewrittenPayoff,
+            },
+          }
+          : {}),
+      },
+      directiveNote: input.language === "zh"
+        ? `reveal-gap-check：原 reveal payoff“${payoff}”缺少可执行信息差，已改写为“${rewrittenPayoff}”。禁止重复揭示同一信息。`
+        : `reveal-gap-check: the reveal payoff "${payoff}" had no executable information gap, so it was rewritten as "${rewrittenPayoff}". Do not reveal the same information twice.`,
+      conflict: {
+        type: "reveal-gap-check",
+        resolution: "rewrite repeated or non-executable reveal into deeper reveal/application/consequence",
+        detail: `${payoff} -> ${rewrittenPayoff}`,
+      },
+    };
+  }
+
+  private enforceBreathCompatiblePayoff(input: {
+    readonly chapterGoal: ChapterGoal;
+    readonly directives: Pick<ChapterIntent, "chapterMode" | "endingType" | "sceneDirective" | "arcDirective" | "moodDirective" | "directivePriority" | "hookExecutionPhase" | "titleDirective">;
+    readonly language: "zh" | "en";
+    readonly currentState: string;
+  }): {
+    readonly chapterGoal: ChapterGoal;
+    readonly directiveNote?: string;
+    readonly conflict?: ChapterConflict;
+  } {
+    const isBreathChapter = input.directives.chapterMode === "breath"
+      || input.directives.moodDirective?.targetMode === "breath";
+    if (!isBreathChapter) {
+      return {
+        chapterGoal: input.chapterGoal,
+      };
+    }
+
+    const payoff = this.normalizeMeaningfulText(input.chapterGoal.payoffToDeliver);
+    if (!payoff || !this.isHighPressureBreathPayoff(input.chapterGoal)) {
+      return {
+        chapterGoal: input.chapterGoal,
+      };
+    }
+
+    const rewrittenPayoff = this.deriveLowPressureBreathPayoff({
+      chapterGoal: input.chapterGoal,
+      currentState: input.currentState,
+      language: input.language,
+    });
+    const nextPull = this.composeBreathDeferredPressurePull({
+      language: input.language,
+      originalPayoff: payoff,
+      existingPull: input.chapterGoal.nextChapterPull,
+    });
+
+    return {
+      chapterGoal: {
+        ...input.chapterGoal,
+        payoffToDeliver: rewrittenPayoff,
+        nextChapterPull: nextPull,
+        payoffDirective: {
+          promisedPayoff: rewrittenPayoff,
+          payoffType: this.inferLowPressurePayoffType(rewrittenPayoff),
+          payoffDepth: input.chapterGoal.payoffDirective?.payoffDepth ?? "layered",
+          payoffScope: input.chapterGoal.payoffDirective?.payoffScope ?? "chapter",
+          mandatoryByFinalAct: input.chapterGoal.payoffDirective?.mandatoryByFinalAct ?? true,
+        },
+      },
+      directiveNote: input.language === "zh"
+        ? `breath-payoff-downgrade：原 payoff“${payoff}”属于高压推进，已降级为“${rewrittenPayoff}”；原压力只能作为 scene2 的轻微尾钩，不得在 scene1 fully materialize。`
+        : `breath-payoff-downgrade: original payoff "${payoff}" was too high-pressure for breath mode, so it was downgraded to "${rewrittenPayoff}"; the original pressure may only appear as a light Scene2 tail hook and must not fully materialize in Scene1.`,
+      conflict: {
+        type: "breath-payoff-downgrade",
+        resolution: "downgrade high-pressure payoff into recovery/resource/relationship/minor-discovery event",
+        detail: `${payoff} -> ${rewrittenPayoff}`,
+      },
+    };
+  }
+
+  private isHighPressureBreathPayoff(chapterGoal: ChapterGoal): boolean {
+    const payoffType = chapterGoal.payoffDirective?.payoffType;
+    const source = [
+      chapterGoal.payoffToDeliver,
+      chapterGoal.payoffDirective?.promisedPayoff,
+      chapterGoal.mainConflict,
+      chapterGoal.protagonistGoal,
+    ].filter((value): value is string => Boolean(value && value.trim().length > 0)).join(" ");
+
+    if (payoffType === "reversal") {
+      return true;
+    }
+
+    if (this.isAllowedBreathPayoff(source, payoffType)) {
+      return false;
+    }
+
+    return /(规则压制|规则压力|风暴|追杀|追兵围杀|围杀|杀机|濒死|生死|血战|爆发|反噬失控|威胁逼近|笼罩全身|压制全身|强冲突反转|storm|pursuit|chase|kill intent|life[- ]or[- ]death|high[- ]pressure|pressure crushes|rule pressure)/iu.test(source);
+  }
+
+  private isAllowedBreathPayoff(source: string, payoffType?: NonNullable<ChapterGoal["payoffDirective"]>["payoffType"]): boolean {
+    if (payoffType === "resource" || payoffType === "relationship") {
+      return true;
+    }
+
+    if (payoffType === "reveal" && /(轻信息|微弱|线索|痕迹|尚未完全|minor|small clue|trace)/iu.test(source)) {
+      return true;
+    }
+
+    return /(恢复|疗伤|止血|稳住|休整|补给|资源|地图|玉简|腰牌|线索|痕迹|微弱波动|尚未完全激活|关系|信任|结盟|recovery|recover|resource|clue|trace|relationship|minor discovery)/iu.test(source)
+      && !/(规则压制|规则压力|风暴|追杀|围杀|濒死|生死|强冲突反转|storm|pursuit|life[- ]or[- ]death|high[- ]pressure)/iu.test(source);
+  }
+
+  private deriveLowPressureBreathPayoff(input: {
+    readonly chapterGoal: ChapterGoal;
+    readonly currentState: string;
+    readonly language: "zh" | "en";
+  }): string {
+    const source = [
+      input.chapterGoal.payoffToDeliver,
+      input.chapterGoal.mainConflict,
+      input.chapterGoal.protagonistGoal,
+      input.chapterGoal.nextChapterPull,
+      input.currentState,
+    ].join(" ");
+
+    if (/(阵纹|法阵|禁纹|规则)/u.test(source)) {
+      return input.language === "zh"
+        ? "阵纹微弱波动，尚未完全激活"
+        : "the formation lines faintly stir without fully activating";
+    }
+    if (/(风暴|暴风|风眼)/u.test(source)) {
+      return input.language === "zh"
+        ? "风暴远处传来第一声低鸣"
+        : "the storm gives its first distant low rumble";
+    }
+    if (/(追杀|追兵|围杀|尾随)/u.test(source)) {
+      return input.language === "zh"
+        ? "远处追踪痕迹第一次显现"
+        : "the first distant trace of pursuit appears";
+    }
+    if (/(伤|血|反噬|经脉|气血)/u.test(source)) {
+      return input.language === "zh"
+        ? "伤势被暂时稳住"
+        : "the injury is temporarily stabilized";
+    }
+    if (/(云岚|关系|信任|同伴|结盟)/u.test(source)) {
+      return input.language === "zh"
+        ? "与关键人物建立一次低声信任"
+        : "a quiet trust beat forms with a key character";
+    }
+    if (/(地图|玉简|腰牌|令牌|资源|补给)/u.test(source)) {
+      return input.language === "zh"
+        ? "一份可立刻使用的小资源被确认"
+        : "a small usable resource is confirmed";
+    }
+
+    return input.language === "zh"
+      ? "一条轻微线索被发现"
+      : "a minor clue is discovered";
+  }
+
+  private inferLowPressurePayoffType(payoff: string): NonNullable<ChapterGoal["payoffDirective"]>["payoffType"] {
+    if (/(信任|关系|结盟|同伴|trust|relationship|alliance)/iu.test(payoff)) {
+      return "relationship";
+    }
+    if (/(资源|补给|地图|玉简|腰牌|令牌|resource|supply|map|token)/iu.test(payoff)) {
+      return "resource";
+    }
+    return "reveal";
+  }
+
+  private composeBreathDeferredPressurePull(input: {
+    readonly language: "zh" | "en";
+    readonly originalPayoff: string;
+    readonly existingPull: string;
+  }): string {
+    const existing = this.normalizeMeaningfulText(input.existingPull);
+    const deferred = input.language === "zh"
+      ? `原高压 payoff“${input.originalPayoff}”只作为下章压力，不在本章完全爆发。`
+      : `Keep the original high-pressure payoff "${input.originalPayoff}" as next-chapter pressure instead of fully detonating it here.`;
+    return this.unique([existing, deferred].filter((value): value is string => Boolean(value))).join(input.language === "zh" ? " " : " ");
+  }
+
+  private isConcreteEventPayoff(payoff: string): boolean {
+    const trimmed = payoff.trim();
+    if (!trimmed) {
+      return false;
+    }
+
+    if (
+      /(关键线索|明确线索|逃生线索|具体线索|第一条线索|first concrete clue|clear escape clue|key clue|concrete clue)/i.test(trimmed)
+      || /(拿到黑市腰牌|逃离追捕|暂时脱离当前压制|压住第一次反噬|地图锁孔第一次打开|玉简核心机制被触发)/u.test(trimmed)
+      || /(?:获得|拿到|揭开|发现|显现).{0,10}(关键线索|明确线索|逃生线索|地图信息)/u.test(trimmed)
+    ) {
+      return true;
+    }
+
+    if (
+      /\b\d+\s*[-~–—]\s*\d+\s*章\b/u.test(trimmed)
+      || /^\d+\s*[-~–—]\s*\d+\s*章$/u.test(trimmed)
+      || /^\d+\s*[-~–—]\s*\d+$/u.test(trimmed)
+      || /\b\d+\+\s*章\b/u.test(trimmed)
+      || /(?:短期|中期|长期|阶段|phase|arc|chapter range)/iu.test(trimmed)
+    ) {
+      return false;
+    }
+
+    if (
+      /(阶段推进|推进主线|推进剧情|当前推进|局势推进|形成优势|获得优势|争取优势|保持优势|有所推进|阶段性推进|继续推进|下一阶段|mainline progress|advance the phase|progress the arc|gain advantage|maintain advantage|move things forward)/i.test(trimmed)
+    ) {
+      return false;
+    }
+
+    if (
+      /^(?:优势|推进|进展|收益|资源|线索|机缘|突破机会|阶段目标)$/u.test(trimmed)
+    ) {
+      return false;
+    }
+
+    return /(触发|打开|拿到|夺下|获得|压住|觉醒|突破|点亮|揭开|解开|发现|找到|锁定|启动|扯开|击碎|稳住|显现|亮起|拿回|取到|激活|开启|awaken|breakthrough|get|gain|discover|find|open|unlock|trigger|stabilize|ignite|activate)/i.test(trimmed)
+      && !/(获得优势|形成优势|阶段推进|有所推进|局势推进)/u.test(trimmed);
+  }
+
+  private deriveConcreteEventPayoff(input: {
+    readonly chapterGoal: ChapterGoal;
+    readonly currentState: string;
+    readonly language: "zh" | "en";
+  }): string {
+    const source = [
+      input.chapterGoal.protagonistGoal,
+      input.chapterGoal.mainConflict,
+      input.chapterGoal.nextChapterPull,
+      input.currentState,
+    ].join(" ");
+
+    const matchedObject = this.extractPayoffEventObject(source);
+    if (matchedObject) {
+      if (/地图锁孔/u.test(matchedObject)) {
+        return input.language === "zh" ? "地图锁孔第一次打开" : "the map lock opens for the first time";
+      }
+      if (/玉简/u.test(matchedObject)) {
+        return input.language === "zh" ? "玉简核心机制被触发" : "the jade slip core mechanism is triggered";
+      }
+      if (/(地图|残图)/u.test(matchedObject)) {
+        return input.language === "zh" ? "地图关键路线第一次显现" : "the map's key route appears for the first time";
+      }
+      if (/(锁孔|机关|阵纹|禁纹|法阵)/u.test(matchedObject)) {
+        return input.language === "zh" ? `${matchedObject}第一次打开` : `the ${matchedObject} opens for the first time`;
+      }
+      if (/(腰牌|令牌|钥匙)/u.test(matchedObject)) {
+        if (input.language === "zh" && /黑市/u.test(source)) {
+          return `拿到黑市${matchedObject}`;
+        }
+        return input.language === "zh" ? `拿到${matchedObject}` : `secure the ${matchedObject}`;
+      }
+      if (/(卷轴|古卷|残卷|残页)/u.test(matchedObject)) {
+        return input.language === "zh" ? `${matchedObject}核心线索被揭开` : `a core clue in the ${matchedObject} is uncovered`;
+      }
+      if (/(石碑|古碑|碑纹)/u.test(matchedObject)) {
+        return input.language === "zh" ? `${matchedObject}第一次亮起` : `the ${matchedObject} lights up for the first time`;
+      }
+      if (/(入口|门|祭坛)/u.test(matchedObject)) {
+        return input.language === "zh" ? `${matchedObject}被强行打开` : `the ${matchedObject} is forced open`;
+      }
+    }
+
+    const inferredType = input.chapterGoal.payoffDirective?.payoffType;
+    switch (inferredType) {
+      case "reveal":
+        return input.language === "zh" ? "一条关键线索被当场揭开" : "a key clue is revealed on the spot";
+      case "resource":
+        return input.language === "zh" ? "一份可立刻使用的关键资源被拿到" : "a usable key resource is secured";
+      case "breakthrough":
+        return input.language === "zh" ? "第一次觉醒被当场触发" : "the first awakening is triggered on the spot";
+      case "relationship":
+        return input.language === "zh" ? "与关键人物达成一次明确结盟" : "a concrete alliance with a key character is formed";
+      default:
+        return input.language === "zh" ? "局势第一次发生明确反转" : "the situation turns in a clear, concrete way";
+    }
+  }
+
+  private hasExecutableRevealGap(input: {
+    readonly payoff: string;
+    readonly currentState: string;
+    readonly chapterSummaries: string;
+  }): boolean {
+    if (/(之谜|谜团|未明|未知|尚未|代价|限制|条件|为何|为什么|后果|只能|无法)/u.test(input.payoff)) {
+      return true;
+    }
+    const revealTarget = this.extractRevealTarget(input.payoff);
+    if (!revealTarget) {
+      return true;
+    }
+
+    const combined = [input.currentState, input.chapterSummaries].join(" ");
+    const hasTopic = combined.includes(revealTarget);
+    if (!hasTopic) {
+      return true;
+    }
+
+    const unresolvedPattern = new RegExp(
+      `${this.escapeRegex(revealTarget)}.{0,16}(未明|未知|尚未|不清楚|不明|谜|代价|限制|条件|如何|为什么|后果|缺口|漏洞|只能|无法)`,
+      "u",
+    );
+    if (unresolvedPattern.test(combined)) {
+      return true;
+    }
+
+    const repeatedKnownPattern = new RegExp(
+      `(已经|已|早已|再次|又|仍然|依旧).{0,12}${this.escapeRegex(revealTarget)}|${this.escapeRegex(revealTarget)}.{0,12}(已经|已|早已|再次|又|仍然|依旧)`,
+      "u",
+    );
+
+    return !repeatedKnownPattern.test(combined);
+  }
+
+  private deriveExecutableRevealPayoff(input: {
+    readonly chapterGoal: ChapterGoal;
+    readonly currentState: string;
+    readonly chapterSummaries: string;
+    readonly language: "zh" | "en";
+  }): string {
+    const payoff = this.normalizeMeaningfulText(input.chapterGoal.payoffToDeliver) ?? "";
+    const revealTarget = this.extractRevealTarget(payoff) ?? payoff;
+    const combined = [
+      input.chapterGoal.mainConflict,
+      input.chapterGoal.protagonistGoal,
+      input.chapterGoal.nextChapterPull,
+      input.currentState,
+      input.chapterSummaries,
+    ].join(" ");
+
+    if (/(漏洞|缺口|bug|loophole)/iu.test(revealTarget)) {
+      if (/(真名).{0,12}(消散|崩解|失控)/u.test(combined)) {
+        return input.language === "zh"
+          ? "发现漏洞无法阻止真名消散，只能转移代价"
+          : "discover that the loophole cannot stop the true-name collapse and can only redirect the cost";
+      }
+      if (/(代价|反噬|后果|cost|backlash|consequence)/iu.test(combined)) {
+        return input.language === "zh"
+          ? "发现漏洞的真正代价"
+          : "discover the loophole's true cost";
+      }
+      if (/(限制|条件|只适用|局限|limit|condition|only works)/iu.test(combined)) {
+        return input.language === "zh"
+          ? "发现漏洞的限制条件"
+          : "discover the loophole's limiting conditions";
+      }
+      return input.language === "zh"
+        ? "发现漏洞只适用于某种情况"
+        : "discover that the loophole only works under one condition";
+    }
+
+    if (/(来源|真相|秘密|身份|契约|线索|source|truth|secret|identity|contract|clue)/iu.test(revealTarget)) {
+      if (/(代价|反噬|后果|cost|backlash|consequence)/iu.test(combined)) {
+        return input.language === "zh"
+          ? `发现${revealTarget}的真正代价`
+          : `discover the true cost behind ${revealTarget}`;
+      }
+      if (/(限制|条件|局限|只在|only when|condition|limit)/iu.test(combined)) {
+        return input.language === "zh"
+          ? `发现${revealTarget}只在特定条件下成立`
+          : `discover that ${revealTarget} only holds under a specific condition`;
+      }
+      return input.language === "zh"
+        ? `发现${revealTarget}更深一层的真相`
+        : `discover a deeper layer behind ${revealTarget}`;
+    }
+
+    return input.language === "zh"
+      ? "发现这一认知突破背后的代价与限制"
+      : "discover the cost and limitation behind that reveal";
+  }
+
+  private extractPayoffEventObject(source: string): string | undefined {
+    const patterns = [
+      /(地图锁孔)/u,
+      /(玉简)/u,
+      /(地图|残图)/u,
+      /(锁孔|机关|阵纹|禁纹|法阵)/u,
+      /(腰牌|令牌|钥匙)/u,
+      /(卷轴|古卷|残卷|残页)/u,
+      /(石碑|古碑|碑纹)/u,
+      /(入口|门|祭坛)/u,
+    ];
+    return patterns
+      .map((pattern) => source.match(pattern)?.[1])
+      .find((value): value is string => Boolean(value && value.trim().length > 0));
+  }
+
+  private extractRevealTarget(payoff: string): string | undefined {
+    const normalized = payoff.trim();
+    const match = normalized.match(/(?:发现|揭开|揭示|看懂|明白|识破|认出|看清)(.+)$/u);
+    const candidate = this.normalizeMeaningfulText(match?.[1] ?? normalized);
+    if (!candidate) {
+      return undefined;
+    }
+    return candidate.replace(/^(?:了|到|出|这个|这一|该)/u, "").trim();
+  }
+
+  private escapeRegex(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  private applySceneBudget(input: {
+    readonly chapterGoal: ChapterGoal;
+    readonly hookAgenda: ChapterIntent["hookAgenda"];
+    readonly hookEmergence: HookEmergenceDirective;
+    readonly directives: Pick<ChapterIntent, "chapterMode" | "endingType" | "sceneDirective" | "arcDirective" | "moodDirective" | "directivePriority" | "hookExecutionPhase" | "titleDirective">;
+    readonly language: "zh" | "en";
+  }): {
+    readonly hookAgenda: ChapterIntent["hookAgenda"];
+    readonly directives: Pick<ChapterIntent, "chapterMode" | "endingType" | "sceneDirective" | "arcDirective" | "moodDirective" | "directivePriority" | "hookExecutionPhase" | "titleDirective">;
+    readonly mustAvoid: ReadonlyArray<string>;
+  } {
+    const promisedPayoff = this.normalizeMeaningfulText(input.chapterGoal.payoffToDeliver);
+    if (!promisedPayoff) {
+      return {
+        hookAgenda: input.hookAgenda,
+        directives: input.directives,
+        mustAvoid: [],
+      };
+    }
+
+    const primaryHookId = input.hookEmergence.mustMaterializeHookNow && input.hookEmergence.targetHook
+      ? input.hookEmergence.targetHook.hookId
+      : this.pickPrimaryHookForSceneBudget(input.hookAgenda);
+
+    const trimmedHookAgenda = primaryHookId
+      ? this.trimHookAgendaToPrimary(input.hookAgenda, primaryHookId)
+      : {
+        ...input.hookAgenda,
+        mustAdvance: [],
+        eligibleResolve: [],
+        staleDebt: [],
+        pressureMap: [],
+      };
+
+    const sceneBudgetLine = input.language === "zh"
+      ? "Scene Budget：本章最多只允许 1 个 payoff、1 个主 hook 推进，以及最多 1 次场景变化。"
+      : "Scene Budget: allow at most 1 payoff, 1 primary hook movement, and at most 1 scene/location change this chapter.";
+    const hookTrimLine = primaryHookId
+      ? input.language === "zh"
+        ? `本章已有 payoff，hook 推进只保留 ${primaryHookId}，其余 hook 延后。`
+        : `A payoff is already promised, so keep only ${primaryHookId} as the primary hook movement and defer the rest.`
+      : input.language === "zh"
+        ? "本章已有 payoff，不要再并行推进多个 hook。"
+        : "A payoff is already promised; do not parallel multiple hook movements in this chapter.";
+    const sceneDisciplineLine = input.language === "zh"
+      ? "禁止一章内多 hook 推进、多场景跳跃、多高潮叠加，优先把篇幅留给 payoff 完成。"
+      : "Do not stack multiple hook advances, scene jumps, or climax beats in one chapter; keep the page budget for payoff completion first.";
+
+    return {
+      hookAgenda: trimmedHookAgenda,
+      directives: {
+        ...input.directives,
+        sceneDirective: this.unique([
+          input.directives.sceneDirective,
+          sceneBudgetLine,
+          hookTrimLine,
+          sceneDisciplineLine,
+        ].filter((value): value is string => Boolean(value && value.trim().length > 0))).join(" "),
+      },
+      mustAvoid: [
+        input.language === "zh"
+          ? "本章不要并行推进多个 hook。"
+          : "Do not advance multiple hooks in parallel this chapter.",
+        input.language === "zh"
+          ? "本章不要安排多次场景/地点跳跃。"
+          : "Do not schedule multiple scene/location jumps this chapter.",
+        input.language === "zh"
+          ? "本章不要堆叠多个高潮。"
+          : "Do not stack multiple climax beats in this chapter.",
+      ],
+    };
+  }
+
+  private applyIntensityBudget(input: {
+    readonly chapterGoal: ChapterGoal;
+    readonly hookAgenda: ChapterIntent["hookAgenda"];
+    readonly directives: Pick<ChapterIntent, "chapterMode" | "endingType" | "sceneDirective" | "arcDirective" | "moodDirective" | "directivePriority" | "hookExecutionPhase" | "titleDirective">;
+    readonly language: "zh" | "en";
+  }): {
+    readonly hookAgenda: ChapterIntent["hookAgenda"];
+    readonly directives: Pick<ChapterIntent, "chapterMode" | "endingType" | "sceneDirective" | "arcDirective" | "moodDirective" | "directivePriority" | "hookExecutionPhase" | "titleDirective">;
+    readonly conflict?: ChapterConflict;
+  } {
+    const payoffType = input.chapterGoal.payoffDirective?.payoffType;
+    if (payoffType !== "breakthrough" && payoffType !== "reversal") {
+      return {
+        hookAgenda: input.hookAgenda,
+        directives: input.directives,
+      };
+    }
+
+    const source = [
+      input.chapterGoal.payoffToDeliver,
+      input.chapterGoal.payoffDirective?.promisedPayoff,
+      input.chapterGoal.mainConflict,
+      input.chapterGoal.protagonistGoal,
+      input.chapterGoal.nextChapterPull,
+    ].filter((value): value is string => Boolean(value && value.trim().length > 0)).join(" ");
+    const detectedCompetingClimaxes = this.detectCompetingClimaxSignals(source, payoffType);
+    const hasMultipleHooks = input.hookAgenda.mustAdvance.length
+      + input.hookAgenda.eligibleResolve.length
+      + input.hookAgenda.staleDebt.length > 1
+      || input.hookAgenda.pressureMap.length > 1;
+    const primaryHookId = this.pickPrimaryHookForSceneBudget(input.hookAgenda);
+    const trimmedHookAgenda = primaryHookId
+      ? this.trimHookAgendaToPrimary(input.hookAgenda, primaryHookId)
+      : {
+        ...input.hookAgenda,
+        mustAdvance: [],
+        eligibleResolve: [],
+        staleDebt: [],
+        pressureMap: [],
+      };
+    const shouldApplyBudget = detectedCompetingClimaxes.length > 0 || hasMultipleHooks;
+    if (!shouldApplyBudget) {
+      return {
+        hookAgenda: input.hookAgenda,
+        directives: input.directives,
+      };
+    }
+
+    const climaxList = detectedCompetingClimaxes.join(input.language === "zh" ? "、" : ", ");
+    const primaryHookLine = primaryHookId
+      ? input.language === "zh"
+        ? `本章 hook 只允许保留 ${primaryHookId} 作为次级变化，其余 hook 延后。`
+        : `Keep only ${primaryHookId} as the optional secondary change; defer other hooks.`
+      : input.language === "zh"
+        ? "本章不再额外推进 hook，把篇幅留给 payoff。"
+        : "Do not add extra hook movement; reserve the chapter for the payoff.";
+    const intensityLine = input.language === "zh"
+      ? "Intensity Budget：本章最多 1 个核心高潮（payoff）+ 1 个次级变化。payoffType 为 reversal/breakthrough 时，禁止身份反转、新能力解锁、多重人格变化、多 hook 推进同章叠加。"
+      : "Intensity Budget: allow at most 1 core climax (payoff) plus 1 optional secondary change. For reversal/breakthrough payoffs, do not stack identity reversal, new ability unlock, personality shift, or multiple hook advances in the same chapter.";
+    const splitLine = input.language === "zh"
+      ? `多高潮已拆分：${climaxList || "额外高潮"} 转入后续章节，优先级为 payoff > hook > world-change。`
+      : `Split overloaded climax material: ${climaxList || "extra climax beats"} moves to later chapters. Priority is payoff > hook > world-change.`;
+
+    return {
+      hookAgenda: trimmedHookAgenda,
+      directives: {
+        ...input.directives,
+        sceneDirective: this.unique([
+          input.directives.sceneDirective,
+          intensityLine,
+          primaryHookLine,
+          splitLine,
+        ].filter((value): value is string => Boolean(value && value.trim().length > 0))).join(" "),
+      },
+      conflict: {
+        type: "intensity_budget_split",
+        resolution: "split overloaded climax stack across chapters",
+        detail: climaxList || primaryHookLine,
+      },
+    };
+  }
+
+  private detectCompetingClimaxSignals(
+    source: string,
+    payoffType: NonNullable<NonNullable<ChapterGoal["payoffDirective"]>["payoffType"]>,
+  ): string[] {
+    const signals: string[] = [];
+    const has = (pattern: RegExp) => pattern.test(source);
+
+    if (payoffType === "breakthrough") {
+      if (has(/身份反转|身世反转|真实身份|血脉真相|不是.+而是|identity reversal|true identity/iu)) {
+        signals.push("identity reversal");
+      }
+      if (has(/新能力|新神通|新技能|解锁能力|能力解锁|掌握新能力|unlock(?:s|ed)? new ability|new power/iu)) {
+        signals.push("new ability unlock");
+      }
+    }
+
+    if (payoffType === "reversal" && has(/觉醒|突破|破境|晋阶|血脉苏醒|awaken|breakthrough|advance realm/iu)) {
+      signals.push("breakthrough");
+    }
+
+    if (has(/多重人格|人格变化|第二人格|人格切换|personality shift|second persona/iu)) {
+      signals.push("personality shift");
+    }
+    if (has(/世界规则改变|天地规则|世界变化|world change|rule of the world changes/iu)) {
+      signals.push("world-change");
+    }
+
+    return this.unique(signals);
+  }
+
+  private pickPrimaryHookForSceneBudget(hookAgenda: ChapterIntent["hookAgenda"]): string | undefined {
+    return hookAgenda.mustAdvance[0]
+      ?? hookAgenda.eligibleResolve[0]
+      ?? hookAgenda.staleDebt[0]
+      ?? hookAgenda.pressureMap[0]?.hookId;
+  }
+
+  private trimHookAgendaToPrimary(
+    hookAgenda: ChapterIntent["hookAgenda"],
+    primaryHookId: string,
+  ): ChapterIntent["hookAgenda"] {
+    return {
+      ...hookAgenda,
+      mustAdvance: hookAgenda.mustAdvance.filter((hookId) => hookId === primaryHookId),
+      eligibleResolve: hookAgenda.eligibleResolve.filter((hookId) => hookId === primaryHookId),
+      staleDebt: hookAgenda.staleDebt.filter((hookId) => hookId === primaryHookId),
+      pressureMap: hookAgenda.pressureMap.filter((entry) => entry.hookId === primaryHookId),
+    };
+  }
+
+  private applyBreakthroughPayoffTrigger(input: {
+    readonly chapterGoal: ChapterGoal;
+    readonly language: "zh" | "en";
+    readonly currentState: string;
+  }): {
+    readonly chapterGoal: ChapterGoal;
+    readonly directiveNote?: string;
+  } {
+    const payoffDirectiveType = input.chapterGoal.payoffDirective?.payoffType;
+    const payoffText = [
+      input.chapterGoal.payoffToDeliver,
+      input.chapterGoal.protagonistGoal,
+      input.chapterGoal.mainConflict,
+    ].join(" ");
+    const isBreakthroughPayoff = payoffDirectiveType === "breakthrough"
+      || /(觉醒|突破|破境|晋阶|掌握新能力|血脉苏醒|awaken|breakthrough|advance realm|unlock)/i.test(payoffText);
+
+    if (!isBreakthroughPayoff) {
+      return {
+        chapterGoal: input.chapterGoal,
+      };
+    }
+
+    const existingTrigger = this.normalizeMeaningfulText(input.chapterGoal.payoffTrigger);
+    const payoffTrigger = existingTrigger ?? this.deriveBreakthroughTrigger({
+      chapterGoal: input.chapterGoal,
+      currentState: input.currentState,
+      language: input.language,
+    });
+
+    const directiveNote = input.language === "zh"
+      ? `Trigger: ${payoffTrigger}。必须按 buildup → trigger → moment → payoff 展开，禁止无触发直接觉醒或突破。`
+      : `Trigger: ${payoffTrigger}. Use buildup -> trigger -> moment -> payoff, and do not allow a breakthrough without a trigger.`;
+
+    return {
+      chapterGoal: {
+        ...input.chapterGoal,
+        payoffTrigger,
+      },
+      directiveNote,
+    };
+  }
+
+  private deriveBreakthroughTrigger(input: {
+    readonly chapterGoal: ChapterGoal;
+    readonly currentState: string;
+    readonly language: "zh" | "en";
+  }): string {
+    const combined = [
+      input.chapterGoal.mainConflict,
+      input.chapterGoal.protagonistGoal,
+      input.chapterGoal.payoffToDeliver,
+      input.chapterGoal.nextChapterPull,
+      input.currentState,
+    ].join(" ");
+
+    if (/(精血|气血).{0,8}(耗尽|枯竭|见底)|耗尽临界|blood.*deplet|essence.*empty/i.test(combined)) {
+      return input.language === "zh"
+        ? "精血耗尽临界点，引发血脉反噬反转"
+        : "essence depletion reaches a critical threshold and flips the backlash";
+    }
+    if (/(濒死|垂死|将死|重伤|经脉崩裂|五脏受损|near death|dying|mortally wounded|meridians? shatter)/i.test(combined)) {
+      return input.language === "zh"
+        ? "极限濒死之际，被反噬逼出突破临界点"
+        : "near-death pressure forces the breakthrough threshold open";
+    }
+    if (/(共鸣|呼应|碑|卷轴|残卷|血脉|祭坛|外力|resonance|artifact|tablet|scroll|bloodline|altar)/i.test(combined)) {
+      return input.language === "zh"
+        ? "外力共鸣撞上体内反噬，触发觉醒临界点"
+        : "external resonance collides with the internal backlash and triggers awakening";
+    }
+    if (/(规则|法则|压制|冲突|反噬|失控|rule|law|suppression|collision|backlash|out of control)/i.test(combined)) {
+      return input.language === "zh"
+        ? "规则冲突压到极限，逼出反噬反转"
+        : "a rule collision reaches critical pressure and flips the backlash";
+    }
+    if (/(愤怒|执念|悲痛|情绪|怒意|不甘|emotion|rage|grief|desperation|obsession)/i.test(combined)) {
+      return input.language === "zh"
+        ? "情绪爆发冲破压制，强行撬开觉醒缺口"
+        : "an emotional surge breaks the suppression and tears open the awakening gap";
+    }
+
+    return input.language === "zh"
+      ? "高压战斗把反噬推到临界点，逼出第一次觉醒"
+      : "combat pressure pushes the backlash to a critical point and forces the first awakening";
+  }
+
+  private splitCompositePayoff(payoff: string): string[] {
+    return payoff
+      .split(/\s*(?:\+|＋|\/| and | AND |以及|并且|并需|同时完成)\s*/u)
+      .map((segment) => this.normalizeMeaningfulText(segment))
+      .filter((segment): segment is string => Boolean(segment))
+      .filter((segment, index, all) => all.indexOf(segment) === index);
+  }
+
+  private pickPrimaryPayoffSegment(segments: ReadonlyArray<string>): string {
+    const scored = segments.map((segment, index) => ({
+      segment,
+      index,
+      score: this.scorePayoffSegment(segment),
+    }));
+    scored.sort((left, right) => right.score - left.score || left.index - right.index);
+    return scored[0]?.segment ?? segments[0] ?? "";
+  }
+
+  private scorePayoffSegment(segment: string): number {
+    let score = 0;
+
+    if (/(觉醒|突破|拿到|获得|发现|找到|压住|掌握|逃离|摆脱|恢复|reveal|awaken|breakthrough|get|gain|find|stabilize|escape)/i.test(segment)) {
+      score += 3;
+    }
+    if (/(压制|威胁|追兵|阴影|危机|危险|追杀|threat|pressure|danger|pursuit|shadow)/i.test(segment)) {
+      score -= 2;
+    }
+    if (segment.length <= 12) {
+      score += 1;
+    }
+
+    return score;
+  }
+
+  private composeDeferredPayoffPull(input: {
+    readonly language: "zh" | "en";
+    readonly primaryPayoff: string;
+    readonly deferredText: string;
+    readonly existingPull: string;
+  }): string {
+    const deferredLine = input.language === "zh"
+      ? /(压制|威胁|追兵|阴影|危机|危险|追杀)/u.test(input.deferredText)
+        ? `${input.primaryPayoff}后，${input.deferredText}会进一步逼近。`
+        : `${input.primaryPayoff}后，${input.deferredText}将转入下章继续推进。`
+      : /(pressure|threat|danger|pursuit|shadow)/i.test(input.deferredText)
+        ? `After ${input.primaryPayoff}, ${input.deferredText} will close in harder.`
+        : `After ${input.primaryPayoff}, ${input.deferredText} should continue in the next chapter.`;
+
+    const existingPull = this.normalizeMeaningfulText(input.existingPull);
+    if (!existingPull) {
+      return deferredLine;
+    }
+    if (existingPull.includes(input.deferredText)) {
+      return existingPull;
+    }
+    return this.unique([existingPull, deferredLine]).join(input.language === "zh" ? " " : " ");
   }
 
   private pickEscalationEndingHookType(chapterGoal: ChapterGoal): ChapterGoal["endingHookType"] {
@@ -963,15 +2622,54 @@ export class PlannerAgent extends BaseAgent {
       targetMode: "breath",
       requiredSceneQuota: 1,
       moodCoverageMin: 0.3,
+      forceSceneStructure: true,
+      sceneMinShare: 0.3,
+      scene1NoThreatEscalation: true,
+      scene3ForwardOnly: true,
       forbidDominantMode: "combat-heavy",
+      scenePlan: this.isChineseLanguage(language)
+        ? {
+          scene1: "pure recovery / relationship（mandatory，纯人物表达与情绪展开，>=30%，禁止 hook 推进 / 新威胁 / 规则压力）",
+          scene2: "low-intensity forward move（optional，可带 1 次 hook 变化或轻微威胁）",
+          scene3: "short exit beat only（如需收束，只保留极短尾拍，不再展开第三个高压场景）",
+        }
+        : {
+          scene1: "pure recovery / relationship (mandatory, character expression only, >=30%, no hook advance or new threat)",
+          scene2: "low-intensity forward move (optional, may carry one hook change or mild threat)",
+          scene3: "short exit beat only (do not open a third high-pressure scene)",
+        },
       note: this.isChineseLanguage(language)
         ? moods.length > 0
-          ? `最近${moods.length}章情绪持续高压（${moods.slice(0, 3).join("、")}），本章必须降调——至少安排 1 段日常/喘息/温情/幽默场景，且相关内容至少覆盖正文约 30%。`
-          : "最近连续数章都在高压对抗，本章必须降调——至少安排 1 段日常/喘息/温情/幽默场景，且相关内容至少覆盖正文约 30%。"
+          ? `最近${moods.length}章情绪持续高压（${moods.slice(0, 3).join("、")}），本章必须降调——scene1 必须是纯人物/恢复场景，且至少覆盖正文约 30%；hook 推进与轻微威胁只能后置到 scene2。`
+          : "最近连续数章都在高压对抗，本章必须降调——scene1 必须是纯人物/恢复场景，且至少覆盖正文约 30%；hook 推进与轻微威胁只能后置到 scene2。"
         : moods.length > 0
-          ? `The last ${moods.length} chapters have stayed relentlessly tense (${moods.slice(0, 3).join(", ")}). This chapter must downshift, include at least one breathing / warm / humorous scene, and keep that mode over roughly 30% of the chapter.`
-          : "Recent chapters have stayed confrontation-heavy. This chapter must downshift, include at least one breathing / warm / humorous scene, and keep that mode over roughly 30% of the chapter.",
+          ? `The last ${moods.length} chapters have stayed relentlessly tense (${moods.slice(0, 3).join(", ")}). Scene1 must be a pure recovery/relationship beat over roughly 30% of the chapter, while hook movement or mild threat must stay in Scene2.`
+          : "Recent chapters have stayed confrontation-heavy. Scene1 must be a pure recovery/relationship beat over roughly 30% of the chapter, while hook movement or mild threat must stay in Scene2.",
     };
+  }
+
+  private buildBreathSceneIsolationDirective(
+    baseDirective: string | undefined,
+    language: string | undefined,
+  ): string {
+    const isolationLines = this.isChineseLanguage(language)
+      ? [
+        "Scene Isolation：scene1 必须是纯人物表达场景，优先恢复 / 关系 / 情绪展开。",
+        "scene1 至少占正文 30%，禁止 hook 推进、新威胁、规则压力、风暴爆发。",
+        "scene2 才允许低强度推进；最多带 1 次 hook 变化或轻微威胁。",
+        "优先级：scene1 > payoff > hook。",
+      ]
+      : [
+        "Scene Isolation: Scene1 must be a pure character-expression beat focused on recovery / relationship / emotional unfolding.",
+        "Scene1 must cover at least 30% of the chapter and cannot carry hook advance, new threat, rule pressure, or storm escalation.",
+        "Only Scene2 may handle low-intensity movement, with at most one hook change or mild threat.",
+        "Priority: Scene1 > payoff > hook.",
+      ];
+
+    return this.unique([
+      baseDirective,
+      ...isolationLines,
+    ].filter((value): value is string => Boolean(value && value.trim().length > 0))).join(" ");
   }
 
   private shouldForceMoodDownshift(
@@ -1475,8 +3173,17 @@ export class PlannerAgent extends BaseAgent {
       ? intent.styleEmphasis.map((item) => `- ${item}`).join("\n")
       : "- none";
     const directives = [
+      intent.chapterMode ? `- chapterMode: ${intent.chapterMode}` : undefined,
+      intent.endingType ? `- endingType: ${intent.endingType}` : undefined,
       intent.arcDirective ? `- arc: ${intent.arcDirective}` : undefined,
       intent.sceneDirective ? `- scene: ${intent.sceneDirective}` : undefined,
+      intent.directivePriority
+        ? [
+          "- directivePriority:",
+          ...intent.directivePriority.ordered.map((item, index) => `  - ${index + 1}. ${item}`),
+        ].join("\n")
+        : undefined,
+      intent.hookExecutionPhase ? `- hookExecutionPhase: ${intent.hookExecutionPhase}` : undefined,
       intent.moodDirective
         ? [
           "- mood:",
@@ -1484,6 +3191,14 @@ export class PlannerAgent extends BaseAgent {
           `  - requiredSceneQuota: ${intent.moodDirective.requiredSceneQuota}`,
           `  - moodCoverageMin: ${intent.moodDirective.moodCoverageMin}`,
           `  - forbidDominantMode: ${intent.moodDirective.forbidDominantMode}`,
+          intent.moodDirective.scenePlan
+            ? [
+              "  - scenePlan:",
+              `    - scene1: ${intent.moodDirective.scenePlan.scene1}`,
+              `    - scene2: ${intent.moodDirective.scenePlan.scene2}`,
+              `    - scene3: ${intent.moodDirective.scenePlan.scene3}`,
+            ].join("\n")
+            : undefined,
           intent.moodDirective.note ? `  - note: ${intent.moodDirective.note}` : undefined,
         ].filter(Boolean).join("\n")
         : undefined,
@@ -1496,14 +3211,22 @@ export class PlannerAgent extends BaseAgent {
         `- activeCharacters: ${intent.chapterGoal.activeCharacters.join(", ") || "none"}`,
         `- foreshadowToTouch: ${intent.chapterGoal.foreshadowToTouch.join(", ") || "none"}`,
         `- payoffToDeliver: ${intent.chapterGoal.payoffToDeliver}`,
+        intent.chapterGoal.payoffTrigger
+          ? `- payoffTrigger: ${intent.chapterGoal.payoffTrigger}`
+          : undefined,
         intent.chapterGoal.payoffDirective
           ? [
             `- payoffDirective.promisedPayoff: ${intent.chapterGoal.payoffDirective.promisedPayoff}`,
             `- payoffDirective.payoffType: ${intent.chapterGoal.payoffDirective.payoffType}`,
+            `- payoffDirective.payoffDepth: ${intent.chapterGoal.payoffDirective.payoffDepth ?? "layered"}`,
+            `- payoffDirective.payoffScope: ${intent.chapterGoal.payoffDirective.payoffScope ?? "chapter"}`,
             `- payoffDirective.mandatoryByFinalAct: ${intent.chapterGoal.payoffDirective.mandatoryByFinalAct}`,
           ].join("\n")
           : undefined,
-        `- endingHookType: ${intent.chapterGoal.endingHookType}`,
+        intent.chapterGoal.maxRevealLayersPerChapter
+          ? `- maxRevealLayersPerChapter: ${intent.chapterGoal.maxRevealLayersPerChapter}`
+          : undefined,
+        `- endingType: ${intent.endingType ?? this.mapLegacyEndingHookToEndingType(intent.chapterGoal.endingHookType)}`,
         `- nextChapterPull: ${intent.chapterGoal.nextChapterPull}`,
       ].join("\n")
       : "- none";
@@ -1537,6 +3260,9 @@ export class PlannerAgent extends BaseAgent {
       "",
       "### Emergence Directive",
       `- mustMaterializeHookNow: ${hookEmergence.mustMaterializeHookNow}`,
+      intent.hookExecutionPhase
+        ? `- hookExecutionPhase: ${intent.hookExecutionPhase}`
+        : (hookEmergence.hookExecutionPhase ? `- hookExecutionPhase: ${hookEmergence.hookExecutionPhase}` : undefined),
       hookEmergence.targetHook ? `- targetHookId: ${hookEmergence.targetHook.hookId}` : undefined,
       hookEmergence.targetHook ? `- targetHookState: ${hookEmergence.targetHook.state}` : undefined,
       hookEmergence.targetHook ? `- targetHookType: ${hookEmergence.targetHook.type}` : undefined,
@@ -1556,6 +3282,7 @@ export class PlannerAgent extends BaseAgent {
       "",
       "## Goal",
       intent.goal,
+      `- goalIntensity: ${intent.goalIntensity}`,
       "",
       "## Outline Node",
       intent.outlineNode ?? "(not found)",
@@ -1588,6 +3315,20 @@ export class PlannerAgent extends BaseAgent {
       chapterSummaries,
       "",
     ].join("\n");
+  }
+
+  private mapLegacyEndingHookToEndingType(endingHookType: ChapterGoal["endingHookType"]): EndingType {
+    switch (endingHookType) {
+      case "reveal":
+        return "reveal_end";
+      case "danger":
+      case "pursuit":
+        return "unresolved_end";
+      case "choice":
+      case "breakthrough":
+      default:
+        return "resolution_end";
+    }
   }
 
   private unique(values: ReadonlyArray<string>): string[] {
@@ -1634,6 +3375,7 @@ export class PlannerAgent extends BaseAgent {
     return {
       pressureStates: pressureStates.map(({ dormancy: _dormancy, ...entry }) => entry),
       mustMaterializeHookNow: Boolean(target),
+      ...(target ? { hookExecutionPhase: "any" as const } : {}),
       ...(target
         ? {
           targetHook: {
