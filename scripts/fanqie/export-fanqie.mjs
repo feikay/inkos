@@ -103,12 +103,15 @@ function normalizeTextValue(value) {
 
 function cleanText(text) {
   const source = normalizeTextValue(text);
-  return source
+  const lines = source
     .replace(/^---[\s\S]*?---\s*/m, "")
     .replace(/```[\s\S]*?```/g, "")
+    .replace(/^#{1,6}\s*(?:创作说明|本章问题|六段检查|审核|检查|改写建议|修复建议|正文开始|正文结束)\s*\n[\s\S]*?(?=\n\s*\n|$)/gm, "")
     .replace(/INFO\s+\[.*?\].*/g, "")
     .replace(/WARN\s+\[.*?\].*/g, "")
     .replace(/ERROR\s+\[.*?\].*/g, "")
+    .replace(/DEBUG\s+\[.*?\].*/g, "")
+    .replace(/^\s*(?:INFO|WARN|WARNING|ERROR|DEBUG|TRACE)\b.*$/gim, "")
     .replace(/\[error\].*/gi, "")
     .replace(/\[warning\].*/gi, "")
     .replace(/payoffToDeliver[:：].*/gi, "")
@@ -126,13 +129,185 @@ function cleanText(text) {
     .replace(/显然/g, "")
     .replace(/这意味着/g, "也就是说")
     .replace(/——/g, "。")
-    .split(/\n+/)
+    .split(/\n+/);
+
+  return stripYamlFrontmatterLines(lines)
+    .map((s) => cleanNonNovelMarkerLine(s))
     .map((s) => s.trim())
     .filter(Boolean)
     .filter((s) => !isMetaContentLine(s))
     .map((s) => s.replace(/([，,。；;：:！？!?])\1+/g, "$1"))
     .join("\n\n")
     .trim();
+}
+
+const STRUCTURAL_MARKER_PATTERN = /\b(?:Hook|Pressure|Attempt|Twist|Payoff|Pull|Beat|Outline|Summary|Review|TODO|Fix|Draft|Prompt)\b/i;
+const CHINESE_META_MARKER_PATTERN = /(?:节奏|结构|审核|检查|改写建议|创作说明|正文开始|正文结束|本章问题|修复建议|六段检查)/;
+const PROMPT_REPORT_PATTERN = /(?:请根据|请输出|请改写|请续写|生成|作为.*作者|任务[:：]|目标[:：]|要求[:：]|提示词|报告|评分|问题[:：]|建议[:：]|检查结果|以下是|上文|下文)/i;
+
+function stripYamlFrontmatterLines(lines) {
+  const result = [];
+  let inFrontmatter = false;
+  let seenContent = false;
+
+  for (const line of lines) {
+    const value = line.trim();
+    if (!seenContent && value === "---") {
+      inFrontmatter = true;
+      seenContent = true;
+      continue;
+    }
+    if (inFrontmatter) {
+      if (value === "---") inFrontmatter = false;
+      continue;
+    }
+    if (value) seenContent = true;
+    result.push(line);
+  }
+
+  return result;
+}
+
+function isNormalChapterTitleLine(text) {
+  const value = (text || "").trim();
+  return /^(?:#{1,2}\s*)?第\s*\d+\s*章(?:\s+.*)?$/u.test(value);
+}
+
+function isMarkdownTableLine(text) {
+  const value = (text || "").trim();
+  return /^\|.*\|$/.test(value) || /^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?$/.test(value);
+}
+
+function isLogResidualLine(text) {
+  const value = (text || "").trim();
+  return /^(?:\[[^\]]*(?:error|warn|info|debug|trace)[^\]]*\]|(?:INFO|WARN|WARNING|ERROR|DEBUG|TRACE)\b)/i.test(value);
+}
+
+function isPureNonNovelMarker(text) {
+  const value = stripTitlePrefix((text || "").trim())
+    .replace(/^[:：\-—\s]+|[:：\-—\s]+$/g, "")
+    .trim();
+  if (!value) return false;
+  if (STRUCTURAL_MARKER_PATTERN.test(value) && value.length <= 40) return true;
+  if (CHINESE_META_MARKER_PATTERN.test(value) && value.length <= 40) return true;
+  return false;
+}
+
+function isNovelSentenceAfterHeading(text) {
+  const value = (text || "").trim();
+  if (!/[\u3400-\u9fff]/.test(value)) return false;
+  if (STRUCTURAL_MARKER_PATTERN.test(value) || CHINESE_META_MARKER_PATTERN.test(value)) return false;
+  if (/Prompt|TODO|审核|检查|修复|建议/i.test(value)) return false;
+  if (PROMPT_REPORT_PATTERN.test(value) && !/[“”"']/.test(value)) return false;
+  return /(?:楚夜|云岚|他|她|水|风|雾|血|石|剑|刀|暗河|祭坛|洞穴|妖兽|怨气|灵气|符文|黑暗|忽然|突然|猛地|低声|抬|停|走|冲|看|闻|听|疼|亮|裂|倒流|咆哮|说道|问道|。|！|？|“)/.test(value);
+}
+
+function isShortChineseSectionMarker(text) {
+  const value = (text || "").trim();
+  if (!/[\u3400-\u9fff]/.test(value)) return false;
+  if (/[。！？；，、,.!?;：“”"']/u.test(value)) return false;
+  return countChineseChars(value) <= 10;
+}
+
+function cleanNonNovelMarkerLine(line) {
+  const value = (line || "").trim();
+  if (!value) return "";
+  if (isNormalChapterTitleLine(value)) return value;
+  if (isMarkdownTableLine(value)) return "";
+  if (isLogResidualLine(value)) return "";
+  if (/^\s*```/.test(value)) return "";
+  if (value === "---") return "";
+
+  const heading = value.match(/^#{1,6}\s*(.*?)\s*$/);
+  if (heading) {
+    const body = heading[1].trim();
+    if (!body) return "";
+    if (isNormalChapterTitleLine(body)) return body;
+    if (isPureNonNovelMarker(body)) return "";
+    if (isShortChineseSectionMarker(body)) return "";
+    if (isNovelSentenceAfterHeading(body)) return body;
+    return value;
+  }
+
+  if (isPureNonNovelMarker(value)) return "";
+  if (PROMPT_REPORT_PATTERN.test(value) && !isNovelSentenceAfterHeading(value)) return "";
+  return value;
+}
+
+function detectNonNovelMarkers(text, file = "") {
+  const source = normalizeTextValue(text);
+  const issues = [];
+  const lines = source.split(/\r?\n/);
+  let inCodeBlock = false;
+  let inFrontmatter = false;
+  let seenContent = false;
+
+  const addIssue = (lineNo, raw, type, action) => {
+    issues.push({ lineNo, raw, type, action, file });
+  };
+
+  lines.forEach((line, index) => {
+    const lineNo = index + 1;
+    const raw = line;
+    const value = raw.trim();
+    if (!value) return;
+
+    if (!seenContent && value === "---") {
+      inFrontmatter = true;
+      seenContent = true;
+      addIssue(lineNo, raw, "yaml frontmatter", "delete");
+      return;
+    }
+    if (inFrontmatter) {
+      addIssue(lineNo, raw, "yaml frontmatter", "delete");
+      if (value === "---") inFrontmatter = false;
+      return;
+    }
+    seenContent = true;
+
+    if (/^\s*```/.test(value)) {
+      inCodeBlock = !inCodeBlock;
+      addIssue(lineNo, raw, "代码块", "delete");
+      return;
+    }
+    if (inCodeBlock) {
+      addIssue(lineNo, raw, "代码块", "delete");
+      return;
+    }
+
+    if (isMarkdownTableLine(value)) {
+      addIssue(lineNo, raw, "Markdown 表格", "delete");
+      return;
+    }
+    if (isLogResidualLine(value)) {
+      addIssue(lineNo, raw, "日志残留", "delete");
+      return;
+    }
+
+    const heading = value.match(/^#{1,6}\s*(.*?)\s*$/);
+    if (heading) {
+      if (isNormalChapterTitleLine(value)) return;
+      const body = heading[1].trim();
+      if (isPureNonNovelMarker(body)) {
+        addIssue(lineNo, raw, "结构标记", "delete");
+      } else if (isNovelSentenceAfterHeading(body)) {
+        addIssue(lineNo, raw, "Markdown 标记正文句", "strip-marker");
+      } else {
+        addIssue(lineNo, raw, "Markdown 标题残留", "delete");
+      }
+      return;
+    }
+
+    if (isPureNonNovelMarker(value)) {
+      addIssue(lineNo, raw, "结构标记", "delete");
+      return;
+    }
+    if (PROMPT_REPORT_PATTERN.test(value) && !isNovelSentenceAfterHeading(value)) {
+      addIssue(lineNo, raw, "提示词/报告残留", "delete");
+    }
+  });
+
+  return { issues };
 }
 
 function stripTitlePrefix(text) {
@@ -480,14 +655,34 @@ if (!chapterFiles.length) {
 
 const exported = [];
 const report = [];
+const nonNovelMarkerChecks = [];
+const nonNovelMarkerFailures = [];
 
 for (const { file, no } of chapterFiles) {
-  let text = cleanText(extractText(file));
+  const raw = extractText(file);
+  const rawIssues = detectNonNovelMarkers(raw, file);
+
+  let text = cleanText(raw);
   text = removeExistingTitle(text);
-  if (!text) continue;
+  const cleanedIssues = detectNonNovelMarkers(text, file);
 
   const sourceTitle = getChapterTitleFromFilename(file);
   const title = isValidTitleCandidate(sourceTitle) ? `第${no}章 ${sourceTitle}` : makeTitle(no, text, file);
+  nonNovelMarkerChecks.push({
+    no,
+    title,
+    file,
+    rawIssues,
+    cleanedIssues,
+  });
+
+  if (cleanedIssues.issues.length) {
+    nonNovelMarkerFailures.push({ no, title, file, rawIssues, cleanedIssues });
+    continue;
+  }
+
+  if (!text) continue;
+
   const finalText = `${title}\n\n${text}\n`;
 
   const check = sixPartCheck(finalText);
@@ -495,9 +690,7 @@ for (const { file, no } of chapterFiles) {
 
   const outFile = path.join(chapterOutDir, `${String(no).padStart(4, "0")}.txt`);
 
-  if (!dryRun) fs.writeFileSync(outFile, finalText, "utf8");
-
-  exported.push({ no, title, chars: countChars(finalText), file, outFile, check, warnings });
+  exported.push({ no, title, chars: countChars(finalText), file, outFile, finalText, check, warnings });
 
   report.push(`## ${title}
 
@@ -512,14 +705,35 @@ ${warnings.length ? `### 警告\n${warnings.map((w) => `- ${w}`).join("\n")}` : 
 `);
 }
 
-writeBookInfo(chapterFiles);
+function formatMarkerReport(checks) {
+  if (!checks.length) return "# 非正文标记检查\n\n本次没有需要检查的章节。\n";
+  return `# 非正文标记检查
 
-if (!dryRun) {
-  fs.writeFileSync(path.join(outDir, "full.txt"), exported.map((x) => fs.readFileSync(x.outFile, "utf8")).join("\n\n"), "utf8");
+${checks.map(({ title, file, rawIssues, cleanedIssues }) => {
+  const found = rawIssues.issues.length;
+  const residual = cleanedIssues.issues.length;
+  const cleaned = Math.max(found - residual, 0);
+  const status = residual ? "❌" : "✅";
+  const lines = [
+    `## ${title}`,
+    `- 原文件：\`${path.relative(root, file)}\``,
+    `- 非正文标记：${found ? `发现 ${found} 处，已自动清理 ${cleaned} 处 ${status}` : `未发现 0 处 ${status}`}`,
+    `- 残留：${residual} ${status}`,
+  ];
+  if (residual) {
+    for (const issue of cleanedIssues.issues) {
+      lines.push(`- 行号：${issue.lineNo}`);
+      lines.push(`- 原文：${issue.raw}`);
+      lines.push(`- 类型：${issue.type}`);
+    }
+  }
+  return lines.join("\n");
+}).join("\n\n")}
+`;
+}
 
-  fs.writeFileSync(
-    path.join(outDir, "report.md"),
-    `# 番茄发布检查报告
+function makeReportContent() {
+  return `# 番茄发布检查报告
 
 书名：${publishTitle}
 
@@ -527,12 +741,35 @@ if (!dryRun) {
 
 导出章节数：${exported.length}
 
-${report.join("\n")}
-`,
-    "utf8"
-  );
+${formatMarkerReport(nonNovelMarkerChecks)}
 
-  fs.writeFileSync(markerFile, String(Math.max(...exported.map((x) => x.no))), "utf8");
+${report.join("\n")}
+`;
+}
+
+if (nonNovelMarkerFailures.length) {
+  if (!dryRun) {
+    fs.writeFileSync(path.join(outDir, "report.md"), makeReportContent(), "utf8");
+  }
+  console.error("❌ 发现非正文标记残留，已阻止番茄导出。");
+  console.error(`请查看 ${path.relative(root, path.join(outDir, "report.md"))}`);
+  process.exit(1);
+}
+
+writeBookInfo(chapterFiles);
+
+if (!dryRun) {
+  for (const item of exported) {
+    fs.writeFileSync(item.outFile, item.finalText, "utf8");
+  }
+
+  fs.writeFileSync(path.join(outDir, "full.txt"), exported.map((x) => x.finalText).join("\n\n"), "utf8");
+
+  fs.writeFileSync(path.join(outDir, "report.md"), makeReportContent(), "utf8");
+
+  if (exported.length) {
+    fs.writeFileSync(markerFile, String(Math.max(...exported.map((x) => x.no))), "utf8");
+  }
 }
 
 console.log("番茄发布导出完成");

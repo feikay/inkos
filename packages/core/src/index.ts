@@ -72,6 +72,10 @@ export {
 } from "./models/input-governance.js";
 export { PlannerAgent, type PlanChapterInput, type PlanChapterOutput } from "./agents/planner.js";
 export { ComposerAgent, type ComposeChapterInput, type ComposeChapterOutput } from "./agents/composer.js";
+export { validateStyleGuard, type StyleGuardChapter, type StyleGuardOptions, type StyleGuardResult } from "./validators/style-guard.js";
+export { validateConsistencyGuard, type ConsistencyGuardResult } from "./validators/consistency-guard.js";
+export { analyzePatternBreaker, analyzeChapterPattern, type ChapterPatternAnalysis, type NarrativePatternTag, type PatternBreakerResult } from "./validators/pattern-breaker.js";
+export { validateRegressionChapters, type RegressionChapter, type RegressionValidationScore } from "./validators/regression-validation.js";
 export {
   AutomationModeSchema,
   type AutomationMode,

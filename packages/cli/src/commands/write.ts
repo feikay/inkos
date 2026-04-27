@@ -1,13 +1,82 @@
 import { Command } from "commander";
-import { PipelineRunner, StateManager } from "@actalk/inkos-core";
-import { readdir, stat, unlink } from "node:fs/promises";
+import {
+  PipelineRunner,
+  StateManager,
+  validateRegressionChapters,
+  type ProjectConfig,
+  type RegressionChapter,
+  type RegressionValidationScore,
+} from "@actalk/inkos-core";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import { loadConfig, buildPipelineConfig, findProjectRoot, getLegacyMigrationHint, resolveContext, resolveBookId, log, logError } from "../utils.js";
 import { formatWriteNextComplete, formatWriteNextProgress, formatWriteNextResultLines, resolveCliLanguage } from "../localization.js";
 
 export const writeCommand = new Command("write")
   .description("Write chapters");
+
+async function runWriteNextRegressionValidation(params: {
+  readonly root: string;
+  readonly bookId: string;
+  readonly count: number;
+  readonly wordCount?: number;
+  readonly config: ProjectConfig;
+  readonly context?: string;
+}): Promise<RegressionValidationScore> {
+  const tempRoot = await mkdtemp(join(tmpdir(), "inkos-regression-"));
+  try {
+    await mkdir(join(tempRoot, "books"), { recursive: true });
+    await cp(join(params.root, "books", params.bookId), join(tempRoot, "books", params.bookId), {
+      recursive: true,
+      force: true,
+    });
+    await unlink(join(tempRoot, "books", params.bookId, ".write.lock")).catch(() => undefined);
+
+    const tempState = new StateManager(tempRoot);
+    const firstChapter = await tempState.getNextChapterNumber(params.bookId);
+    const tempPipeline = new PipelineRunner(buildPipelineConfig(params.config, tempRoot, {
+      externalContext: params.context,
+      quiet: true,
+    }));
+
+    for (let index = 0; index < params.count; index += 1) {
+      await tempPipeline.writeNextChapter(params.bookId, params.wordCount);
+    }
+
+    const tempBook = await tempState.loadBookConfig(params.bookId);
+    const language = tempBook.language ?? "zh";
+    const chaptersDir = join(tempRoot, "books", params.bookId, "chapters");
+    const regressionDir = join(params.root, "tests", "regression", "chapters");
+    await mkdir(regressionDir, { recursive: true });
+
+    const chapters: RegressionChapter[] = [];
+    for (let chapterNumber = firstChapter; chapterNumber < firstChapter + params.count; chapterNumber += 1) {
+      const fileName = await findChapterFile(chaptersDir, chapterNumber);
+      const content = await readFile(join(chaptersDir, fileName), "utf-8");
+      await writeFile(join(regressionDir, fileName), content, "utf-8");
+      chapters.push({
+        id: String(chapterNumber).padStart(4, "0"),
+        content,
+      });
+    }
+
+    return validateRegressionChapters(chapters, language);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+}
+
+async function findChapterFile(chaptersDir: string, chapterNumber: number): Promise<string> {
+  const prefix = `${String(chapterNumber).padStart(4, "0")}_`;
+  const files = await readdir(chaptersDir);
+  const match = files.find((file) => file.startsWith(prefix) && file.endsWith(".md"));
+  if (!match) {
+    throw new Error(`Regression test chapter not found: ${prefix}*.md`);
+  }
+  return match;
+}
 
 writeCommand
   .command("next")
@@ -17,6 +86,7 @@ writeCommand
   .option("--words <n>", "Words per chapter (overrides book config)")
   .option("--context <text>", "Creative guidance (natural language)")
   .option("--context-file <path>", "Read guidance from file")
+  .option("--test-mode", "Generate in a temporary copy and run regression validation")
   .option("--json", "Output JSON")
   .option("-q, --quiet", "Suppress console output")
   .action(async (bookIdArg: string | undefined, opts) => {
@@ -37,6 +107,19 @@ writeCommand
 
       const count = parseInt(opts.count, 10);
       const wordCount = opts.words ? parseInt(opts.words, 10) : undefined;
+
+      if (opts.testMode) {
+        const regression = await runWriteNextRegressionValidation({
+          root,
+          bookId,
+          count,
+          wordCount,
+          config,
+          context,
+        });
+        log(JSON.stringify(regression, null, 2));
+        return;
+      }
 
       const results = [];
       for (let i = 0; i < count; i++) {

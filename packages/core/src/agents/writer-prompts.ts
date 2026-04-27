@@ -43,6 +43,7 @@ export function buildWriterSystemPrompt(
     ? [
         buildEnglishGenreIntro(book, genreProfile),
         buildEnglishCoreRules(book),
+        buildAntiTemplateStructureRules("en"),
         buildGovernedInputContract("en", governed),
         buildLengthGuidance(resolvedLengthSpec, "en"),
         !governed ? buildEnglishAntiAIRules() : "",
@@ -61,6 +62,7 @@ export function buildWriterSystemPrompt(
     : [
         buildGenreIntro(book, genreProfile),
         buildCoreRules(resolvedLengthSpec),
+        buildAntiTemplateStructureRules("zh"),
         buildGovernedInputContract("zh", governed),
         buildLengthGuidance(resolvedLengthSpec, "zh"),
         !governed ? buildAntiAIExamples() : "",
@@ -138,6 +140,51 @@ function buildLengthGuidance(lengthSpec: LengthSpec, language: "zh" | "en"): str
 - 目标字数：${lengthSpec.target}字
 - 允许区间：${lengthSpec.softMin}-${lengthSpec.softMax}字
 - 硬区间：${lengthSpec.hardMin}-${lengthSpec.hardMax}字`;
+}
+
+function buildAntiTemplateStructureRules(language: "zh" | "en"): string {
+  if (language === "en") {
+    return `## Anti-Template Chapter Structure
+
+- Opening: start with an event trigger, not recap, summary, weather, or generic transition. Use a concrete disturbance: a sound stops, a wound reacts, a token heats, a door shifts, a person blocks the path, a trap changes the ground.
+- Middle: every scene movement must be driven by a specific clue or pressure. Characters do not simply "continue deeper" or "move forward"; they follow blood, footprints, scent, a broken inscription, a signal from an object, a threat closing in, or a choice forced by cost.
+- Ending: end on a concrete hook the reader can see, hear, touch, or fear. Do not end with abstract foreshadowing such as "the real danger had just begun." Good endings use a changed object, an irreversible injury, a new person entering, a rule activating, a door opening, or evidence that contradicts what the characters believed.
+- Do not repeat a fixed chapter machine across adjacent chapters. In particular, avoid consecutive uses of: fight -> defeat -> loot drop -> jade token/scroll. Rotate the trigger order: anomaly first, resource first, trap first, person first, cost first, or revelation first.
+- Battle victory must leave a price or abnormal consequence. Loot alone is not a payoff.
+- Do not use generic emotion labels as the main atmosphere engine. Replace "tense/oppressive/dangerous/mysterious" with physical response, environmental change, shortened dialogue, or altered character action.
+
+### Forbidden Template Phrases
+
+Do not use these expressions or close variants in chapter prose:
+- "the real danger had only just begun"
+- "the real trial/test/challenge had only just begun"
+- "they continued deeper" / "they continued forward"
+- "more secrets were hidden here"
+- "this was only the tip of the iceberg"
+- "the real truth"
+- abstract ending lines that promise danger, secrets, or truth without showing a concrete hook`;
+  }
+
+  return `## 反模板章节结构规则
+
+- 开头：必须是“事件触发”，不是总结、复盘、天气铺垫或泛化过渡。优先用具体扰动开场：水声停住、伤口反应、玉牌发热、石门错位、有人拦路、陷阱改变地面。
+- 中段：推进必须由“具体线索或压力”驱动。角色不能只是“继续深入/继续前行”，必须是被血迹、脚印、药香、断裂碑文、道具反应、逼近威胁或代价选择牵引。
+- 结尾：必须是“具体悬念”，让读者看见、听见、摸到或害怕某个变化。禁止用“真正的危险才刚刚开始”这类抽象预告收尾。优先使用物件变化、伤势代价、人物现身、规则启动、门被打开、证据反转。
+- 禁止连续章节套用固定流程，尤其是：战斗 → 击败 → 掉落 → 玉牌/卷轴。必须轮换触发顺序：异象先行、资源先行、陷阱先行、人物先行、代价先行、揭示先行。
+- 战斗胜利后必须留下代价或异常后果。只有掉落和收获，不算有效 payoff。
+- 不要用“紧张/压抑/危险/神秘”等泛化情绪词承担气氛。改用生理反馈、环境反应、对话变短、动作变形来呈现。
+
+### 硬性禁用模板句
+
+正文中禁止使用以下表达，任何近似变体都不允许：
+- 真正的危险才刚刚开始
+- 真正的考验才刚刚开始
+- 真正的挑战才刚刚开始
+- 他们继续深入 / 继续前行
+- 隐藏着更多秘密
+- 只是冰山一角
+- 真正的真相
+- 用抽象句承诺“后面还有危险/秘密/真相”，但没有给出具体画面或动作的章节尾`;
 }
 
 // ---------------------------------------------------------------------------

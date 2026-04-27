@@ -108,6 +108,34 @@ describe("buildWriterSystemPrompt", () => {
     expect(prompt).toContain("Keep the prose restrained");
   });
 
+  it("injects anti-template structure rules into governed Chinese prompts", () => {
+    const prompt = buildWriterSystemPrompt(
+      BOOK,
+      GENRE,
+      null,
+      "# Book Rules",
+      "# Genre Body",
+      "# Style Guide",
+      undefined,
+      8,
+      "creative",
+      undefined,
+      "zh",
+      "governed",
+    );
+
+    expect(prompt).toContain("## 反模板章节结构规则");
+    expect(prompt).toContain("开头：必须是“事件触发”");
+    expect(prompt).toContain("中段：推进必须由“具体线索或压力”驱动");
+    expect(prompt).toContain("结尾：必须是“具体悬念”");
+    expect(prompt).toContain("战斗 → 击败 → 掉落 → 玉牌/卷轴");
+    expect(prompt).toContain("真正的危险才刚刚开始");
+    expect(prompt).toContain("他们继续深入 / 继续前行");
+    expect(prompt).toContain("隐藏着更多秘密");
+    expect(prompt).toContain("只是冰山一角");
+    expect(prompt).toContain("真正的真相");
+  });
+
   it("tells governed English prompts to obey variance briefs and include resistance-bearing exchanges", () => {
     const prompt = buildWriterSystemPrompt(
       {
@@ -133,5 +161,38 @@ describe("buildWriterSystemPrompt", () => {
 
     expect(prompt).toContain("English Variance Brief");
     expect(prompt).toContain("resistance-bearing exchange");
+  });
+
+  it("injects anti-template structure rules into English prompts", () => {
+    const prompt = buildWriterSystemPrompt(
+      {
+        ...BOOK,
+        language: "en",
+      },
+      {
+        ...GENRE,
+        language: "en",
+        name: "General",
+      },
+      null,
+      "# Book Rules",
+      "# Genre Body",
+      "# Style Guide",
+      undefined,
+      8,
+      "creative",
+      undefined,
+      "en",
+      "legacy",
+    );
+
+    expect(prompt).toContain("## Anti-Template Chapter Structure");
+    expect(prompt).toContain("Opening: start with an event trigger");
+    expect(prompt).toContain("Middle: every scene movement must be driven by a specific clue or pressure");
+    expect(prompt).toContain("Ending: end on a concrete hook");
+    expect(prompt).toContain("fight -> defeat -> loot drop -> jade token/scroll");
+    expect(prompt).toContain("the real danger had only just begun");
+    expect(prompt).toContain("they continued deeper");
+    expect(prompt).toContain("this was only the tip of the iceberg");
   });
 });

@@ -39,6 +39,9 @@ import {
   type ResourceLedgerCheck,
 } from "./post-write-validator.js";
 import { analyzeAITells } from "./ai-tells.js";
+import { validateStyleGuard } from "../validators/style-guard.js";
+import { validateConsistencyGuard } from "../validators/consistency-guard.js";
+import { analyzePatternBreaker } from "../validators/pattern-breaker.js";
 import type { ChapterGoal, ChapterTrace, ContextPackage, MoodDirective, RuleStack } from "../models/input-governance.js";
 import type { LengthSpec } from "../models/length-governance.js";
 import type { RuntimeStateDelta } from "../models/runtime-state.js";
@@ -227,6 +230,18 @@ export class WriterAgent extends BaseAgent {
           allowedDeviations: bookRules.allowedDeviations ?? [],
         }
       : undefined;
+    const recentPatternChapters = recentEndingChapters
+      .split(/\n\n---\n\n/u)
+      .map((chapter) => chapter.trim())
+      .filter(Boolean)
+      .slice(-3);
+    const patternBreaker = analyzePatternBreaker(recentPatternChapters, resolvedLanguage);
+    if (patternBreaker.repeated) {
+      this.logWarn(resolvedLanguage, {
+        zh: `剧情模式打断器：第${chapterNumber}章注入结构打断约束（${patternBreaker.recentPatterns.join(" / ")}）`,
+        en: `Pattern breaker: injecting structure-divergence constraints for chapter ${chapterNumber} (${patternBreaker.recentPatterns.join(" / ")})`,
+      });
+    }
 
     // ── Phase 1: Creative writing (temperature 0.7) ──
     const creativeSystemPrompt = buildWriterSystemPrompt(
@@ -248,6 +263,7 @@ export class WriterAgent extends BaseAgent {
           varianceBrief: englishVarianceBrief?.text,
           selectedEvidenceBlock: this.joinGovernedEvidenceBlocks(governedMemoryBlocks),
           titleCandidates,
+          patternBreakerDirective: patternBreaker.directive,
         })
       : (() => {
           // Smart context filtering: inject only relevant parts of truth files
@@ -288,6 +304,7 @@ export class WriterAgent extends BaseAgent {
             moodDirective,
             chapterGoal,
             hookEmergenceDirective,
+            patternBreakerDirective: patternBreaker.directive,
           });
         })();
 
@@ -410,6 +427,67 @@ export class WriterAgent extends BaseAgent {
       },
     });
     creative = this.applyLockedScene1ToCreative(creative, lockedScene1, resolvedLengthSpec.countingMode);
+    const styleGuardPreviousChapters = recentEndingChapters
+      .split(/\n\n---\n\n/u)
+      .map((chapter) => chapter.trim())
+      .filter(Boolean);
+    const initialStyleGuard = resolvedLanguage === "zh"
+      ? validateStyleGuard(creative.content, { previousChapters: styleGuardPreviousChapters })
+      : undefined;
+    let consistencyGuardManualIssues: ReadonlyArray<string> = [];
+    if (initialStyleGuard && !initialStyleGuard.pass) {
+      this.logWarn(resolvedLanguage, {
+        zh: `Style guard：第${chapterNumber}章触发自动重写（${initialStyleGuard.issues.length}项）`,
+        en: `Style guard: auto-rewriting chapter ${chapterNumber} (${initialStyleGuard.issues.length} issue(s))`,
+      });
+      const rewrite = await this.rewriteChapter(creative.content, initialStyleGuard.issues, {
+        language: resolvedLanguage,
+        chapterNumber,
+        maxTokens: creativeMaxTokens,
+      });
+      creativeUsage = {
+        promptTokens: creativeUsage.promptTokens + rewrite.usage.promptTokens,
+        completionTokens: creativeUsage.completionTokens + rewrite.usage.completionTokens,
+        totalTokens: creativeUsage.totalTokens + rewrite.usage.totalTokens,
+      };
+      if (rewrite.content.trim().length > 0) {
+        creative = {
+          ...creative,
+          content: rewrite.content,
+          wordCount: countChapterLength(rewrite.content, resolvedLengthSpec.countingMode),
+        };
+        creative = this.applyLockedScene1ToCreative(creative, lockedScene1, resolvedLengthSpec.countingMode);
+      }
+      const consistencyGuard = validateConsistencyGuard(creative.content);
+      if (!consistencyGuard.pass) {
+        this.logWarn(resolvedLanguage, {
+          zh: `Consistency guard：第${chapterNumber}章重写后仍有断裂，触发二次重写（${consistencyGuard.issues.length}项）`,
+          en: `Consistency guard: second rewrite for chapter ${chapterNumber} (${consistencyGuard.issues.length} issue(s))`,
+        });
+        const secondRewrite = await this.rewriteChapter(creative.content, consistencyGuard.issues, {
+          language: resolvedLanguage,
+          chapterNumber,
+          maxTokens: creativeMaxTokens,
+        });
+        creativeUsage = {
+          promptTokens: creativeUsage.promptTokens + secondRewrite.usage.promptTokens,
+          completionTokens: creativeUsage.completionTokens + secondRewrite.usage.completionTokens,
+          totalTokens: creativeUsage.totalTokens + secondRewrite.usage.totalTokens,
+        };
+        if (secondRewrite.content.trim().length > 0) {
+          creative = {
+            ...creative,
+            content: secondRewrite.content,
+            wordCount: countChapterLength(secondRewrite.content, resolvedLengthSpec.countingMode),
+          };
+          creative = this.applyLockedScene1ToCreative(creative, lockedScene1, resolvedLengthSpec.countingMode);
+        }
+        const finalConsistencyGuard = validateConsistencyGuard(creative.content);
+        if (!finalConsistencyGuard.pass) {
+          consistencyGuardManualIssues = finalConsistencyGuard.issues;
+        }
+      }
+    }
     const resolvedTitle = resolveChapterTitle({
       language: resolvedLanguage,
       rawTitle: creative.title,
@@ -572,8 +650,16 @@ export class WriterAgent extends BaseAgent {
       existingHookIds: [...priorHookIds],
     });
     const hookDebtWarnings = toHookDebtWarnings(hookDebtCheck, resolvedLanguage);
+    const styleGuardWarnings = resolvedLanguage === "zh"
+      ? this.toStyleGuardPostWriteViolations(validateStyleGuard(creative.content, {
+          previousChapters: styleGuardPreviousChapters,
+        }))
+      : [];
+    const consistencyGuardWarnings = this.toConsistencyGuardPostWriteViolations(consistencyGuardManualIssues);
     const allWarnings = [
       ...ruleViolations,
+      ...styleGuardWarnings,
+      ...consistencyGuardWarnings,
       ...normalizedDisciplineWarnings,
       ...payoffImpactWarnings,
       ...endingTypeWarnings,
@@ -877,6 +963,120 @@ export class WriterAgent extends BaseAgent {
       .filter(Boolean);
   }
 
+  private toStyleGuardPostWriteViolations(result: ReturnType<typeof validateStyleGuard>): PostWriteViolation[] {
+    if (result.pass) return [];
+    return result.issues.map((issue) => {
+      const high = issue.startsWith("[high]");
+      return {
+        rule: "style-guard",
+        severity: high ? "error" : "warning",
+        description: issue.replace(/^\[(high|low)\]\s*/u, ""),
+        suggestion: high
+          ? "重写为事件触发、具体线索推进、具体悬念收尾；删除模板句和复读流程。"
+          : "补入动作、异象或物理反馈，避免总结式开头。",
+      };
+    });
+  }
+
+  private toConsistencyGuardPostWriteViolations(issues: ReadonlyArray<string>): PostWriteViolation[] {
+    return issues.map((issue) => ({
+      rule: "consistency-guard",
+      severity: "warning",
+      description: `自动重写后仍需人工 review：${issue}`,
+      suggestion: "人工检查重写段前后衔接、人物状态、道具连续性和节奏断裂；必要时局部手修。",
+    }));
+  }
+
+  private async rewriteChapter(
+    chapter: string,
+    issues: ReadonlyArray<string>,
+    params: {
+      readonly language: "zh" | "en";
+      readonly chapterNumber: number;
+      readonly maxTokens: number;
+    },
+  ): Promise<{ readonly content: string; readonly usage: TokenUsage }> {
+    const response = await this.chat(
+      [
+        {
+          role: "system",
+          content: params.language === "en"
+            ? "You are a style-guard rewrite editor. Fix only the flagged prose problems. Preserve plot, character actions, setting facts, event order, combat outcomes, items, and all key information."
+            : "你是章节风格校验后的自动修稿编辑。只修复被指出的写作风格问题，必须保留剧情、人物行为、设定事实、事件顺序、战斗结果、道具和关键信息。",
+        },
+        {
+          role: "user",
+          content: this.buildStyleGuardRewritePrompt(chapter, issues, params.language),
+        },
+      ],
+      { maxTokens: params.maxTokens, temperature: 0.25 },
+    );
+
+    return {
+      content: this.extractRewriteChapterContent(response.content),
+      usage: response.usage,
+    };
+  }
+
+  private buildStyleGuardRewritePrompt(
+    chapter: string,
+    issues: ReadonlyArray<string>,
+    language: "zh" | "en",
+  ): string {
+    if (language === "en") {
+      return `Fix the style issues in the chapter below.
+
+Issues:
+${issues.map((issue) => `- ${issue}`).join("\n")}
+
+Requirements:
+- Do not change the plot.
+- Do not change character behavior.
+- Do not change worldbuilding, event order, combat outcomes, item gains/losses, or key information.
+- Only modify the sentences or paragraphs related to the listed issues.
+- Replace template phrases with concrete sensory, physical, or object-driven details.
+- Break repeated structure by changing expression and scene emphasis, not by adding new plot.
+- Output the complete repaired chapter text only. Do not explain.
+
+Chapter:
+${chapter}`;
+    }
+
+    return `你需要修复以下章节的写作风格问题：
+
+问题：
+${issues.map((issue) => `- ${issue}`).join("\n")}
+
+要求：
+- 不改变剧情
+- 不改变人物行为
+- 不改变设定
+- 不改变事件顺序
+- 不改变战斗结果
+- 不删除关键道具、线索、状态变化或关键信息
+- 只修改存在问题的句子或段落
+
+重点：
+- 替换模板句
+- 增加具体感官、动作或物理反馈
+- 打散重复结构，但不得新增关键设定或新剧情
+- 输出完整修复后的章节正文，不要解释，不要输出报告
+
+原章节：
+${chapter}`;
+  }
+
+  private extractRewriteChapterContent(raw: string): string {
+    const tagged = raw.match(/===\s*CHAPTER_CONTENT\s*===\s*([\s\S]*?)(?====\s*[A-Z_]+\s*===|$)/);
+    if (tagged?.[1]?.trim()) {
+      return tagged[1].trim();
+    }
+    return raw
+      .replace(/^```(?:markdown|md|text)?\s*/i, "")
+      .replace(/```\s*$/i, "")
+      .trim();
+  }
+
   private extractHookEmergenceDirectiveFromIntentMarkdown(chapterIntent: string | undefined): {
     readonly mustMaterializeHookNow: boolean;
     readonly hookExecutionPhase?: "any" | "late";
@@ -1135,6 +1335,7 @@ export class WriterAgent extends BaseAgent {
       readonly targetHookExpectedPayoff?: string;
       readonly targetHookNotes?: string;
     };
+    readonly patternBreakerDirective?: string;
   }): string {
     const contextBlock = params.externalContext
       ? `\n## 外部指令\n以下是来自外部系统的创作指令，请在本章中融入：\n\n${params.externalContext}\n`
@@ -1182,6 +1383,9 @@ ${params.parentCanon}\n`
       directive: params.hookEmergenceDirective,
       language: params.language ?? "zh",
     });
+    const patternBreakerBlock = params.patternBreakerDirective
+      ? `\n${params.patternBreakerDirective}\n`
+      : "";
     const lengthRequirementBlock = this.buildLengthRequirementBlock(params.lengthSpec, params.language ?? "zh");
 
     if (params.language === "en") {
@@ -1199,6 +1403,7 @@ ${moodDirectiveBlock}
 ${characterAuthenticityBlock}
 ${payoffDirectiveBlock}
 ${hookEmergenceDirectiveBlock}
+${patternBreakerBlock}
 ## Recent Chapters
 ${params.recentChapters || "(This is the first chapter, no previous text)"}
 
@@ -1233,6 +1438,7 @@ ${moodDirectiveBlock}
 ${characterAuthenticityBlock}
 ${payoffDirectiveBlock}
 ${hookEmergenceDirectiveBlock}
+${patternBreakerBlock}
 ## 最近章节
 ${params.recentChapters || "(这是第一章，无前文)"}
 
@@ -1586,6 +1792,7 @@ ${lengthRequirementBlock}
     readonly varianceBrief?: string;
     readonly selectedEvidenceBlock?: string;
     readonly titleCandidates?: ReadonlyArray<{ readonly style: string; readonly title: string }>;
+    readonly patternBreakerDirective?: string;
   }): string {
     const sanitizedChapterIntent = this.stripLegacyEndingHookDirective(params.chapterIntent);
     const contextSections = params.contextPackage.selectedContext
@@ -1615,6 +1822,9 @@ ${lengthRequirementBlock}
       : "";
     const selectedEvidenceBlock = params.selectedEvidenceBlock
       ? `\n${params.selectedEvidenceBlock}\n`
+      : "";
+    const patternBreakerBlock = params.patternBreakerDirective
+      ? `\n${params.patternBreakerDirective}\n`
       : "";
     const moodDirective = this.extractMoodDirectiveFromIntentMarkdown(sanitizedChapterIntent);
     const modeLockBlock = this.buildFirstPassModeLockBlock(moodDirective, params.language ?? "zh");
@@ -1651,6 +1861,7 @@ ${characterAuthenticityBlock}
 ${payoffDirectiveBlock}
 ${hookEmergenceDirectiveBlock}
 ${titleBlock}
+${patternBreakerBlock}
 
 ## Rule Stack
 - Hard: ${params.ruleStack.sections.hard.join(", ") || "(none)"}
@@ -1685,6 +1896,7 @@ ${characterAuthenticityBlock}
 ${payoffDirectiveBlock}
 ${hookEmergenceDirectiveBlock}
 ${titleBlock}
+${patternBreakerBlock}
 
 ## 规则栈
 - 硬护栏：${params.ruleStack.sections.hard.join("、") || "(无)"}
