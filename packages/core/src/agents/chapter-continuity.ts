@@ -5,7 +5,8 @@ import { chatCompletion, type LLMClient } from "../llm/provider.js";
 export type ContinuityStatus = "PASS" | "NEED_FIX" | "REWRITE_REQUIRED" | "MANUAL_REVIEW";
 export type ContinuityLevel = "优秀" | "可用" | "不合格";
 export type ContinuityRewriteMode = "none" | "light_fix" | "full_rewrite";
-export type ContinuityFinalStatus = "PASS" | "MANUAL_REVIEW" | "RETRY";
+export type ContinuityRewriteStrategy = "salvage_rewrite";
+export type ContinuityFinalStatus = "PASS" | "MANUAL_REVIEW" | "DROP" | "RETRY";
 
 export interface ContinuityIssue {
   readonly type: string;
@@ -28,6 +29,7 @@ export interface ContinuityReport {
   readonly crisis_progress: string;
   readonly fix_suggestions: ReadonlyArray<string>;
   readonly rewrite_mode: ContinuityRewriteMode;
+  readonly rewrite_strategy?: ContinuityRewriteStrategy;
   readonly rewrite_prompt: string;
   readonly fix_attempt: number;
   readonly max_fix_attempts: number;
@@ -174,6 +176,7 @@ export function renderContinuityMarkdown(
 - 等级：${report.level}
 - 状态：${report.status}
 - 修复模式：${report.rewrite_mode}
+${report.rewrite_strategy ? `- 重写策略：${report.rewrite_strategy}\n` : ""}
 - 修复次数：${report.fix_attempt}/${report.max_fix_attempts}
 - 最终状态：${report.final_status}
 - 当前目标：${report.current_goal || "未识别"}
@@ -558,6 +561,7 @@ function parseContinuityReport(raw: string): ContinuityReport {
     crisis_progress: stringValue(parsed.crisis_progress),
     fix_suggestions: stringArray(parsed.fix_suggestions),
     rewrite_mode: rewriteMode,
+    rewrite_strategy: parsed.rewrite_strategy === "salvage_rewrite" ? "salvage_rewrite" : undefined,
     rewrite_prompt: stringValue(parsed.rewrite_prompt),
     fix_attempt: normalizeNonNegativeInt(parsed.fix_attempt, 0),
     max_fix_attempts: normalizePositiveInt(parsed.max_fix_attempts, 2),
@@ -721,7 +725,7 @@ function isContinuityRewriteMode(value: unknown): value is ContinuityRewriteMode
 }
 
 function isContinuityFinalStatus(value: unknown): value is ContinuityFinalStatus {
-  return value === "PASS" || value === "MANUAL_REVIEW" || value === "RETRY";
+  return value === "PASS" || value === "MANUAL_REVIEW" || value === "DROP" || value === "RETRY";
 }
 
 export function chapterNumberPrefix(chapterNumber: number): string {

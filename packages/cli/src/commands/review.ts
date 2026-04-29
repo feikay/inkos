@@ -2,6 +2,7 @@ import { Command } from "commander";
 import {
   StateManager,
   chapterNumberPrefix,
+  chatCompletion,
   createLLMClient,
   formatLengthCount,
   isApiKeyOptionalForEndpoint,
@@ -154,6 +155,7 @@ reviewCommand
         let current: ContinuityCommandResult | undefined;
         let initial: ContinuityCommandResult | undefined;
         let fixed: ContinuityFixResult | undefined;
+        let salvage: ContinuitySalvageResult | undefined;
         let currentChapterOverride: string | undefined;
 
         do {
@@ -208,7 +210,7 @@ reviewCommand
           throw new Error(`Continuity auto failed to produce a report for chapter ${chapter}`);
         }
 
-        const finalStatus = score >= 85 ? "PASS" : "MANUAL_REVIEW";
+        let finalStatus = score >= 85 ? "PASS" : "MANUAL_REVIEW";
         let finalReport = current.report;
         if (finalStatus === "MANUAL_REVIEW") {
           finalReport = markManualReview(finalReport);
@@ -224,6 +226,89 @@ reviewCommand
           if (!opts.json) {
             log("warning: Chapter failed to reach PASS after max attempts. Manual review required.");
           }
+
+          if (runtime?.client && runtime.model) {
+            if (!opts.json) {
+              log("");
+              log("[auto-salvage]");
+            }
+            salvage = await runContinuitySalvage({
+              bookDir: book.dir,
+              chapter,
+              client: runtime.client,
+              model: runtime.model,
+              issues: finalReport.issues,
+              maxFixAttempts,
+            });
+
+            const salvageScore = salvage.report?.report.score ?? 0;
+            if (!opts.json) {
+              log(`rewrite -> score: ${salvageScore}`);
+            }
+
+            if (salvage.report && salvageScore >= 85) {
+              finalStatus = "PASS";
+              finalReport = {
+                ...salvage.report.report,
+                rewrite_strategy: "salvage_rewrite",
+                final_status: "PASS",
+                summary: `${salvage.report.report.summary}\n\nsalvage_rewrite accepted as final chapter candidate.`,
+              };
+              await writeContinuityReportFiles(
+                finalReport,
+                join(reportDir, `${prefix}.final-report.json`),
+                join(reportDir, `${prefix}.final-report.md`),
+                chapter,
+                salvage.report.chapterTitle,
+              );
+              if (!opts.json) log("final result: PASS (salvaged)");
+            } else if (salvage.report && salvageScore >= 70) {
+              const lightFixed = await runSalvageLightFix({
+                bookDir: book.dir,
+                chapter,
+                client: runtime.client,
+                model: runtime.model,
+                reportJsonPath: salvage.report.reportJsonPath,
+                maxFixAttempts,
+              });
+              salvage = { ...salvage, lightFixChapterPath: lightFixed.fixedChapterPath };
+              const afterLightFix = await checkContinuityChapter({
+                root,
+                bookId: book.id,
+                bookDir: book.dir,
+                chapter,
+                client: runtime.client,
+                model: runtime.model,
+                final: true,
+                reportKind: "final-report",
+                currentOverridePath: lightFixed.fixedChapterPath,
+                fixAttempt: maxFixAttempts,
+                maxFixAttempts,
+              });
+              salvage = { ...salvage, finalReport: afterLightFix };
+              finalStatus = afterLightFix.report.score >= 85 ? "PASS" : "DROP";
+              finalReport = finalStatus === "PASS"
+                ? { ...afterLightFix.report, rewrite_strategy: "salvage_rewrite", final_status: "PASS" }
+                : markDrop(afterLightFix.report, "salvage_rewrite plus one light_fix still failed to reach PASS.");
+              if (finalStatus === "DROP") {
+                await writeContinuityReportFiles(finalReport, afterLightFix.reportJsonPath, afterLightFix.reportMarkdownPath, chapter, afterLightFix.chapterTitle);
+              }
+              if (!opts.json) log(`final result: ${finalStatus}${finalStatus === "PASS" ? " (salvaged)" : ""}`);
+            } else {
+              finalStatus = "DROP";
+              finalReport = markDrop(salvage.report?.report ?? finalReport, "salvage_rewrite failed below usable score.");
+              await writeContinuityReportFiles(
+                finalReport,
+                join(reportDir, `${prefix}.final-report.json`),
+                join(reportDir, `${prefix}.final-report.md`),
+                chapter,
+                salvage.report?.chapterTitle ?? current.chapterTitle,
+              );
+              if (!opts.json) log("final result: DROP");
+            }
+          } else if (!opts.json) {
+            log("warning: auto-salvage skipped because LLM config is unavailable.");
+          }
         }
 
         if (!opts.json) {
@@ -234,6 +319,7 @@ reviewCommand
           chapter,
           initial,
           fixed,
+          salvage,
           final: { ...current, report: finalReport },
           finalStatus,
         });
@@ -468,10 +554,19 @@ interface ContinuityFixResult {
   readonly skippedReason?: string;
 }
 
+interface ContinuitySalvageResult {
+  readonly chapter: number;
+  readonly salvageChapterPath: string;
+  readonly lightFixChapterPath?: string;
+  readonly report?: ContinuityCommandResult;
+  readonly finalReport?: ContinuityCommandResult;
+}
+
 interface ContinuityAutoResult {
   readonly chapter: number;
   readonly initial: ContinuityCommandResult;
   readonly fixed?: ContinuityFixResult;
+  readonly salvage?: ContinuitySalvageResult;
   readonly final?: ContinuityCommandResult;
   readonly finalStatus: string;
 }
@@ -599,6 +694,7 @@ async function checkContinuityChapter(params: {
   readonly client?: ReturnType<typeof createClient>;
   readonly model?: string;
   readonly final: boolean;
+  readonly reportKind?: "report" | "final-report" | "salvage-report";
   readonly currentOverridePath?: string;
   readonly fixAttempt?: number;
   readonly maxFixAttempts?: number;
@@ -619,8 +715,9 @@ async function checkContinuityChapter(params: {
 
   const reportDir = join(params.bookDir, "reviews", "continuity");
   const prefix = chapterNumberPrefix(params.chapter);
-  const reportJsonPath = join(reportDir, `${prefix}.${params.final ? "final-report" : "report"}.json`);
-  const reportMarkdownPath = join(reportDir, `${prefix}.${params.final ? "final-report" : "report"}.md`);
+  const reportKind = params.reportKind ?? (params.final ? "final-report" : "report");
+  const reportJsonPath = join(reportDir, `${prefix}.${reportKind}.json`);
+  const reportMarkdownPath = join(reportDir, `${prefix}.${reportKind}.md`);
 
   const report = params.client && params.model
     ? await runChapterContinuityCheck({
@@ -665,6 +762,7 @@ async function fixContinuityChapter(params: {
   readonly reportJsonPath: string;
   readonly attempt: number;
   readonly maxFixAttempts: number;
+  readonly outputPath?: string;
 }): Promise<ContinuityFixResult> {
   const report = JSON.parse(await readFile(params.reportJsonPath, "utf-8")) as ContinuityReport;
   const skip = getContinuityFixSkipReason(report, params.maxFixAttempts);
@@ -677,7 +775,7 @@ async function fixContinuityChapter(params: {
   }
 
   const outDir = join(params.bookDir, "chapters-fixed");
-  const outputPath = join(outDir, `${chapterNumberPrefix(params.chapter)}_attempt${params.attempt}.md`);
+  const outputPath = params.outputPath ?? join(outDir, `${chapterNumberPrefix(params.chapter)}_attempt${params.attempt}.md`);
   await runChapterContinuityFix({
     client: params.client,
     model: params.model,
@@ -685,6 +783,156 @@ async function fixContinuityChapter(params: {
     outputPath,
   });
   return { chapter: params.chapter, fixedChapterPath: outputPath, attempt: params.attempt };
+}
+
+async function runContinuitySalvage(params: {
+  readonly bookDir: string;
+  readonly chapter: number;
+  readonly client: ReturnType<typeof createClient>;
+  readonly model: string;
+  readonly issues: ContinuityReport["issues"];
+  readonly maxFixAttempts: number;
+}): Promise<ContinuitySalvageResult> {
+  const prev = await findChapterFile(params.bookDir, params.chapter - 1);
+  const current = await findChapterFile(params.bookDir, params.chapter);
+  const [prevChapter, currentChapter] = await Promise.all([
+    readFile(prev.file, "utf-8"),
+    readFile(current.file, "utf-8"),
+  ]);
+  const prompt = buildSalvageRewritePrompt({
+    prevChapter,
+    currentChapterSummary: summarizeChapterForSalvage(currentChapter),
+    issues: params.issues,
+  });
+
+  const response = await chatCompletion(params.client, params.model, [
+    {
+      role: "system",
+      content: [
+        "你是网文连载章节失败稿抢救编辑。",
+        "只输出重写后的完整章节正文。",
+        "不要输出说明、报告、JSON、Markdown 代码块。",
+      ].join("\n"),
+    },
+    { role: "user", content: prompt },
+  ], { temperature: 0.45, maxTokens: 8192 });
+
+  const rewritten = stripMarkdownCodeFence(response.content).trim();
+  if (!rewritten) throw new Error("auto-salvage returned empty chapter content");
+
+  const outDir = join(params.bookDir, "chapters-salvaged");
+  const outputPath = join(outDir, `${chapterNumberPrefix(params.chapter)}_salvage.md`);
+  await mkdir(outDir, { recursive: true });
+  await writeFile(outputPath, `${rewritten.trimEnd()}\n`, "utf-8");
+
+  const report = await checkContinuityChapter({
+    root: "",
+    bookId: "",
+    bookDir: params.bookDir,
+    chapter: params.chapter,
+    client: params.client,
+    model: params.model,
+    final: false,
+    reportKind: "salvage-report",
+    currentOverridePath: outputPath,
+    fixAttempt: params.maxFixAttempts,
+    maxFixAttempts: params.maxFixAttempts,
+  });
+  const salvageReport = {
+    ...report.report,
+    rewrite_strategy: "salvage_rewrite" as const,
+  };
+  await writeContinuityReportFiles(
+    salvageReport,
+    report.reportJsonPath,
+    report.reportMarkdownPath,
+    params.chapter,
+    report.chapterTitle,
+  );
+
+  return {
+    chapter: params.chapter,
+    salvageChapterPath: outputPath,
+    report: { ...report, report: salvageReport },
+  };
+}
+
+async function runSalvageLightFix(params: {
+  readonly bookDir: string;
+  readonly chapter: number;
+  readonly client: ReturnType<typeof createClient>;
+  readonly model: string;
+  readonly reportJsonPath: string;
+  readonly maxFixAttempts: number;
+}): Promise<ContinuityFixResult> {
+  const outputPath = join(params.bookDir, "chapters-salvaged", `${chapterNumberPrefix(params.chapter)}_salvage_lightfix.md`);
+  await runChapterContinuityFix({
+    client: params.client,
+    model: params.model,
+    reportJsonPath: params.reportJsonPath,
+    outputPath,
+  });
+  return { chapter: params.chapter, fixedChapterPath: outputPath, attempt: params.maxFixAttempts };
+}
+
+function buildSalvageRewritePrompt(params: {
+  readonly prevChapter: string;
+  readonly currentChapterSummary: string;
+  readonly issues: ContinuityReport["issues"];
+}): string {
+  const issues = params.issues.length
+    ? params.issues.map((issue) => `[${issue.severity}] ${issue.type}: ${issue.detail}`).join("\n")
+    : "未识别到结构化问题，但章节已在自动修复后仍未通过连续性检测。";
+  return `【上一章全文】
+${params.prevChapter}
+
+【当前章节原文（仅提取剧情要点）】
+${params.currentChapterSummary}
+
+【已知问题】
+${issues}
+
+【重写任务】
+
+你正在重写一章失败的网文连载章节。
+
+要求：
+
+1. 本章必须直接承接上一章结尾画面、声音或危机。
+2. 严禁复用当前章节的原始结构（允许参考事件，不允许照抄表达）。
+3. 必须明确主角行动目标，并贯穿全章。
+4. 必须推进至少一个关键伏笔。
+5. 必须让危机升级（不能停滞）。
+6. 结尾必须形成新的钩子。
+7. 保持番茄风格：短句、快节奏、强冲突。
+
+【允许】
+- 重写结构
+- 重写对白
+- 重写动作链
+
+【禁止】
+- 新增主线剧情
+- 改变人物关系
+- 改变战力体系
+- 改变既有伏笔含义
+
+输出：完整章节正文`;
+}
+
+function summarizeChapterForSalvage(chapter: string): string {
+  const normalized = chapter.replace(/\s+/g, "\n").trim();
+  if (normalized.length <= 2600) return normalized;
+  const head = normalized.slice(0, 1300);
+  const tail = normalized.slice(-1300);
+  return `${head}\n\n……中段省略，仅保留剧情意图参考，禁止照抄原始结构……\n\n${tail}`;
+}
+
+function stripMarkdownCodeFence(raw: string): string {
+  return raw
+    .replace(/^```(?:markdown|md|text|txt)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
 }
 
 async function readContinuityFixState(bookDir: string, chapter: number, maxFixAttempts: number): Promise<{
@@ -744,6 +992,16 @@ function markManualReview(report: ContinuityReport, reason = ""): ContinuityRepo
     ...report,
     status: "MANUAL_REVIEW",
     final_status: "MANUAL_REVIEW",
+    summary: `${report.summary}\n\n${suffix}`,
+  };
+}
+
+function markDrop(report: ContinuityReport, reason = ""): ContinuityReport {
+  const warning = "Chapter failed salvage_rewrite and cannot enter the publish pool.";
+  const suffix = reason ? `${warning} ${reason}` : warning;
+  return {
+    ...report,
+    final_status: "DROP",
     summary: `${report.summary}\n\n${suffix}`,
   };
 }

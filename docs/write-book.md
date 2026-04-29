@@ -19,7 +19,8 @@ node scripts/fanqie/repair-fanqie.mjs 葬渊魔经 --apply
 
 cd my-novel
 
-# 6段修复后再查连续性 --max-fix-attempts不带时默认2
+# 6段修复后再查连续性 --max-fix-attempts不带时默认2 
+# --max-fix-attempts 0 时强制自动重写salvage
 node ../packages/cli/dist/index.js review continuity-auto --book 葬渊魔经 --from 2 --to 200 --max-fix-attempts 2
 
 cd ..
