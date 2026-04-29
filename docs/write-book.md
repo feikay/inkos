@@ -4,6 +4,7 @@
 cd my-novel
 node ../packages/cli/dist/index.js write next 葬渊魔经
 
+
 node scripts/fanqie/export-fanqie.mjs 葬渊魔经 --incremental --title "气血为0，我却能撬动规则"
 
 node scripts/fanqie/repair-fanqie.mjs 葬渊魔经 --apply

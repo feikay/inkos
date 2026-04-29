@@ -320,13 +320,40 @@ function stripTitlePrefix(text) {
 function normalizeTitleCandidate(text) {
   return stripTitlePrefix(text)
     .replace(/^["'“”‘’【】\[\]()（）]+|["'“”‘’【】\[\]()（）]+$/g, "")
-    .replace(/[：:]\s*.+$/u, "")
     .replace(/\s+/g, "")
     .trim();
 }
 
 function countChineseChars(text) {
   return (text.match(/[\u3400-\u9fff]/g) || []).length;
+}
+
+function isNarrativeTitleFragment(text) {
+  const value = (text || "").trim();
+  if (!value) return false;
+  if (/^(?:楚夜|云岚|他|她|它|他们|此刻|这时|随后|突然|当|如果|因为|为了|然后|刚|正|便|就|又)/.test(value)) {
+    return true;
+  }
+  if (/(?:试图|伸手|开口|看向|盯着|发现|感到|站在|坐在|走到|走向|传来|浮现|变得|彻底|靠在|落在|按住|闭上|深吸|喘息)/.test(value)) {
+    return true;
+  }
+  return false;
+}
+
+function hasPollutedTitleShape(text) {
+  const raw = stripTitlePrefix(text)
+    .replace(/^["'“”‘’【】\[\]()（）]+|["'“”‘’【】\[\]()（）]+$/g, "")
+    .trim();
+  if (!raw) return false;
+  if (/\n/.test(raw)) return true;
+  const colonMatch = raw.match(/^[^：:]{1,18}[：:](.+)$/u);
+  if (!colonMatch) return false;
+  const suffix = colonMatch[1].trim();
+  if (!suffix) return true;
+  if (/[，。！？；,.!?;]/.test(suffix)) return true;
+  if (isNarrativeTitleFragment(suffix)) return true;
+  if (countChineseChars(suffix) >= 5) return true;
+  return false;
 }
 
 function isStructuralTitle(text) {
@@ -336,6 +363,7 @@ function isStructuralTitle(text) {
 function isValidTitleCandidate(text) {
   const value = normalizeTitleCandidate(text);
   if (!value) return false;
+  if (hasPollutedTitleShape(text)) return false;
   if (/\n/.test(value)) return false;
   if (isStructuralTitle(value)) return false;
   if (/[。！？；.!?;]/.test(value)) return false;
@@ -407,6 +435,179 @@ function removeExistingTitle(text) {
   }
 
   return stripLeadingMeta(lines.join("\n"));
+}
+
+function splitIntoSentences(paragraph) {
+  const text = (paragraph || "").replace(/\s+/g, "").trim();
+  if (!text) return [];
+
+  const sentences = [];
+  let current = "";
+  const chars = [...text];
+  const endPunctuation = new Set(["。", "！", "？", "!", "?", "；", ";"]);
+  const closingQuotes = new Set(["”", "\"", "」", "』"]);
+
+  for (let i = 0; i < chars.length; i += 1) {
+    const ch = chars[i];
+    const next = chars[i + 1] || "";
+    current += ch;
+
+    if (ch === "…" && next === "…") {
+      current += next;
+      i += 1;
+      while (closingQuotes.has(chars[i + 1] || "")) {
+        current += chars[i + 1];
+        i += 1;
+      }
+      sentences.push(current.trim());
+      current = "";
+      continue;
+    }
+
+    if (endPunctuation.has(ch)) {
+      while (closingQuotes.has(chars[i + 1] || "")) {
+        current += chars[i + 1];
+        i += 1;
+      }
+      sentences.push(current.trim());
+      current = "";
+      continue;
+    }
+
+    if (closingQuotes.has(ch) && endPunctuation.has(chars[i - 1] || "")) {
+      sentences.push(current.trim());
+      current = "";
+    }
+  }
+
+  if (current.trim()) sentences.push(current.trim());
+  return sentences.filter(Boolean);
+}
+
+function formatParagraphForWebNovel(paragraph) {
+  const raw = (paragraph || "").trim();
+  if (!raw) return [];
+  if (/^#{1,6}\s+/.test(raw)) {
+    return [raw];
+  }
+  if (countChars(raw) <= 120) {
+    return [raw];
+  }
+
+  const sentences = splitIntoSentences(raw);
+  if (!sentences.length) return [raw];
+
+  const paragraphs = [];
+  let current = "";
+
+  const flush = () => {
+    const value = current.trim();
+    if (value) paragraphs.push(value);
+    current = "";
+  };
+
+  for (const sentence of sentences) {
+    const value = sentence.trim();
+    if (!value) continue;
+    const sentenceLen = countChars(value);
+
+    if (!current) {
+      current = value;
+      if (sentenceLen >= 120 || /^[“"].+[”"]$/.test(value)) {
+        flush();
+      }
+      continue;
+    }
+
+    const next = `${current}${value}`;
+    const nextLen = countChars(next);
+    const currentLen = countChars(current);
+    const isDialogue = /^[“"].+[”"]$/.test(value);
+
+    if (
+      isDialogue
+      || nextLen > 120
+      || (currentLen >= 40 && sentenceLen >= 40)
+      || (currentLen >= 70 && sentenceLen >= 20)
+    ) {
+      flush();
+      current = value;
+      if (sentenceLen >= 120 || isDialogue) {
+        flush();
+      }
+      continue;
+    }
+
+    current = next;
+
+    if (countChars(current) >= 90) {
+      flush();
+    }
+  }
+
+  flush();
+  return paragraphs;
+}
+
+function normalizeSoftLineBreaks(text) {
+  const lines = (text || "").split("\n");
+  const paragraphs = [];
+  let current = [];
+
+  const flush = () => {
+    if (!current.length) return;
+    paragraphs.push(current.join("").trim());
+    current = [];
+  };
+
+  for (const line of lines) {
+    const value = line.trim();
+    if (!value) {
+      flush();
+      continue;
+    }
+
+    if (/^#{1,6}\s+/.test(value)) {
+      flush();
+      paragraphs.push(value);
+      continue;
+    }
+
+    current.push(value);
+  }
+
+  flush();
+  return paragraphs.join("\n\n").trim();
+}
+
+function validateParagraphBreaks(text) {
+  const warnings = [];
+  const value = (text || "").trim();
+  if (!value) return warnings;
+
+  if (/[\u4e00-\u9fa5]\n(?!\n)[\u4e00-\u9fa5]/u.test(value)) {
+    warnings.push("检测到中文词句被单换行截断。");
+  }
+  if (/(?:^|\n\n)[，。！？；：、”」』]/u.test(value)) {
+    warnings.push("检测到段首出现异常标点。");
+  }
+  if (/(?:迅|肌|未|腥涩|深)\n(?!\n)(?:速|肉|知|。|渊)/u.test(value)) {
+    warnings.push("检测到常见双字词或短语被错误断行。");
+  }
+  return warnings;
+}
+
+function rewriteToWebNovelStyle(text) {
+  const source = normalizeSoftLineBreaks(text);
+  if (!source) return "";
+
+  const rawParagraphs = source
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  const formatted = rawParagraphs.flatMap((paragraph) => formatParagraphForWebNovel(paragraph));
+  return formatted.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function countChars(text) {
@@ -481,6 +682,7 @@ function qualityWarnings(text) {
 
   if (/他意识到|他明白了|显然|这意味着/.test(text)) warnings.push("仍存在说明式内心表达。");
   if (/——/.test(text)) warnings.push("仍存在破折号，建议替换。");
+  warnings.push(...validateParagraphBreaks(text));
 
   return warnings;
 }
@@ -683,7 +885,8 @@ for (const { file, no } of chapterFiles) {
 
   if (!text) continue;
 
-  const finalText = `${title}\n\n${text}\n`;
+  const rewrittenText = rewriteToWebNovelStyle(text);
+  const finalText = `${title}\n\n${rewrittenText}\n`;
 
   const check = sixPartCheck(finalText);
   const warnings = qualityWarnings(finalText);
