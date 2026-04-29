@@ -132,6 +132,11 @@ describe("BookConfigSchema", () => {
     const result = BookConfigSchema.parse({ ...validBook, schemaVersion: 2 });
     expect(result.schemaVersion).toBe(2);
   });
+
+  it("accepts short story book type", () => {
+    const result = BookConfigSchema.parse({ ...validBook, type: "short_story" });
+    expect(result.type).toBe("short_story");
+  });
 });
 
 describe("PlatformSchema", () => {
@@ -509,7 +514,13 @@ describe("ChapterIntentSchema", () => {
       outlineNode: "Volume 2 / Chapter 12",
       sceneDirective: "Break the repeated investigation-room rhythm with a location change.",
       arcDirective: "Advance toward the next concrete arc beat instead of replaying the fallback setup.",
-      moodDirective: "Release pressure for one chapter before the next escalation.",
+      moodDirective: {
+        targetMode: "breath",
+        writingMode: "breath",
+        requiredSceneQuota: 1,
+        moodCoverageMin: 0.3,
+        note: "Release pressure for one chapter before the next escalation.",
+      },
       titleDirective: "Avoid another ledger title and use a new concrete image.",
       mustKeep: ["Protagonist remains injured"],
       mustAvoid: ["Do not reveal the mastermind"],
@@ -556,7 +567,7 @@ describe("ChapterIntentSchema", () => {
     expect(result.goal).toContain("mentor conflict");
     expect(result.sceneDirective).toContain("location change");
     expect(result.arcDirective).toContain("arc beat");
-    expect(result.moodDirective).toContain("Release pressure");
+    expect(result.moodDirective?.note).toContain("Release pressure");
     expect(result.titleDirective).toContain("ledger title");
     expect(result.conflicts).toHaveLength(1);
     expect(result.chapterGoal).toEqual(expect.objectContaining({

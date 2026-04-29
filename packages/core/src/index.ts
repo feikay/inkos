@@ -1,5 +1,5 @@
 // Models
-export { type BookConfig, type Platform, type Genre, type BookStatus, type FanficMode, type WebnovelTemplate, BookConfigSchema, PlatformSchema, GenreSchema, BookStatusSchema, FanficModeSchema, WebnovelTemplateSchema } from "./models/book.js";
+export { type BookConfig, type Platform, type Genre, type BookStatus, type FanficMode, type WebnovelTemplate, type BookType, BookConfigSchema, PlatformSchema, GenreSchema, BookStatusSchema, FanficModeSchema, WebnovelTemplateSchema, BookTypeSchema } from "./models/book.js";
 export { type ChapterMeta, type ChapterStatus, ChapterMetaSchema, ChapterStatusSchema } from "./models/chapter.js";
 export { type ProjectConfig, type LLMConfig, type NotifyChannel, type DetectionConfig, type QualityGates, type AgentLLMOverride, type InputGovernanceMode, ProjectConfigSchema, LLMConfigSchema, AgentLLMOverrideSchema, DetectionConfigSchema, QualityGatesSchema, InputGovernanceModeSchema } from "./models/project.js";
 export { type CurrentState, type ParticleLedger, type PendingHooks, type PendingHook, type LedgerEntry } from "./models/state.js";
@@ -174,6 +174,9 @@ export {
   createDirectiveStreamFilter,
   type ParsedDraftResponse,
 } from "./interaction/draft-directive-parser.js";
+
+// Short story mode
+export * from "./short-story/index.js";
 
 // Agent (pi-agent integration)
 export * from "./agent/index.js";

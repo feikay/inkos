@@ -18,9 +18,16 @@ const sourceStudioPackageJsonPromise = readFile(resolve(studioDir, "package.json
 
 async function packPackage(packageDir: string, packDir: string) {
   const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
+  const npmCacheDir = join(packDir, "npm-cache");
+  await mkdir(npmCacheDir, { recursive: true });
+
   execFileSync(npmCmd, ["pack", "--pack-destination", packDir], {
     cwd: packageDir,
-    env: process.env,
+    env: {
+      ...process.env,
+      npm_config_cache: npmCacheDir,
+      NPM_CONFIG_CACHE: npmCacheDir,
+    },
     encoding: "utf-8",
     shell: process.platform === "win32",
   });
