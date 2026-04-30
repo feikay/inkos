@@ -334,15 +334,22 @@ describe("CLI integration", () => {
       run(["short-story", "titles", "--theme", "悬疑惊悚"]);
 
       const output = run(["short-story", "export", "--theme", "悬疑惊悚"]);
-      const publishChapter = await readFile(join(storyDir, "publish", "001.md"), "utf-8");
+      const publishFiles = await readdir(join(storyDir, "publish"));
+      const firstChapterFile = publishFiles.find((fileName) => fileName.startsWith("001_") && fileName.endsWith(".md"));
+      expect(firstChapterFile).toBeDefined();
+      expect(publishFiles).not.toContain("001.md");
+      expect(firstChapterFile).not.toMatch(/[\/\\:*?"<>|]/);
+      const publishChapter = await readFile(join(storyDir, "publish", firstChapterFile ?? ""), "utf-8");
       const bookText = await readFile(join(storyDir, "publish", "book.txt"), "utf-8");
+      const firstTitle = publishChapter.match(/^# (第1章 .+)$/m)?.[1];
 
       expect(output).toContain("Short story exported: 悬疑惊悚");
       expect(output).toContain("Chapters:");
-      expect(publishChapter).toContain("# 第1章");
+      expect(publishChapter).toMatch(/^# 第1章 .{8,16}$/m);
       expect(publishChapter).not.toMatch(/\n{3,}/);
       expect(bookText).toContain("《姐姐失踪三年后给我打电话，冷柜里的女尸睁眼了》");
-      expect(bookText).toContain("第1章");
+      expect(firstTitle).toBeDefined();
+      expect(bookText).toContain(firstTitle ?? "");
       expect(bookText).toContain("第33章");
       expect(bookText).not.toContain("# 第1章");
     });

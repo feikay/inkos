@@ -276,9 +276,25 @@ describe("short story chapter plan", () => {
     const titles = renderShortStoryTitlesMarkdown("悬疑惊悚", [
       "《姐姐失踪三年后给我打电话，冷柜里的女尸睁眼了》",
     ]);
+    const planMarkdown = [
+      "# Short story plan: 悬疑惊悚",
+      "",
+      "- Target: 12000 words",
+      "- Chapter target: 1500 words",
+      "- Chapters: 1",
+      "",
+      "## [1] hook - 开局冲突",
+      "",
+      "- summary: 深夜十一点，法医助理许念在停尸间接到已故姐姐许晴的来电，冷柜里的无名女尸突然睁眼看向她。",
+      "- conflict: 许念想报警却发现手机没有来电记录，主任要求她立刻删除监控。",
+      "- endingHook: 三号冷柜再次响起，姐姐的声音让她别回头。",
+      "- targetWords: 1500",
+      "",
+    ].join("\n");
     const longParagraph = "许念站在停尸间，手机屏幕没有来电记录，三号冷柜却自己弹开一寸。她攥紧手电，低声问姐姐到底在哪。电话那头忽然安静，只剩一道贴着耳边的呼吸。冷柜灯猛地闪烁，无名女尸睁开眼。";
     const pkg = createShortStoryPublishPackage({
       theme: "悬疑惊悚",
+      planMarkdown,
       titlesMarkdown: titles,
       chapters: [
         {
@@ -291,10 +307,11 @@ describe("short story chapter plan", () => {
 
     expect(pkg.bookTitle).toBe("《姐姐失踪三年后给我打电话，冷柜里的女尸睁眼了》");
     expect(pkg.chapters).toHaveLength(1);
-    expect(pkg.chapters[0]?.content).toContain("# 第1章");
+    expect(pkg.chapters[0]?.fileName).toBe("001_凌晨电话来自死人.md");
+    expect(pkg.chapters[0]?.content).toContain("# 第1章 凌晨电话来自死人");
     expect(pkg.chapters[0]?.content).not.toMatch(/\n{3,}/);
     expect(pkg.bookText).toContain(pkg.bookTitle);
-    expect(pkg.bookText).toContain("第1章");
+    expect(pkg.bookText).toContain("第1章 凌晨电话来自死人");
     expect(pkg.bookText).not.toContain("# 第1章");
   });
 

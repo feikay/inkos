@@ -105,13 +105,15 @@ export function renderShortStoryTitlesMarkdown(theme: string, titles: ReadonlyAr
 export function createShortStoryPublishPackage(options: {
   readonly theme: string;
   readonly chapters: ReadonlyArray<ShortStoryPublishChapterInput>;
+  readonly planMarkdown?: string;
   readonly titlesMarkdown?: string;
 }): ShortStoryPublishPackage {
   const bookTitle = parseFirstShortStoryTitle(options.titlesMarkdown) ?? `《${options.theme}》`;
+  const chapterTitles = createChapterTitleMap(options.theme, options.planMarkdown);
   const chapters = options.chapters
     .slice()
     .sort((a, b) => a.chapterNumber - b.chapterNumber)
-    .map((chapter) => formatShortStoryPublishChapter(chapter));
+    .map((chapter) => formatShortStoryPublishChapter(chapter, chapterTitles.get(chapter.chapterNumber)));
   const bookText = [
     bookTitle,
     "",
@@ -137,19 +139,20 @@ export function parseFirstShortStoryTitle(markdown: string | undefined): string 
   return match?.[1];
 }
 
-export function formatShortStoryPublishChapter(input: ShortStoryPublishChapterInput): ShortStoryPublishChapter {
+export function formatShortStoryPublishChapter(
+  input: ShortStoryPublishChapterInput,
+  chapterTitle?: string,
+): ShortStoryPublishChapter {
   const normalized = input.content.replace(/\r\n/g, "\n").trim();
-  const originalTitle = normalized.match(/^#\s+(.+)$/m)?.[1]?.trim();
-  const title = originalTitle && originalTitle.length > 0
-    ? originalTitle
-    : `第${input.chapterNumber}章`;
+  const shortTitle = chapterTitle ?? deriveChapterTitleFromText(normalized, input.chapterNumber);
+  const title = `第${input.chapterNumber}章 ${shortTitle}`;
   const body = stripMarkdownTitle(normalized);
   const paragraphs = formatMobileFriendlyParagraphs(body);
   const content = `# ${title}\n\n${paragraphs.join("\n\n")}\n`;
 
   return {
     chapterNumber: input.chapterNumber,
-    fileName: input.fileName,
+    fileName: `${String(input.chapterNumber).padStart(3, "0")}_${sanitizePublishFileName(shortTitle)}.md`,
     title,
     content,
   };
@@ -266,6 +269,188 @@ function replaceOpeningParagraphs(
 
 function stripMarkdownTitle(markdown: string): string {
   return markdown.replace(/^#\s+.+?(?:\n+|$)/, "").trim();
+}
+
+interface ShortStoryPlanBeat {
+  readonly chapterNumber: number;
+  readonly summary: string;
+  readonly conflict: string;
+  readonly endingHook: string;
+}
+
+function createChapterTitleMap(theme: string, planMarkdown: string | undefined): Map<number, string> {
+  const titles = new Map<number, string>();
+  if (!planMarkdown) return titles;
+
+  const used = new Set<string>();
+  for (const beat of parseShortStoryPlanBeats(planMarkdown)) {
+    const title = uniquifyChapterTitle(
+      normalizeChapterTitle(deriveChapterTitleFromPlanBeat(theme, beat), beat.chapterNumber),
+      used,
+      beat.chapterNumber,
+    );
+    titles.set(beat.chapterNumber, title);
+  }
+  return titles;
+}
+
+function parseShortStoryPlanBeats(planMarkdown: string): ShortStoryPlanBeat[] {
+  const chapterMatches = [...planMarkdown.matchAll(/^## \[(\d+)\]\s+.+$/gm)];
+  return chapterMatches
+    .map((match, index): ShortStoryPlanBeat | undefined => {
+      const blockStart = match.index ?? 0;
+      const nextMatch = chapterMatches[index + 1];
+      const blockEnd = nextMatch?.index ?? planMarkdown.length;
+      const block = planMarkdown.slice(blockStart, blockEnd);
+      const chapterNumber = Number.parseInt(match[1] ?? "", 10);
+      if (!Number.isInteger(chapterNumber)) return undefined;
+
+      return {
+        chapterNumber,
+        summary: extractPlanField(block, "summary"),
+        conflict: extractPlanField(block, "conflict"),
+        endingHook: extractPlanField(block, "endingHook"),
+      };
+    })
+    .filter((beat): beat is ShortStoryPlanBeat =>
+      Boolean(beat && (beat.summary || beat.conflict || beat.endingHook))
+    );
+}
+
+function extractPlanField(block: string, fieldName: "summary" | "conflict" | "endingHook"): string {
+  const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return block.match(new RegExp(`^- ${escaped}:\\s*(.+)$`, "m"))?.[1]?.trim() ?? "";
+}
+
+function deriveChapterTitleFromPlanBeat(theme: string, beat: ShortStoryPlanBeat): string {
+  const strategy = resolveShortStoryPlanStrategy(theme);
+  const text = `${beat.summary} ${beat.conflict} ${beat.endingHook}`;
+  const primaryText = beat.summary || beat.conflict || beat.endingHook || text;
+
+  if (strategy.id === "thriller") {
+    return deriveThrillerChapterTitle(primaryText, beat.chapterNumber);
+  }
+  if (strategy.id === "betrayal-revenge") {
+    return deriveBetrayalRevengeChapterTitle(primaryText, beat.chapterNumber);
+  }
+  return compactPlotTitle(text, beat.chapterNumber);
+}
+
+function deriveChapterTitleFromText(markdown: string, chapterNumber: number): string {
+  return normalizeChapterTitle(compactPlotTitle(stripMarkdownTitle(markdown), chapterNumber), chapterNumber);
+}
+
+function deriveThrillerChapterTitle(text: string, chapterNumber: number): string {
+  const candidates: ReadonlyArray<[RegExp, string]> = [
+    [/电话|来电|手机/, "凌晨电话来自死人"],
+    [/袖扣/, "认尸男人戴旧袖扣"],
+    [/十三楼|第十三|数字：?十三|数字十三/, "十三楼旧秘密浮出"],
+    [/录音笔|录音|墙缝/, "墙缝录音藏着哭声"],
+    [/疗养院|病历|病例/, "旧病历写着她名"],
+    [/地下车库|黑车/, "车库黑车堵出口"],
+    [/火化申请单|火化单|火化记录/, "火化单上签着凶名"],
+    [/死亡证明/, "死亡证明当场伪造"],
+    [/负二层|地下实验|实验室/, "负二层灯又亮了"],
+    [/监控/, "监控里多了个人"],
+    [/女尸.*睁眼|睁眼/, "女尸突然睁开眼"],
+    [/冷柜/, "三号冷柜半夜响起"],
+    [/账本|数据/, "黑账本撕开真相"],
+    [/抓捕|被捕/, "抓捕现场灯突然灭"],
+    [/安葬|母亲墓|天亮/, "天亮后真相落地"],
+  ];
+  return matchTitleCandidate(text, candidates) ?? compactPlotTitle(text, chapterNumber);
+}
+
+function deriveBetrayalRevengeChapterTitle(text: string, chapterNumber: number): string {
+  const candidates: ReadonlyArray<[RegExp, string]> = [
+    [/十周年|宴会|酒店监控|视频/, "十周年宴上放视频"],
+    [/净身|协议|律师/, "净身协议藏杀招"],
+    [/闺蜜|苏蔓|录音/, "闺蜜亲口露底"],
+    [/亲子鉴定|鉴定报告/, "鉴定报告掀全场"],
+    [/换婴|护士长|旧档案/, "旧档案揭开换婴"],
+    [/机场|护照|硬盘/, "机场拦下逃亡丈夫"],
+    [/股东|董事|罢免/, "股东大会当场反杀"],
+    [/判刑|判决|法庭/, "法庭判决终于落锤"],
+    [/冻结|银行卡|财产/, "银行卡一夜冻结"],
+    [/直播|全网|社死/, "直播曝光全网炸"],
+  ];
+  return matchTitleCandidate(text, candidates) ?? compactPlotTitle(text, chapterNumber);
+}
+
+function matchTitleCandidate(
+  text: string,
+  candidates: ReadonlyArray<[RegExp, string]>,
+): string | undefined {
+  return candidates.find(([pattern]) => pattern.test(text))?.[1];
+}
+
+function compactPlotTitle(text: string, chapterNumber: number): string {
+  const sentence = text
+    .replace(/\r?\n/g, "。")
+    .split(/[。！？!?；;，,]/)
+    .map((part) => part.trim())
+    .find((part) => /[\u4e00-\u9fff]/.test(part));
+  if (!sentence) return `第${chapterNumber}章真相浮出`;
+
+  return sentence
+    .replace(/^(summary|conflict|endingHook)[:：]/i, "")
+    .replace(/^(深夜|第二天|三个月后|下一秒|结婚十周年宴会上)/, "")
+    .replace(/^(林晚|顾沉|苏蔓|许念|许晴|叶澈|周砚)(带着|发现|查到|追到|继续|赶到|站在|约|把|在)?/, "")
+    .replace(/^(当众|突然|连夜|故意|假装|主动|继续)/, "")
+    .trim();
+}
+
+function normalizeChapterTitle(title: string, chapterNumber: number): string {
+  const compact = title
+    .replace(/《|》|“|”|‘|’/g, "")
+    .replace(/^#?\s*第\s*\d+\s*章\s*/u, "")
+    .replace(/[\/\\:*?"<>|]/g, "")
+    .replace(/\s+/g, "")
+    .replace(/[，。！？；、,.!?;：:]+/g, "")
+    .trim();
+  const base = compact && !/^第\d+章?$/.test(compact) ? compact : `第${chapterNumber}章真相浮出`;
+  return fitChapterTitleLength(base);
+}
+
+function fitChapterTitleLength(title: string): string {
+  if (title.length >= 8 && title.length <= 16) return title;
+  if (title.length > 16) return title.slice(0, 16);
+
+  const suffixes = ["真相浮出", "反转炸开", "杀局逼近", "证据现身"];
+  for (const suffix of suffixes) {
+    const candidate = `${title}${suffix}`;
+    if (candidate.length >= 8) {
+      return candidate.length > 16 ? candidate.slice(0, 16) : candidate;
+    }
+  }
+  return title.padEnd(8, "局");
+}
+
+function uniquifyChapterTitle(title: string, used: Set<string>, chapterNumber: number): string {
+  if (!used.has(title)) {
+    used.add(title);
+    return title;
+  }
+
+  const suffixes = ["反转", "真相", "杀局", "落锤"];
+  for (const suffix of suffixes) {
+    const candidate = fitChapterTitleLength(`${title.slice(0, Math.max(1, 16 - suffix.length))}${suffix}`);
+    if (!used.has(candidate)) {
+      used.add(candidate);
+      return candidate;
+    }
+  }
+
+  const fallback = fitChapterTitleLength(`${title.slice(0, 14)}${chapterNumber}`);
+  used.add(fallback);
+  return fallback;
+}
+
+function sanitizePublishFileName(title: string): string {
+  return title
+    .replace(/[\/\\:*?"<>|]/g, "")
+    .replace(/\s+/g, "")
+    .trim() || "未命名章节";
 }
 
 function formatMobileFriendlyParagraphs(markdown: string): string[] {

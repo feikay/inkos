@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { stdin as input, stdout as output } from "node:process";
 import { createInterface } from "node:readline/promises";
@@ -208,9 +208,11 @@ shortStoryCommand
   .requiredOption("--theme <theme>", "Short story theme")
   .action(async (opts) => {
     try {
-      const storyDir = resolve(process.cwd(), "my-novel", "short-stories", opts.theme);
+      const storyRoot = resolve(process.cwd(), "my-novel", "short-stories", opts.theme);
+      const storyDir = await resolveShortStoryExportDir(storyRoot);
       const chaptersDir = join(storyDir, "chapters");
       const publishDir = join(storyDir, "publish");
+      const planPath = join(storyDir, "plan.md");
       const titlesPath = join(storyDir, "titles.md");
       const chapterFiles = (await readdir(chaptersDir))
         .filter((fileName) => fileName.endsWith(".md"))
@@ -227,13 +229,15 @@ shortStoryCommand
       })));
       const titlesMarkdown = await readOptionalFile(titlesPath)
         ?? await createTitlesMarkdownFromExistingStory(opts.theme, storyDir, chapters[0]?.content ?? "");
+      const planMarkdown = await readOptionalFile(planPath);
       const publishPackage = createShortStoryPublishPackage({
         theme: opts.theme,
         chapters,
+        planMarkdown,
         titlesMarkdown,
       });
 
-      await mkdir(publishDir, { recursive: true });
+      await cleanShortStoryPublishDir(publishDir);
       for (const chapter of publishPackage.chapters) {
         await writeFile(join(publishDir, chapter.fileName), chapter.content, "utf-8");
       }
@@ -889,6 +893,7 @@ async function runShortStoryBatchPipeline(options: {
 
   const publishPackage = createShortStoryPublishPackage({
     theme: options.theme,
+    planMarkdown,
     titlesMarkdown,
     chapters: await Promise.all(drafts.map(async (draft) => {
       const fileName = `${String(draft.chapterNumber).padStart(3, "0")}.md`;
@@ -899,7 +904,7 @@ async function runShortStoryBatchPipeline(options: {
       };
     })),
   });
-  await mkdir(publishDir, { recursive: true });
+  await cleanShortStoryPublishDir(publishDir);
   for (const chapter of publishPackage.chapters) {
     await writeFile(join(publishDir, chapter.fileName), chapter.content, "utf-8");
   }
@@ -913,4 +918,37 @@ async function runShortStoryBatchPipeline(options: {
   await writeFile(scriptPath, script, "utf-8");
 
   return { chapterCount: drafts.length };
+}
+
+async function cleanShortStoryPublishDir(publishDir: string): Promise<void> {
+  await mkdir(publishDir, { recursive: true });
+  const existingFiles = await readdir(publishDir);
+  await Promise.all(existingFiles
+    .filter((fileName) => fileName.endsWith(".md") || fileName === "book.txt")
+    .map((fileName) => rm(join(publishDir, fileName), { force: true })));
+}
+
+async function resolveShortStoryExportDir(storyRoot: string): Promise<string> {
+  if (await hasShortStoryMarkdownChapters(join(storyRoot, "chapters"))) {
+    return storyRoot;
+  }
+
+  const entries = await readdir(storyRoot, { withFileTypes: true }).catch(() => []);
+  const runDirs = entries
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith("run-"))
+    .map((entry) => join(storyRoot, entry.name))
+    .sort((a, b) => b.localeCompare(a, "zh-Hans-CN"));
+
+  for (const runDir of runDirs) {
+    if (await hasShortStoryMarkdownChapters(join(runDir, "chapters"))) {
+      return runDir;
+    }
+  }
+
+  return storyRoot;
+}
+
+async function hasShortStoryMarkdownChapters(chaptersDir: string): Promise<boolean> {
+  const files = await readdir(chaptersDir).catch(() => []);
+  return files.some((fileName) => fileName.endsWith(".md"));
 }
