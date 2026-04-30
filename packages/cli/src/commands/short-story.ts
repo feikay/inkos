@@ -9,6 +9,8 @@ import {
   analyzeShortStoryPublishReadiness,
   createShortStoryChapterPlan,
   createShortStoryPublishPackage,
+  createShortStoryVariant,
+  checkShortStoryWriterOutput,
   formatLengthCount,
   generateShortStoryDraftChapters,
   generateShortStoryTitles,
@@ -21,6 +23,7 @@ import {
   resolveLengthCountingMode,
   type ShortStoryChapterPlan,
   type ShortStoryAuditIssue,
+  type ShortStoryVariant,
 } from "@actalk/inkos-core";
 import { findProjectRoot, log, logError, resolveBookId } from "../utils.js";
 
@@ -298,7 +301,8 @@ shortStoryCommand
       const chapterTargetWords = parsePositiveInteger(opts.chapterWords, "chapter-words");
       const baseDir = resolve(process.cwd(), "my-novel", "short-stories");
       const timestamp = formatBatchTimestamp(new Date());
-      const runs: Array<{ theme: string; index: number; dir: string; chapters: number }> = [];
+      const previousFirstChapters = new Map<string, string>();
+      const runs: Array<{ theme: string; index: number; dir: string; chapters: number; warnings: ReadonlyArray<string> }> = [];
 
       for (const theme of themes) {
         for (let index = 1; index <= count; index += 1) {
@@ -308,12 +312,17 @@ shortStoryCommand
             targetWords,
             chapterTargetWords,
             storyDir: runDir,
+            runIndex: index,
+            timestamp,
+            previousFirstChapter: previousFirstChapters.get(theme),
           });
+          previousFirstChapters.set(theme, result.firstChapter);
           runs.push({
             theme,
             index,
             dir: runDir,
             chapters: result.chapterCount,
+            warnings: result.warnings,
           });
         }
       }
@@ -321,6 +330,9 @@ shortStoryCommand
       log("Short story batch completed");
       for (const run of runs) {
         log(`  [${run.theme} #${run.index}] ${run.dir} (${run.chapters} chapters)`);
+        for (const warning of run.warnings) {
+          log(`    writer-check warning: ${warning}`);
+        }
       }
     } catch (e) {
       logError(`Failed to run short story batch: ${e}`);
@@ -780,6 +792,7 @@ function renderShortStoryPlanMarkdown(options: {
   readonly genre?: string;
   readonly targetWords: number;
   readonly chapterTargetWords: number;
+  readonly variant?: ShortStoryVariant;
   readonly chapters: ReadonlyArray<ShortStoryChapterPlan>;
 }): string {
   const lines = [
@@ -795,6 +808,36 @@ function renderShortStoryPlanMarkdown(options: {
   }
 
   lines.push("");
+  if (options.variant) {
+    lines.push(
+      "## Variant",
+      "",
+      `- runIndex: ${options.variant.runIndex}`,
+      `- seed: ${options.variant.seed}`,
+      `- writingMode: ${options.variant.writingMode}`,
+      `- hookMode: ${options.variant.hookMode}`,
+      `- theme: ${options.variant.theme}`,
+      `- baseWorld.protagonist: ${options.variant.baseWorld.protagonist}`,
+      `- baseWorld.role: ${options.variant.baseWorld.role}`,
+      `- baseWorld.setting: ${options.variant.baseWorld.setting}`,
+      `- baseWorld.coreConflict: ${options.variant.baseWorld.coreConflict}`,
+      `- baseWorld.supportingCharacters: ${options.variant.baseWorld.supportingCharacters.join("、")}`,
+      `- baseWorld.hiddenTruth: ${options.variant.baseWorld.hiddenTruth ?? ""}`,
+      `- baseWorld.secret: ${options.variant.baseWorld.secret ?? ""}`,
+      `- derived.mainThreat: ${options.variant.derived.mainThreat}`,
+      `- derived.twistDirection: ${options.variant.derived.twistDirection}`,
+      `- derived.premise: ${options.variant.derived.premise}`,
+      `- derived.antagonist: ${options.variant.derived.antagonist}`,
+      `- derived.ally: ${options.variant.derived.ally}`,
+      `- derived.keyRelation: ${options.variant.derived.keyRelation}`,
+      `- derived.openingIncident: ${options.variant.derived.openingIncident}`,
+      `- derived.coreSecret: ${options.variant.derived.coreSecret}`,
+      `- derived.ending: ${options.variant.derived.ending}`,
+      `- derived.forbiddenElements: ${options.variant.derived.forbiddenElements.join("、")}`,
+      "",
+    );
+  }
+
   for (const chapter of options.chapters) {
     lines.push(
       `## [${chapter.chapterNumber}] ${chapter.function} - ${formatShortStoryFunctionLabel(chapter, options.chapters)}`,
@@ -848,31 +891,52 @@ async function runShortStoryBatchPipeline(options: {
   readonly targetWords: number;
   readonly chapterTargetWords: number;
   readonly storyDir: string;
-}): Promise<{ chapterCount: number }> {
+  readonly runIndex: number;
+  readonly timestamp: string;
+  readonly previousFirstChapter?: string;
+}): Promise<{ chapterCount: number; firstChapter: string; warnings: ReadonlyArray<string> }> {
   const planPath = join(options.storyDir, "plan.md");
   const chaptersDir = join(options.storyDir, "chapters");
   const publishDir = join(options.storyDir, "publish");
   const scriptsDir = join(options.storyDir, "scripts");
   const titlesPath = join(options.storyDir, "titles.md");
   const scriptPath = join(scriptsDir, "script.txt");
+  const variantPath = join(options.storyDir, "variant.json");
+  const variant = createShortStoryVariant({
+    theme: options.theme,
+    runIndex: options.runIndex,
+    timestamp: options.timestamp,
+  });
 
   const chapters = createShortStoryChapterPlan({
     theme: options.theme,
     targetWords: options.targetWords,
     chapterTargetWords: options.chapterTargetWords,
+    variant,
   });
   const planMarkdown = renderShortStoryPlanMarkdown({
     theme: options.theme,
     targetWords: options.targetWords,
     chapterTargetWords: options.chapterTargetWords,
+    variant,
     chapters,
   });
 
   await mkdir(chaptersDir, { recursive: true });
+  await writeFile(variantPath, `${JSON.stringify(variant, null, 2)}\n`, "utf-8");
   await writeFile(planPath, planMarkdown, "utf-8");
 
   const parsedPlan = parseShortStoryPlanMarkdown(planMarkdown);
   const drafts = generateShortStoryDraftChapters(parsedPlan);
+  const writerCheck = checkShortStoryWriterOutput({
+    chapters: drafts.map((draft) => draft.content),
+    variant,
+    previousFirstChapter: options.previousFirstChapter,
+  });
+  const writerErrors = writerCheck.issues.filter((issue) => issue.severity === "error");
+  if (writerErrors.length > 0) {
+    throw new Error(`Short-story writer check failed: ${writerErrors.map((issue) => issue.message).join("; ")}`);
+  }
   for (const draft of drafts) {
     const filePath = join(chaptersDir, `${String(draft.chapterNumber).padStart(3, "0")}.md`);
     await writeFile(filePath, draft.content, "utf-8");
@@ -880,7 +944,7 @@ async function runShortStoryBatchPipeline(options: {
 
   const firstChapterPath = join(chaptersDir, "001.md");
   const firstChapterBeforeHook = await readFile(firstChapterPath, "utf-8");
-  const hookResult = optimizeShortStoryOpening(options.theme, firstChapterBeforeHook);
+  const hookResult = optimizeShortStoryOpening(options.theme, firstChapterBeforeHook, variant);
   await writeFile(firstChapterPath, hookResult.content, "utf-8");
 
   const titles = generateShortStoryTitles({
@@ -917,7 +981,13 @@ async function runShortStoryBatchPipeline(options: {
   await mkdir(scriptsDir, { recursive: true });
   await writeFile(scriptPath, script, "utf-8");
 
-  return { chapterCount: drafts.length };
+  return {
+    chapterCount: drafts.length,
+    firstChapter: drafts[0]?.content ?? "",
+    warnings: writerCheck.issues
+      .filter((issue) => issue.severity === "warning")
+      .map((issue) => issue.message),
+  };
 }
 
 async function cleanShortStoryPublishDir(publishDir: string): Promise<void> {

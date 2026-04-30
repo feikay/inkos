@@ -25,6 +25,11 @@ export interface FanqieQualityReport {
   readonly book: string;
   readonly chapter_index: number;
   readonly chapter_title: string;
+  readonly source_file?: string;
+  readonly body_source?: "fixed" | "salvaged" | "polished" | "original";
+  readonly source_decision?: string;
+  readonly continuity_final_status?: "PASS" | "MANUAL_REVIEW" | "DROP";
+  readonly quality_final_status?: FanqieFinalQualityStatus;
   readonly quality_score: number;
   readonly level: FanqieQualityLevel;
   readonly status: FanqieQualityStatus;
@@ -51,6 +56,11 @@ export interface RunFanqieQualityCheckInput {
   readonly bookName: string;
   readonly chapterIndex: number;
   readonly chapterTitle?: string;
+  readonly sourceFile?: string;
+  readonly bodySource?: "fixed" | "salvaged" | "polished" | "original";
+  readonly sourceDecision?: string;
+  readonly continuityFinalStatus?: "PASS" | "MANUAL_REVIEW" | "DROP";
+  readonly qualityFinalStatus?: FanqieFinalQualityStatus;
   readonly publishBlockedByContinuity?: boolean;
   readonly polishAttempt?: number;
   readonly maxPolishAttempts?: number;
@@ -109,6 +119,9 @@ export function renderFanqieQualityMarkdown(report: FanqieQualityReport): string
 - 总分：${report.quality_score}
 - 等级：${report.level}
 - 状态：${report.status}
+- 正文来源：${report.source_file || "未记录"}${report.body_source ? ` (${report.body_source})` : ""}
+- 来源决策：${report.source_decision || "未记录"}
+- continuity 最终状态：${report.continuity_final_status || "未记录"}
 - continuity 阻塞：${report.publish_blocked_by_continuity ? "是" : "否"}
 ${report.polish_attempt !== undefined ? `- 优化次数：${report.polish_attempt}/${report.max_polish_attempts ?? 0}\n` : ""}${report.final_quality_status ? `- 最终质量状态：${report.final_quality_status}\n` : ""}${report.used_polished_file ? `- 使用优化稿：${report.used_polished_file}\n` : ""}
 - 是否需要优化：${needPolish}
@@ -267,6 +280,11 @@ function buildLocalFanqieQualityReport(input: Omit<RunFanqieQualityCheckInput, "
     reader_drop_risks: issues.map((issue) => issue.detail),
     polish_suggestions: buildSuggestions(scores),
     polish_prompt: "",
+    source_file: input.sourceFile,
+    body_source: input.bodySource,
+    source_decision: input.sourceDecision,
+    continuity_final_status: input.continuityFinalStatus,
+    quality_final_status: input.qualityFinalStatus,
     publish_blocked_by_continuity: Boolean(input.publishBlockedByContinuity),
   };
 }
@@ -279,6 +297,11 @@ function normalizeFanqieQualityReport(report: Partial<FanqieQualityReport>, inpu
     book: stringValue(report.book) || input.bookName,
     chapter_index: normalizePositiveInt(report.chapter_index, input.chapterIndex),
     chapter_title: stringValue(report.chapter_title) || input.chapterTitle || "",
+    source_file: input.sourceFile ?? (stringValue(report.source_file) || undefined),
+    body_source: input.bodySource ?? normalizeBodySource(report.body_source),
+    source_decision: input.sourceDecision ?? (stringValue(report.source_decision) || undefined),
+    continuity_final_status: input.continuityFinalStatus ?? normalizeContinuityFinalStatus(report.continuity_final_status),
+    quality_final_status: input.qualityFinalStatus ?? report.quality_final_status,
     quality_score: qualityScore,
     level: resolveFanqieQualityLevel(qualityScore),
     status: resolveFanqieQualityStatus(qualityScore),
@@ -337,6 +360,14 @@ function normalizeScores(value: unknown): FanqieQualityScores {
     emotion: clampDimension(Number(source.emotion), 0, 15),
     publish_risk: clampDimension(Number(source.publish_risk), 0, 10),
   };
+}
+
+function normalizeBodySource(value: unknown): "fixed" | "salvaged" | "polished" | "original" | undefined {
+  return value === "fixed" || value === "salvaged" || value === "polished" || value === "original" ? value : undefined;
+}
+
+function normalizeContinuityFinalStatus(value: unknown): "PASS" | "MANUAL_REVIEW" | "DROP" | undefined {
+  return value === "PASS" || value === "MANUAL_REVIEW" || value === "DROP" ? value : undefined;
 }
 
 function sumScores(scores: FanqieQualityScores): number {

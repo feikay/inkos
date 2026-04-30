@@ -34,7 +34,7 @@ export function createShortStoryChapterPlan(
     const chapterFunction = resolveChapterFunction(chapterNumber, chapterCount);
     const role = resolveChapterRole(chapterNumber, chapterCount);
     const structure = resolveShortStoryPlanStrategy(config.theme)
-      .describeChapter(config.theme, chapterFunction, chapterNumber, chapterCount);
+      .describeChapter(config.theme, chapterFunction, chapterNumber, chapterCount, config.variant);
     return {
       chapterNumber,
       title: `第${chapterNumber}章`,

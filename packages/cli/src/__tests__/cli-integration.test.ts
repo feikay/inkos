@@ -432,31 +432,65 @@ describe("CLI integration", () => {
         "--themes",
         "出轨复仇,悬疑惊悚",
         "--count",
-        "1",
+        "2",
         "--target-words",
         "12000",
       ]);
       const betrayalDir = join(projectDir, "my-novel", "short-stories", "出轨复仇");
       const thrillerDir = join(projectDir, "my-novel", "short-stories", "悬疑惊悚");
-      const betrayalRun = (await readdir(betrayalDir)).find((name) => name.startsWith("run-"));
-      const thrillerRun = (await readdir(thrillerDir)).find((name) => name.startsWith("run-"));
+      const betrayalRuns = (await readdir(betrayalDir)).filter((name) => name.startsWith("run-")).sort();
+      const thrillerRuns = (await readdir(thrillerDir)).filter((name) => name.startsWith("run-")).sort();
+      const [betrayalRun, betrayalRun2] = betrayalRuns;
+      const [thrillerRun, thrillerRun2] = thrillerRuns;
 
       expect(output).toContain("Short story batch completed");
       expect(output).toContain("出轨复仇 #1");
       expect(output).toContain("悬疑惊悚 #1");
+      expect(output).toContain("出轨复仇 #2");
+      expect(output).toContain("悬疑惊悚 #2");
       expect(betrayalRun).toBeTruthy();
       expect(thrillerRun).toBeTruthy();
+      expect(betrayalRun2).toBeTruthy();
+      expect(thrillerRun2).toBeTruthy();
 
       const betrayalRunDir = join(betrayalDir, betrayalRun ?? "");
       const thrillerRunDir = join(thrillerDir, thrillerRun ?? "");
+      const betrayalRunDir2 = join(betrayalDir, betrayalRun2 ?? "");
+      const thrillerRunDir2 = join(thrillerDir, thrillerRun2 ?? "");
       const betrayalPlan = await readFile(join(betrayalRunDir, "plan.md"), "utf-8");
       const thrillerPlan = await readFile(join(thrillerRunDir, "plan.md"), "utf-8");
+      const betrayalPlan2 = await readFile(join(betrayalRunDir2, "plan.md"), "utf-8");
+      const thrillerPlan2 = await readFile(join(thrillerRunDir2, "plan.md"), "utf-8");
+      const betrayalOpening = await readFile(join(betrayalRunDir, "chapters", "001.md"), "utf-8");
+      const betrayalOpening2 = await readFile(join(betrayalRunDir2, "chapters", "001.md"), "utf-8");
+      const thrillerOpening = await readFile(join(thrillerRunDir, "chapters", "001.md"), "utf-8");
+      const thrillerOpening2 = await readFile(join(thrillerRunDir2, "chapters", "001.md"), "utf-8");
+      const betrayalVariant = JSON.parse(await readFile(join(betrayalRunDir, "variant.json"), "utf-8"));
+      const thrillerVariant = JSON.parse(await readFile(join(thrillerRunDir, "variant.json"), "utf-8"));
+      const betrayalVariant2 = JSON.parse(await readFile(join(betrayalRunDir2, "variant.json"), "utf-8"));
+      const thrillerVariant2 = JSON.parse(await readFile(join(thrillerRunDir2, "variant.json"), "utf-8"));
       const betrayalScript = await readFile(join(betrayalRunDir, "scripts", "script.txt"), "utf-8");
       const thrillerBook = await readFile(join(thrillerRunDir, "publish", "book.txt"), "utf-8");
 
       expect(betrayalPlan).toContain("# Short story plan: 出轨复仇");
       expect(thrillerPlan).toContain("# Short story plan: 悬疑惊悚");
-      expect(betrayalScript).toContain("林晚");
+      expect(betrayalPlan).not.toBe(betrayalPlan2);
+      expect(thrillerPlan).not.toBe(thrillerPlan2);
+      expect(betrayalOpening.slice(0, 300)).not.toBe(betrayalOpening2.slice(0, 300));
+      expect(thrillerOpening.slice(0, 300)).not.toBe(thrillerOpening2.slice(0, 300));
+      expect(betrayalVariant.baseWorld.protagonist).toBeTruthy();
+      expect(betrayalVariant.derived.mainThreat).toBeTruthy();
+      expect(betrayalVariant.writingMode).toMatch(/^(logic|emotion|conflict|weird)$/);
+      expect(new Set([betrayalVariant.writingMode, betrayalVariant2.writingMode]).size).toBeGreaterThanOrEqual(2);
+      expect([betrayalVariant.hookMode, betrayalVariant2.hookMode]).toEqual(["normal", "strong"]);
+      expect(thrillerVariant.baseWorld.protagonist).toBeTruthy();
+      expect(thrillerVariant.derived.premise).toBeTruthy();
+      expect(thrillerVariant.writingMode).toMatch(/^(logic|emotion|conflict|weird)$/);
+      expect(new Set([thrillerVariant.writingMode, thrillerVariant2.writingMode]).size).toBeGreaterThanOrEqual(2);
+      expect([thrillerVariant.hookMode, thrillerVariant2.hookMode]).toEqual(["normal", "strong"]);
+      expect(betrayalVariant.protagonist).toBeUndefined();
+      expect(thrillerVariant.premise).toBeUndefined();
+      expect(betrayalScript.length).toBeGreaterThan(0);
       expect(thrillerBook).toContain("第1章");
       expect(await readdir(join(betrayalRunDir, "chapters"))).toHaveLength(8);
       expect(await readdir(join(thrillerRunDir, "chapters"))).toHaveLength(8);

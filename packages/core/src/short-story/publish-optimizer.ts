@@ -1,4 +1,5 @@
 import { resolveShortStoryPlanStrategy } from "./strategies/index.js";
+import type { ShortStoryVariant } from "./schema.js";
 
 export interface ShortStoryHookOptimizationResult {
   readonly theme: string;
@@ -69,9 +70,12 @@ export interface ShortStoryAnalysisReport {
 export function optimizeShortStoryOpening(
   theme: string,
   chapterMarkdown: string,
+  variant?: ShortStoryVariant,
 ): ShortStoryHookOptimizationResult {
   const strategy = resolveShortStoryPlanStrategy(theme);
-  const optimizedOpening = strategy.id === "thriller"
+  const optimizedOpening = variant
+    ? variantOpening(strategy.id, variant)
+    : strategy.id === "thriller"
     ? thrillerOpening()
     : betrayalRevengeOpening();
   const content = replaceOpeningParagraphs(chapterMarkdown, optimizedOpening, 3);
@@ -82,6 +86,284 @@ export function optimizeShortStoryOpening(
     content,
     changed: content !== chapterMarkdown,
   };
+}
+
+function variantOpening(strategyId: string, variant: ShortStoryVariant): ReadonlyArray<string> {
+  const clue = pickVariantOpeningClue(variant);
+  const secretTrace = pickVariantOpeningSecretTrace(variant);
+  const conflictTrace = pickVariantOpeningConflictTrace(variant);
+  const hookOpening = variantHookOpening(variant, clue, secretTrace, conflictTrace);
+  if (hookOpening) return hookOpening;
+  const modeOpening = variantModeOpening(variant, clue, secretTrace, conflictTrace);
+  if (modeOpening) return modeOpening;
+  if (strategyId === "thriller") {
+    const thrillerOpenings: ReadonlyArray<ReadonlyArray<string>> = [
+      [
+        `${variant.setting}里忽然多出一段倒放的录音，最后两个字是${variant.protagonist}的名字。`,
+        `${variant.protagonist}没有碰播放键，录音却自己跳到凌晨三点。背景里，有人轻轻敲了三下。`,
+        `${variant.ally}只发来一句：“别删，先看${clue}。”`,
+        `${variant.antagonist}赶到时，没有问发生了什么，只看了一眼桌面，立刻要她关机。`,
+        `${variant.protagonist}这才发现，${secretTrace}早被人放在她能看见的位置。`,
+        `她以为自己撞见异常，下一秒却明白，异常是在等她。`,
+      ],
+      [
+        `凌晨的自动灯亮了七次。第八次，${variant.protagonist}看见${variant.setting}的门缝下塞进一张空白回执。`,
+        `回执遇热才显字，第一行不是地址，是她今天刚删掉的搜索记录。`,
+        `${variant.ally}的电话打不通，只回了一张${clue}的照片。照片背面，有人用红笔圈住${secretTrace}。`,
+        `${variant.antagonist}随后出现，鞋底还沾着同样的灰，却说自己刚从另一条路过来。`,
+        `${variant.protagonist}没有拆穿。她把回执折回去，先记下他袖口那道新划痕。`,
+        `真正让她发冷的不是回执，而是它写着明天才会发生的事。`,
+      ],
+      [
+        `${variant.protagonist}刚关灯，${variant.setting}的备用屏幕自己亮了。屏幕上只有一个文件夹：别打开。`,
+        `她偏偏点开。里面没有视频，只有三张连续截图，每一张都拍自她身后。`,
+        `${clue}夹在截图最后，时间比现在晚十分钟。`,
+        `${variant.antagonist}发来语音，语气平稳得反常：“你现在看见的，不该属于你。”`,
+        `${variant.protagonist}把语音转存，发现波形里藏着第二句话：${secretTrace}。`,
+        `下一秒，身后的门锁响了。不是有人进来，是有人从里面反锁。`,
+      ],
+    ];
+    return thrillerOpenings[variant.runIndex % thrillerOpenings.length]!;
+  }
+  const revengeOpenings: ReadonlyArray<ReadonlyArray<string>> = [
+    [
+      `${variant.protagonist}把投屏线插上时，${variant.antagonist}还在笑。三秒后，屏幕亮了，他的笑僵在脸上。`,
+      `${variant.keyRelation}先站起来，眼眶红得恰到好处，可手指已经在偷偷按删除键。`,
+      `${variant.protagonist}没有骂人，只放大${clue}。每一个时间点，都像钉子钉进桌面。`,
+      `${variant.antagonist}冲过来抢设备，她反手切到备份页，第二份记录正好接上${conflictTrace}。`,
+      `现场安静得能听见呼吸。${secretTrace}被摆出来后，没人再敢替他们圆场。`,
+      `${variant.protagonist}手还在抖，声音却稳了：“别急，今晚只讲证据。”`,
+    ],
+    [
+      `${variant.antagonist}把协议推到桌上时，${variant.protagonist}直接撕掉第一页。`,
+      `纸屑落下来，${variant.keyRelation}脸上的笑终于挂不住。`,
+      `${variant.protagonist}打开录音，第一句就是${variant.antagonist}亲口提到${clue}。`,
+      `他想否认，她又点开第二段。${conflictTrace}一出现，旁边的人全都闭了嘴。`,
+      `${secretTrace}不是最后一刀，却足够让他再也装不出体面。`,
+      `${variant.protagonist}站起来，只说：“你们欠我的，从现在开始一笔笔还。”`,
+    ],
+    [
+      `掌声还没停，${variant.protagonist}把一只旧文件袋扔到主桌中央。`,
+      `${variant.antagonist}低声警告她别闹，她却当众抽出${clue}。`,
+      `${variant.keyRelation}想哭，眼泪还没落下，就听见录音里自己的声音。`,
+      `${variant.protagonist}没有给他们插话的机会，直接把${conflictTrace}投到大屏。`,
+      `最刺眼的不是数字，是${secretTrace}后面那枚熟悉签名。`,
+      `她看着全场变脸，终于把那口忍了很久的气吐出来。`,
+    ],
+  ];
+  return revengeOpenings[variant.runIndex % revengeOpenings.length]!;
+}
+
+function variantHookOpening(
+  variant: ShortStoryVariant,
+  clue: string,
+  secretTrace: string,
+  conflictTrace: string,
+): ReadonlyArray<string> | undefined {
+  switch (variant.hookMode) {
+    case "normal":
+      return normalHookOpening(variant, clue, secretTrace);
+    case "strong":
+      return strongHookOpening(variant, clue, secretTrace, conflictTrace);
+    case "viral":
+      return viralHookOpening(variant, clue, secretTrace, conflictTrace);
+  }
+}
+
+function normalHookOpening(
+  variant: ShortStoryVariant,
+  clue: string,
+  secretTrace: string,
+): ReadonlyArray<string> {
+  if (variant.writingMode === "emotion") {
+    return [
+      `我第一次注意到异常，是因为${variant.setting}里多了一份没人认领的${clue}。`,
+      `它不吓人，只是太安静，像被人提前放在那里等我。`,
+      `${variant.ally}让我先别声张，可我看见${secretTrace}时，心里还是沉了一下。`,
+      `${variant.antagonist}很快出现，语气正常得过分。`,
+      `我忽然不确定，他是在解释，还是在确认我到底看见了多少。`,
+    ];
+  }
+  if (variant.writingMode === "weird") {
+    return [
+      `${variant.setting}的灯慢了一拍才亮。桌面上多了一份${clue}，边角压着浅浅的水痕。`,
+      `没有脚印，也没有开门声。`,
+      `${variant.protagonist}伸手前，水痕自己往外扩了一点。`,
+      `${variant.ally}说可能是设备故障，声音却比平时轻。`,
+      `${secretTrace}藏在最后一行，像一句没说完的话。`,
+    ];
+  }
+  if (variant.writingMode === "logic") {
+    return [
+      `${variant.protagonist}发现${clue}时，先看时间，再看来源。`,
+      `时间正常，来源空白。异常只有一处：文件被打开过两次。`,
+      `第一次是她到达前。第二次，显示为一分钟后。`,
+      `${variant.ally}提醒她别急着下结论。`,
+      `她点开末尾，看到${secretTrace}，才把这件事单独记了一页。`,
+    ];
+  }
+  return [
+    `${variant.protagonist}在${variant.setting}发现一份陌生的${clue}。`,
+    `它没有立刻指向任何人，只在末尾留下${secretTrace}。`,
+    `${variant.ally}劝她先别惊动${variant.antagonist}。`,
+    `可${variant.antagonist}偏偏在这时出现，像早就知道她会站在那里。`,
+    `${variant.protagonist}把文件合上，没有问，只先记住他的表情。`,
+  ];
+}
+
+function strongHookOpening(
+  variant: ShortStoryVariant,
+  clue: string,
+  secretTrace: string,
+  conflictTrace: string,
+): ReadonlyArray<string> {
+  if (variant.writingMode === "emotion") {
+    return [
+      `我刚碰到${clue}，${variant.antagonist}就掐断了灯：“你不该看见这个。”`,
+      `黑暗里，我听见自己的名字从另一台设备里响起。那声音比我更冷静。`,
+      `${variant.ally}撞门进来，却先拦住我：“别信他，也别信你刚才听见的自己。”`,
+      `我手心全是汗，还是把${conflictTrace}投到墙上。`,
+      `${secretTrace}出现的那一秒，${variant.antagonist}终于慌了。`,
+    ];
+  }
+  if (variant.writingMode === "conflict") {
+    return [
+      `“关掉！”${variant.antagonist}冲过来抢${clue}，屏幕却自动跳出${variant.protagonist}的失踪记录。`,
+      `“我站在这儿。”${variant.protagonist}反手锁门，“你告诉我，谁给我办的失踪？”`,
+      `${variant.ally}挡住出口：“先别动，她的账号刚在另一个地方登录。”`,
+      `${variant.antagonist}脸色骤变。${conflictTrace}已经亮在所有人面前。`,
+      `${variant.protagonist}把备份推送出去：“现在，轮到你解释。”`,
+    ];
+  }
+  if (variant.writingMode === "weird") {
+    return [
+      `${variant.setting}的门自己反锁，${clue}在屏幕上慢慢变成${variant.protagonist}的手写字。`,
+      `${variant.antagonist}站在门外，声音隔着门缝钻进来：“别念出来。”`,
+      `她偏偏念了第一行。灯灭了。`,
+      `再亮时，${variant.ally}脸色惨白：“你刚才的声音，不在这个房间里。”`,
+      `${secretTrace}躺在桌上，像刚被另一个她放下。`,
+    ];
+  }
+  return [
+    `${variant.protagonist}打开${clue}时，系统弹出警告：她本人已在十分钟前确认死亡。`,
+    `${variant.antagonist}冲过来按住屏幕：“删掉，马上。”`,
+    `${variant.protagonist}没有动。她先看时间，再看${secretTrace}，最后抬头看他。`,
+    `${variant.ally}低声说：“这不是错误，是有人提前替你做了决定。”`,
+    `${conflictTrace}被同步到第二台设备时，${variant.antagonist}第一次失控。`,
+  ];
+}
+
+function viralHookOpening(
+  variant: ShortStoryVariant,
+  clue: string,
+  secretTrace: string,
+  conflictTrace: string,
+): ReadonlyArray<string> {
+  if (variant.writingMode === "emotion") {
+    return [
+      `我收到自己的葬礼邀请时，距离我死亡还有三小时。`,
+      `邀请函上写着${variant.setting}，落款是${variant.antagonist}。`,
+      `我还没来得及尖叫，手机弹出${clue}：画面里另一个我正替我签字。`,
+      `${variant.ally}打来电话，第一句就说：“别承认你是你。”`,
+      `可${secretTrace}已经摆在门口，像有人刚从未来回来。`,
+    ];
+  }
+  if (variant.writingMode === "conflict") {
+    return [
+      `${variant.protagonist}推门进去，看见另一个自己坐在${variant.antagonist}身边。`,
+      `“你迟到了。”那个自己抬头，声音一模一样。`,
+      `${variant.protagonist}把${clue}砸到桌上：“那我是谁？”`,
+      `${variant.antagonist}笑了一下：“这正是你不该问的问题。”`,
+      `${conflictTrace}同时弹出两份结果，一份证明她活着，一份证明她早就不存在。`,
+    ];
+  }
+  if (variant.writingMode === "weird") {
+    return [
+      `${variant.protagonist}在镜子里眨眼，镜子里的她没有眨。`,
+      `三秒后，镜中人先开口：“别去${variant.setting}，我已经死在那里。”`,
+      `${clue}从镜面内侧滑下来，边角还带着湿冷的指印。`,
+      `${variant.antagonist}的电话同时响起：“你旁边是不是还有一个你？”`,
+      `${secretTrace}像从墙里长出来，时间却标着明天凌晨。`,
+    ];
+  }
+  return [
+    `${variant.protagonist}在监控里看见自己杀了自己。`,
+    `时间显示明天凌晨，地点却是此刻的${variant.setting}。`,
+    `${clue}自动放大，画面里的人抬头，对镜头说：“别让现在的我活到明天。”`,
+    `${variant.ally}发来消息：身份记录被改了，你现在不是你。`,
+    `${variant.antagonist}站在门口，手里拿着${secretTrace}，像早就等她发现这一秒。`,
+  ];
+}
+
+function variantModeOpening(
+  variant: ShortStoryVariant,
+  clue: string,
+  secretTrace: string,
+  conflictTrace: string,
+): ReadonlyArray<string> | undefined {
+  switch (variant.writingMode) {
+    case "logic":
+      return [
+        `${variant.protagonist}先看到时间戳。凌晨三点十七分，${variant.setting}留下了两份互相冲突的记录。`,
+        `第一份指向${clue}。第二份指向${secretTrace}。`,
+        `她没有立刻联系任何人，只把两份记录各复制一份，分开放进不同设备。`,
+        `${variant.antagonist}赶到时，她已经列出三个问题：谁能进入现场，谁改过记录，谁最怕${conflictTrace}。`,
+        `${variant.ally}问她怕不怕。她说：“怕没有用，先对时间。”`,
+      ];
+    case "emotion":
+      return [
+        `我听见门锁响的时候，手心全是汗。${variant.setting}明明只有我一个人，屏幕上却弹出${clue}。`,
+        `我不想点开。真的。可${variant.antagonist}的名字就在旁边，像一根针扎进眼睛里。`,
+        `下一秒，${secretTrace}出现了。我的胃猛地往下坠，连呼吸都变得很疼。`,
+        `${variant.ally}发来消息：别信任何人。`,
+        `我盯着那行字，忽然明白自己不是被卷进去的，我是被选中的。`,
+      ];
+    case "conflict":
+      return [
+        `“删掉。”${variant.antagonist}冲进来，第一句话就要${variant.protagonist}关掉${clue}。`,
+        `“凭什么？”她反手锁屏，又把备份发出去。`,
+        `${variant.ally}拦在门口：“你再往前一步，我报警。”`,
+        `${variant.antagonist}冷笑：“你们知道自己碰了什么吗？”`,
+        `${variant.protagonist}把${conflictTrace}投到屏幕上：“现在知道了。你怕这个。”`,
+      ];
+    case "weird":
+      return [
+        `${variant.setting}的灯没有坏，却一盏接一盏暗下去。最后亮着的那块屏幕，正显示${variant.protagonist}的名字。`,
+        `${clue}像自己长出来的，慢慢浮在页面中央。没有发送人，没有时间，只有一行很轻的提示。`,
+        `别回头。`,
+        `${variant.protagonist}还是回了头。门后没有人，只有${secretTrace}被摆得端端正正。`,
+        `她听见有人贴着墙笑了一声。声音很近，也很像她自己。`,
+      ];
+  }
+}
+
+function pickVariantOpeningClue(variant: ShortStoryVariant): string {
+  const clues = ["门禁截图", "旧照片", "录音尾声", "转账备注", "被改过的名单", "后台操作记录"];
+  return clues[variant.runIndex % clues.length]!;
+}
+
+function pickVariantOpeningSecretTrace(variant: ShortStoryVariant): string {
+  const traces = [
+    `${variant.keyRelation}留下的编号`,
+    `${variant.antagonist}避开的时间戳`,
+    `${variant.ally}不肯解释的旧照片`,
+    `${variant.setting}里被擦掉的签名`,
+    "那页缺失的名单",
+    "一份提前生成的证明",
+  ];
+  return traces[variant.runIndex % traces.length]!;
+}
+
+function pickVariantOpeningConflictTrace(variant: ShortStoryVariant): string {
+  const traces = [
+    "两份互相冲突的时间线",
+    "同一个账号的异常登录",
+    "一笔不该出现的转账",
+    "被剪掉的三分钟监控",
+    "签名顺序的破绽",
+    "现场记录里的空白页",
+  ];
+  return traces[variant.runIndex % traces.length]!;
 }
 
 export function generateShortStoryTitles(

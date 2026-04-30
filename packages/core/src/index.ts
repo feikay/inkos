@@ -212,6 +212,7 @@ export {
   runChapterContinuityFix,
   renderContinuityMarkdown,
   buildContinuityRewritePrompt,
+  buildManualFixPrompt,
   resolveContinuityLevel,
   resolveContinuityRewriteMode,
   resolveContinuityStatus,

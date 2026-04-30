@@ -1,18 +1,23 @@
-import type { ShortStoryChapterFunction, ShortStoryChapterPlan, ShortStoryTheme } from "../../schema.js";
+import type { ShortStoryChapterFunction, ShortStoryChapterPlan, ShortStoryTheme, ShortStoryVariant } from "../../schema.js";
 import type { ShortStoryPlanStrategy } from "../index.js";
 
 export const thrillerPlanStrategy: ShortStoryPlanStrategy = {
   id: "thriller",
   matches: isThrillerTheme,
-  describeChapter: (_theme, chapterFunction, chapterNumber, chapterCount) =>
-    describeThrillerChapter(chapterFunction, chapterNumber, chapterCount),
+  describeChapter: (_theme, chapterFunction, chapterNumber, chapterCount, variant) =>
+    describeThrillerChapter(chapterFunction, chapterNumber, chapterCount, variant),
 };
 
 function describeThrillerChapter(
   chapterFunction: ShortStoryChapterFunction,
   chapterNumber: number,
   chapterCount: number,
+  variant?: ShortStoryVariant,
 ): Pick<ShortStoryChapterPlan, "summary" | "conflict" | "endingHook"> {
+  if (variant) {
+    return describeVariantThrillerChapter(chapterFunction, chapterNumber, chapterCount, variant);
+  }
+
   const twistIndex = chapterFunction === "twist" ? countFunctionsBefore(chapterNumber, chapterCount, "twist") + 1 : 0;
   const climaxIndex = chapterFunction === "climax" ? countFunctionsBefore(chapterNumber, chapterCount, "climax") + 1 : 0;
 
@@ -50,6 +55,88 @@ function describeThrillerChapter(
         endingHook: "停尸间最后一次关灯时，许念听见冷柜里传来轻轻一声谢谢，这一次她没有回头。",
       };
   }
+}
+
+function describeVariantThrillerChapter(
+  chapterFunction: ShortStoryChapterFunction,
+  chapterNumber: number,
+  chapterCount: number,
+  variant: ShortStoryVariant,
+): Pick<ShortStoryChapterPlan, "summary" | "conflict" | "endingHook"> {
+  const twistIndex = chapterFunction === "twist" ? countFunctionsBefore(chapterNumber, chapterCount, "twist") + 1 : 0;
+  const climaxIndex = chapterFunction === "climax" ? countFunctionsBefore(chapterNumber, chapterCount, "climax") + 1 : 0;
+  const investigationSites = createVariantInvestigationSites(variant);
+  const clues = createVariantClues(variant);
+  const site = investigationSites[(chapterNumber + variant.runIndex) % investigationSites.length]!;
+  const clue = clues[(chapterNumber + variant.runIndex) % clues.length]!;
+
+  switch (chapterFunction) {
+    case "hook":
+      return {
+        summary: `${variant.protagonist}卷入异常事件：${variant.openingIncident}，她从恐惧转为警觉，决定顺着线索查下去。`,
+        conflict: `${variant.antagonist}第一时间要求她删除证据，${variant.ally}却提醒她这件事和${variant.coreConflict}有关。`,
+        endingHook: `${variant.protagonist}复看证据时发现一个更诡异的细节：${variant.coreSecret}。`,
+      };
+    case "escalation":
+      return {
+        summary: `${variant.protagonist}追到${site}，找到${clue}，线索把${variant.keyRelation}和${variant.antagonist}牵到同一张旧名单上。`,
+        conflict: `${variant.antagonist}派人封住出口，${variant.ally}被迫暴露自己早就知道部分真相，${variant.protagonist}愤怒又不得不合作。`,
+        endingHook: `${clue}背面写着一句警告：${variant.twist}。`,
+      };
+    case "twist":
+      if (twistIndex === 1) {
+        return {
+          summary: `${variant.protagonist}终于查到核心秘密，原来${variant.coreSecret}，而${variant.coreConflict}只是表层掩护。`,
+          conflict: `${variant.ally}承认自己接近她另有目的，${variant.protagonist}情绪崩溃，却发现他手机里保存着${variant.keyRelation}的最后求救。`,
+          endingHook: `求救定位指向${site}，那里留下的档案第一行写着${variant.protagonist}的名字。`,
+        };
+      }
+      return {
+        summary: `${variant.protagonist}继续深挖旧案，新的反转浮出：${variant.twist}。`,
+        conflict: `${variant.antagonist}把她塑造成疯子和共犯，${variant.protagonist}失去退路，只能把恐惧压成证据。`,
+        endingHook: `她刚打开${clue}，屏幕上跳出一段定时视频：真正的目击者还活着。`,
+      };
+    case "climax":
+      if (climaxIndex === 1) {
+        return {
+          summary: `${variant.protagonist}带着${clue}闯入${variant.antagonist}公开露面的现场，把${variant.coreSecret}推到所有人面前。`,
+          conflict: `${variant.antagonist}反咬她伪造证据，${variant.ally}受伤替她拖延时间，她必须当众承认自己和旧案的关系。`,
+          endingHook: `证据公开后，最后一个文件自动解锁，文件名竟然是${variant.protagonist}的出生日期。`,
+        };
+      }
+      return {
+        summary: `${variant.protagonist}在${site}和${variant.antagonist}正面对峙，逼他说出${variant.coreConflict}背后的完整链条。`,
+        conflict: `${variant.antagonist}试图毁掉原件，${variant.protagonist}冒着被困的风险完成上传。`,
+        endingHook: `警笛逼近时，${variant.protagonist}收到最后一条信息：${variant.ending}之前，还要救出一个人。`,
+      };
+    case "resolution":
+      return {
+        summary: `${variant.antagonist}被控制后，${variant.protagonist}完成收尾：${variant.ending}。`,
+        conflict: `媒体追问她是否要公开全部伤口，${variant.ally}尊重她的选择，${variant.protagonist}决定只把真相交给该负责的人。`,
+        endingHook: `${variant.protagonist}离开现场前，异常信号最后一次亮起，这一次她没有回头。`,
+      };
+  }
+}
+
+function createVariantInvestigationSites(variant: ShortStoryVariant): ReadonlyArray<string> {
+  return [
+    variant.setting,
+    `${variant.setting}的隐蔽角落`,
+    `${variant.antagonist}控制的封闭区域`,
+    `${variant.ally}发现异常的现场`,
+    `${variant.coreMystery}留下痕迹的地方`,
+  ];
+}
+
+function createVariantClues(variant: ShortStoryVariant): ReadonlyArray<string> {
+  return [
+    "监控片段",
+    "旧钥匙",
+    "匿名录音",
+    "门禁记录",
+    `${variant.coreMystery}的旧证据`,
+    `${variant.keyRelation}留下的纸条`,
+  ];
 }
 
 function describeEscalation(

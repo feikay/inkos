@@ -2,7 +2,7 @@ import { betrayalRevengePlanStrategy } from "./betrayal-revenge/plan.js";
 import { createBetrayalRevengeScene, resolveBetrayalRevengeCast } from "./betrayal-revenge/write.js";
 import { thrillerPlanStrategy } from "./thriller/plan.js";
 import { createThrillerScene, resolveThrillerCast } from "./thriller/write.js";
-import type { ShortStoryChapterPlan, ShortStoryTheme } from "../schema.js";
+import type { ShortStoryChapterPlan, ShortStoryTheme, ShortStoryVariant } from "../schema.js";
 
 export interface ShortStoryPlanStrategy {
   readonly id: string;
@@ -12,6 +12,7 @@ export interface ShortStoryPlanStrategy {
     chapterFunction: ShortStoryChapterPlan["function"],
     chapterNumber: number,
     chapterCount: number,
+    variant?: ShortStoryVariant,
   ) => Pick<ShortStoryChapterPlan, "summary" | "conflict" | "endingHook">;
 }
 
@@ -40,7 +41,7 @@ export interface ShortStorySceneDraft {
 export interface ShortStoryWriteStrategy {
   readonly id: string;
   readonly matches: (theme: ShortStoryTheme) => boolean;
-  readonly resolveCast: (theme: ShortStoryTheme) => ShortStoryCast;
+  readonly resolveCast: (theme: ShortStoryTheme, variant?: ShortStoryVariant) => ShortStoryCast;
   readonly createScene: (
     chapter: ShortStoryChapterPlan,
     cast: ShortStoryCast,

@@ -19,8 +19,9 @@ import {
   type ContinuityReport,
   type FanqieQualityReport,
 } from "@actalk/inkos-core";
+import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createClient, findProjectRoot, loadConfig, resolveBookId, log, logError, loadReviewPresentation, GLOBAL_ENV_PATH } from "../utils.js";
 
 export const reviewCommand = new Command("review")
@@ -57,6 +58,13 @@ reviewCommand
         if (!opts.json) {
           log("[fanqie-quality]");
           log(`chapter: ${chapterNumberPrefix(chapter)}`);
+          log(`body: ${relative(book.dir, result.sourceFile)}`);
+          log(`body_source: ${result.bodySource}`);
+          log(`continuity: ${result.report.continuity_final_status ?? "unknown"}`);
+          if (result.report.publish_blocked_by_continuity) {
+            log("warning: Blocked by continuity; quality report is informational only.");
+            log("publish_blocked_by_continuity: true");
+          }
           log(`score: ${result.report.quality_score}`);
           log(`status: ${result.report.status}`);
           if (result.report.issues.length) {
@@ -117,11 +125,14 @@ reviewCommand
         results.push(result);
         if (!opts.json) {
           if (result.blockedByContinuity) {
+            if (result.inputFile) log(`input body: ${relative(book.dir, result.inputFile)}`);
             log("Blocked by continuity. Run continuity-auto first.");
           } else if (result.initialScore >= 85) {
+            if (result.inputFile) log(`input body: ${relative(book.dir, result.inputFile)}`);
             log(`score: ${result.initialScore}`);
             log("result: already QUALITY_PASS");
           } else {
+            if (result.inputFile) log(`input body: ${relative(book.dir, result.inputFile)}`);
             log(`result: ${result.finalQualityStatus}`);
           }
           log(`report: ${result.finalReportJsonPath}`);
@@ -253,6 +264,7 @@ reviewCommand
   .option("--from <number>", "First chapter number in range")
   .option("--to <number>", "Last chapter number in range")
   .option("--max-fix-attempts <number>", "Maximum continuity fix attempts", "2")
+  .option("--min-chapter-words <number>", "Minimum effective chapter word count", "1000")
   .option("--json", "Output JSON")
   .action(async (opts) => {
     try {
@@ -261,6 +273,7 @@ reviewCommand
       const book = await resolveContinuityBook(root, opts.book);
       const range = resolveContinuityRange(opts);
       const maxFixAttempts = parsePositiveInt(opts.maxFixAttempts, "--max-fix-attempts");
+      const minChapterWords = parsePositiveInt(opts.minChapterWords, "--min-chapter-words");
       const results: ContinuityAutoResult[] = [];
       const isBatchMode = Boolean(!opts.chapter && opts.from && opts.to);
       let batchStopped: ContinuityBatchStop | undefined;
@@ -278,6 +291,17 @@ reviewCommand
         let fixed: ContinuityFixResult | undefined;
         let salvage: ContinuitySalvageResult | undefined;
         let currentChapterOverride: string | undefined;
+        const reportDir = join(book.dir, "reviews", "continuity");
+        const prefix = chapterNumberPrefix(chapter);
+        if (!opts.json) {
+          const currentPreview = await resolveReviewedChapterForContinuity(book.dir, chapter);
+          const prevPreview = await resolveReviewedChapterForContinuity(book.dir, chapter - 1);
+          log(`current body: ${relative(book.dir, currentPreview.file)}`);
+          log(`prev body: ${relative(book.dir, prevPreview.file)}`);
+          for (const warning of [...(prevPreview.warnings ?? []), ...(currentPreview.warnings ?? [])]) {
+            log(`warning: ${warning}`);
+          }
+        }
 
         do {
           current = await checkContinuityChapter({
@@ -291,13 +315,21 @@ reviewCommand
             currentOverridePath: currentChapterOverride,
             fixAttempt: attempt,
             maxFixAttempts,
+            minChapterWords,
           });
           initial ??= current;
           score = current.report.score;
+          if (!opts.json) {
+            log(`score: ${current.report.score}`);
+            log(`word_count: ${current.report.word_count}/${current.report.min_chapter_words}`);
+            log(`length_status: ${current.report.length_status}`);
+          }
 
-          if (score >= 85) {
+          if (isContinuityPublishPass(current.report)) {
             if (!opts.json && attempt > 0) {
-              log(`attempt ${attempt}/${maxFixAttempts} -> score: ${score}`);
+              log(`attempt ${attempt}/${maxFixAttempts} -> score: ${score}, word_count: ${current.report.word_count}`);
+            } else if (!opts.json && attempt === 0 && current.fromExistingPass) {
+              log("existing reviewed PASS version confirmed");
             }
             break;
           }
@@ -310,7 +342,9 @@ reviewCommand
 
           const nextAttempt = attempt + 1;
           if (!opts.json) {
-            log(`attempt ${nextAttempt}/${maxFixAttempts} -> score: ${score} -> fixing...`);
+            const action = current.report.length_status === "TOO_SHORT" ? "expanding" : "fixing";
+            log(`result: NEED_FIX${current.report.length_status === "TOO_SHORT" ? " (too short)" : ""}`);
+            log(`attempt ${nextAttempt}/${maxFixAttempts} -> ${action}...`);
           }
           fixed = await fixContinuityChapter({
             root,
@@ -331,12 +365,26 @@ reviewCommand
           throw new Error(`Continuity auto failed to produce a report for chapter ${chapter}`);
         }
 
-        let finalStatus = score >= 85 ? "PASS" : "MANUAL_REVIEW";
+        const initialPassed = isContinuityPublishPass(initial.report) || initial.report.rewrite_mode === "none" && initial.report.length_status === "PASS";
+        let finalStatus = isContinuityPublishPass(current.report) ? "PASS" : "MANUAL_REVIEW";
         let finalReport = current.report;
-        if (finalStatus === "MANUAL_REVIEW") {
-          finalReport = markManualReview(finalReport);
-          const reportDir = join(book.dir, "reviews", "continuity");
-          const prefix = chapterNumberPrefix(chapter);
+        if (finalStatus === "PASS") {
+          const decisionSource = current.fromExistingPass && attempt === 0
+            ? "reviewed_existing"
+            : initialPassed && attempt === 0
+              ? "initial_check"
+              : "fix_attempt";
+          finalReport = makeContinuityDecisionReport(current.report, {
+            finalStatus: "PASS",
+            decisionSource,
+            usedFile: relative(book.dir, current.sourceFile),
+            bodySource: current.bodySource,
+            fixAttempt: attempt,
+            maxFixAttempts,
+            staleReportsIgnored: initialPassed && attempt === 0
+              ? await staleContinuityReportsForInitialPass(reportDir, prefix)
+              : [],
+          });
           await writeContinuityReportFiles(
             finalReport,
             join(reportDir, `${prefix}.final-report.json`),
@@ -345,6 +393,25 @@ reviewCommand
             current.chapterTitle,
           );
           if (!opts.json) {
+            log(`initial check: ${initialPassed ? "PASS" : "NEED_FIX"}`);
+          }
+        } else {
+          finalReport = markManualReview(finalReport, "", {
+            decisionSource: "fix_attempt_limit",
+            usedFile: relative(book.dir, current.sourceFile),
+            bodySource: current.bodySource,
+            fixAttempt: attempt,
+            maxFixAttempts,
+          });
+          await writeContinuityReportFiles(
+            finalReport,
+            join(reportDir, `${prefix}.final-report.json`),
+            join(reportDir, `${prefix}.final-report.md`),
+            chapter,
+            current.chapterTitle,
+          );
+          if (!opts.json) {
+            log(`initial check: ${initialPassed ? "PASS" : "NEED_FIX"}`);
             log("warning: Chapter failed to reach PASS after max attempts. Manual review required.");
           }
 
@@ -360,6 +427,7 @@ reviewCommand
               model: runtime.model,
               issues: finalReport.issues,
               maxFixAttempts,
+              minChapterWords,
             });
 
             const salvageScore = salvage.report?.report.score ?? 0;
@@ -367,14 +435,20 @@ reviewCommand
               log(`rewrite -> score: ${salvageScore}`);
             }
 
-            if (salvage.report && salvageScore >= 85) {
+            if (salvage.report && isContinuityPublishPass(salvage.report.report)) {
               finalStatus = "PASS";
-              finalReport = {
+              finalReport = makeContinuityDecisionReport({
                 ...salvage.report.report,
                 rewrite_strategy: "salvage_rewrite",
-                final_status: "PASS",
                 summary: `${salvage.report.report.summary}\n\nsalvage_rewrite accepted as final chapter candidate.`,
-              };
+              }, {
+                finalStatus: "PASS",
+                decisionSource: "salvage",
+                usedFile: relative(book.dir, salvage.salvageChapterPath),
+                bodySource: "salvaged",
+                fixAttempt: salvage.report.report.fix_attempt,
+                maxFixAttempts,
+              });
               await writeContinuityReportFiles(
                 finalReport,
                 join(reportDir, `${prefix}.final-report.json`),
@@ -405,19 +479,37 @@ reviewCommand
                 currentOverridePath: lightFixed.fixedChapterPath,
                 fixAttempt: maxFixAttempts,
                 maxFixAttempts,
+                minChapterWords,
               });
               salvage = { ...salvage, finalReport: afterLightFix };
-              finalStatus = afterLightFix.report.score >= 85 ? "PASS" : "DROP";
+              finalStatus = isContinuityPublishPass(afterLightFix.report) ? "PASS" : "DROP";
               finalReport = finalStatus === "PASS"
-                ? { ...afterLightFix.report, rewrite_strategy: "salvage_rewrite", final_status: "PASS" }
-                : markDrop(afterLightFix.report, "salvage_rewrite plus one light_fix still failed to reach PASS.");
-              if (finalStatus === "DROP") {
-                await writeContinuityReportFiles(finalReport, afterLightFix.reportJsonPath, afterLightFix.reportMarkdownPath, chapter, afterLightFix.chapterTitle);
-              }
+                ? makeContinuityDecisionReport({ ...afterLightFix.report, rewrite_strategy: "salvage_rewrite" }, {
+                    finalStatus: "PASS",
+                    decisionSource: "salvage",
+                    usedFile: relative(book.dir, lightFixed.fixedChapterPath),
+                    bodySource: "salvaged",
+                    fixAttempt: afterLightFix.report.fix_attempt,
+                    maxFixAttempts,
+                  })
+                : markDrop(afterLightFix.report, "salvage_rewrite plus one light_fix still failed to reach PASS.", {
+                    decisionSource: "salvage_failed",
+                    usedFile: relative(book.dir, lightFixed.fixedChapterPath),
+                    bodySource: "salvaged",
+                    fixAttempt: afterLightFix.report.fix_attempt,
+                    maxFixAttempts,
+                  });
+              await writeContinuityReportFiles(finalReport, afterLightFix.reportJsonPath, afterLightFix.reportMarkdownPath, chapter, afterLightFix.chapterTitle);
               if (!opts.json) log(`final result: ${finalStatus}${finalStatus === "PASS" ? " (salvaged)" : ""}`);
             } else {
               finalStatus = "DROP";
-              finalReport = markDrop(salvage.report?.report ?? finalReport, "salvage_rewrite failed below usable score.");
+              finalReport = markDrop(salvage.report?.report ?? finalReport, "salvage_rewrite failed below usable score.", {
+                decisionSource: "salvage_failed",
+                usedFile: relative(book.dir, salvage.salvageChapterPath),
+                bodySource: "salvaged",
+                fixAttempt: salvage.report?.report.fix_attempt ?? attempt,
+                maxFixAttempts,
+              });
               await writeContinuityReportFiles(
                 finalReport,
                 join(reportDir, `${prefix}.final-report.json`),
@@ -671,11 +763,20 @@ interface ContinuityBookRef {
 interface ContinuityChapterFile {
   readonly file: string;
   readonly title: string;
+  readonly bodySource?: ContinuityBodySource;
+  readonly decisionSource?: string;
+  readonly fromExistingPass?: boolean;
+  readonly warnings?: ReadonlyArray<string>;
 }
 
 interface ContinuityCommandResult {
   readonly chapter: number;
   readonly chapterTitle: string;
+  readonly sourceFile: string;
+  readonly prevSourceFile: string;
+  readonly bodySource: ContinuityBodySource;
+  readonly fromExistingPass: boolean;
+  readonly reportedWarnings: ReadonlyArray<string>;
   readonly report: ContinuityReport;
   readonly reportJsonPath: string;
   readonly reportMarkdownPath: string;
@@ -684,6 +785,10 @@ interface ContinuityCommandResult {
 interface FanqieQualityCommandResult {
   readonly chapter: number;
   readonly chapterTitle: string;
+  readonly sourceFile: string;
+  readonly bodySource: ContinuityBodySource;
+  readonly sourceDecision: string;
+  readonly continuityFinalStatus?: "PASS" | "MANUAL_REVIEW" | "DROP";
   readonly report: FanqieQualityReport;
   readonly reportJsonPath: string;
   readonly reportMarkdownPath: string;
@@ -695,6 +800,7 @@ interface FanqiePolishCommandResult {
   readonly finalScore: number;
   readonly finalQualityStatus: "QUALITY_PASS" | "QUALITY_MANUAL_REVIEW";
   readonly attempts: number;
+  readonly inputFile: string;
   readonly usedPolishedFile: string;
   readonly finalReportJsonPath: string;
   readonly finalReportMarkdownPath: string;
@@ -729,6 +835,19 @@ interface ContinuityBatchStop {
   readonly chapter: number;
   readonly message: string;
   readonly instruction: string;
+}
+
+type ContinuityBodySource = "fixed" | "salvaged" | "polished" | "original";
+
+interface ReviewedChapterSource {
+  readonly path: string;
+  readonly title: string;
+  readonly body_source: ContinuityBodySource;
+  readonly decision_source: string;
+  readonly continuity_final_status?: "PASS" | "MANUAL_REVIEW" | "DROP";
+  readonly quality_final_status?: "QUALITY_PASS" | "QUALITY_MANUAL_REVIEW";
+  readonly publish_blocked_by_continuity: boolean;
+  readonly warnings?: ReadonlyArray<string>;
 }
 
 async function loadContinuityRuntime(requireLlm: boolean): Promise<{
@@ -858,15 +977,23 @@ async function checkContinuityChapter(params: {
   readonly currentOverridePath?: string;
   readonly fixAttempt?: number;
   readonly maxFixAttempts?: number;
+  readonly minChapterWords?: number;
 }): Promise<ContinuityCommandResult> {
   if (params.chapter <= 1) {
     throw new Error("Continuity check requires chapter >= 2 because it needs a previous chapter.");
   }
 
-  const prev = await findChapterFile(params.bookDir, params.chapter - 1);
+  const prev = await resolveReviewedChapterForContinuity(params.bookDir, params.chapter - 1);
+  const originalCurrent = await findChapterFile(params.bookDir, params.chapter);
   const current = params.currentOverridePath
-    ? { file: params.currentOverridePath, title: (await findChapterFile(params.bookDir, params.chapter)).title }
-    : await findChapterFile(params.bookDir, params.chapter);
+    ? {
+        file: params.currentOverridePath,
+        title: originalCurrent.title,
+        bodySource: bodySourceFromPath(params.currentOverridePath),
+        fromExistingPass: false,
+        warnings: [],
+      }
+    : await resolveReviewedChapterForContinuity(params.bookDir, params.chapter);
 
   const [prevChapter, currentChapter] = await Promise.all([
     readFile(prev.file, "utf-8"),
@@ -891,6 +1018,7 @@ async function checkContinuityChapter(params: {
         reportMarkdownPath,
         fixAttempt: params.fixAttempt ?? 0,
         maxFixAttempts: params.maxFixAttempts ?? 2,
+        minChapterWords: params.minChapterWords ?? 1000,
       })
     : await runLocalChapterContinuityCheck({
         prevChapter,
@@ -901,11 +1029,17 @@ async function checkContinuityChapter(params: {
         reportMarkdownPath,
         fixAttempt: params.fixAttempt ?? 0,
         maxFixAttempts: params.maxFixAttempts ?? 2,
+        minChapterWords: params.minChapterWords ?? 1000,
       });
 
   return {
     chapter: params.chapter,
     chapterTitle: current.title,
+    sourceFile: current.file,
+    prevSourceFile: prev.file,
+    bodySource: current.bodySource ?? bodySourceFromPath(current.file),
+    fromExistingPass: Boolean(current.fromExistingPass),
+    reportedWarnings: [...(prev.warnings ?? []), ...(current.warnings ?? [])],
     report,
     reportJsonPath,
     reportMarkdownPath,
@@ -927,13 +1061,15 @@ async function checkFanqieQualityChapter(params: {
   readonly finalQualityStatus?: "QUALITY_PASS" | "QUALITY_MANUAL_REVIEW";
   readonly usedPolishedFile?: string;
 }): Promise<FanqieQualityCommandResult> {
-  const current = await findChapterFile(params.bookDir, params.chapter);
-  const prev = params.chapter > 1 ? await findChapterFile(params.bookDir, params.chapter - 1).catch(() => null) : null;
+  const originalCurrent = await findChapterFile(params.bookDir, params.chapter);
+  const current = params.currentOverridePath
+    ? await resolveOverrideChapterSource(params.bookDir, params.chapter, params.currentOverridePath)
+    : await resolveReviewedChapterSource(params.bookDir, params.chapter);
+  const prev = params.chapter > 1 ? await resolveReviewedChapterSource(params.bookDir, params.chapter - 1).catch(() => null) : null;
   const [chapterText, prevChapter] = await Promise.all([
-    readFile(params.currentOverridePath ?? current.file, "utf-8"),
-    prev ? readFile(prev.file, "utf-8") : Promise.resolve(""),
+    readFile(current.path, "utf-8"),
+    prev ? readFile(prev.path, "utf-8") : Promise.resolve(""),
   ]);
-  const publishBlockedByContinuity = await isPublishBlockedByContinuity(params.bookDir, params.chapter);
   const reportDir = join(params.bookDir, "reviews", "fanqie-quality");
   const prefix = chapterNumberPrefix(params.chapter);
   const reportKind = params.reportKind ?? "quality-report";
@@ -945,8 +1081,13 @@ async function checkFanqieQualityChapter(params: {
     nextOutline: params.nextOutline,
     bookName: params.bookId,
     chapterIndex: params.chapter,
-    chapterTitle: current.title,
-    publishBlockedByContinuity,
+    chapterTitle: originalCurrent.title,
+    sourceFile: relative(params.bookDir, current.path),
+    bodySource: current.body_source,
+    sourceDecision: current.decision_source,
+    continuityFinalStatus: current.continuity_final_status,
+    qualityFinalStatus: current.quality_final_status,
+    publishBlockedByContinuity: current.publish_blocked_by_continuity,
     polishAttempt: params.polishAttempt,
     maxPolishAttempts: params.maxPolishAttempts,
     finalQualityScore: params.finalQualityScore,
@@ -965,7 +1106,11 @@ async function checkFanqieQualityChapter(params: {
 
   return {
     chapter: params.chapter,
-    chapterTitle: current.title,
+    chapterTitle: originalCurrent.title,
+    sourceFile: current.path,
+    bodySource: current.body_source,
+    sourceDecision: current.decision_source,
+    continuityFinalStatus: current.continuity_final_status,
     report,
     reportJsonPath,
     reportMarkdownPath,
@@ -1019,8 +1164,14 @@ async function polishFanqieQualityChapter(params: {
   readonly maxPolishAttempts: number;
   readonly json: boolean;
 }): Promise<FanqiePolishCommandResult> {
-  let quality = await readFanqieQualityReport(params.bookDir, params.chapter)
-    ?? await checkFanqieQualityChapter({
+  let quality = await readFanqieQualityReport(params.bookDir, params.chapter);
+  if (quality && !await hasUsableQualitySourceFile(params.bookDir, quality.report)) {
+    if (!params.json) {
+      log("warning: quality-report source_file missing or not found; rerunning fanqie-quality.");
+    }
+    quality = null;
+  }
+  quality ??= await checkFanqieQualityChapter({
       bookId: params.bookId,
       bookDir: params.bookDir,
       chapter: params.chapter,
@@ -1029,6 +1180,7 @@ async function polishFanqieQualityChapter(params: {
     });
 
   const initialScore = quality.report.quality_score;
+  const inputFile = quality.sourceFile;
   let attempts = 0;
   let usedPolishedFile = "";
   let finalScore = initialScore;
@@ -1050,6 +1202,7 @@ async function polishFanqieQualityChapter(params: {
       finalScore: initialScore,
       finalQualityStatus: "QUALITY_MANUAL_REVIEW",
       attempts: 0,
+      inputFile,
       usedPolishedFile: "",
       finalReportJsonPath: paths.jsonPath,
       finalReportMarkdownPath: paths.markdownPath,
@@ -1073,6 +1226,7 @@ async function polishFanqieQualityChapter(params: {
       finalScore: initialScore,
       finalQualityStatus: finalReport.final_quality_status ?? "QUALITY_MANUAL_REVIEW",
       attempts: 0,
+      inputFile,
       usedPolishedFile: "",
       finalReportJsonPath: paths.jsonPath,
       finalReportMarkdownPath: paths.markdownPath,
@@ -1131,6 +1285,7 @@ async function polishFanqieQualityChapter(params: {
     finalScore,
     finalQualityStatus: finalStatus,
     attempts,
+    inputFile,
     usedPolishedFile,
     finalReportJsonPath: paths.jsonPath,
     finalReportMarkdownPath: paths.markdownPath,
@@ -1145,9 +1300,16 @@ async function readFanqieQualityReport(bookDir: string, chapter: number): Promis
   const reportMarkdownPath = join(reportDir, `${prefix}.quality-report.md`);
   try {
     const report = JSON.parse(await readFile(reportJsonPath, "utf-8")) as FanqieQualityReport;
+    const sourceFile = typeof report.source_file === "string" && report.source_file
+      ? resolveUsedFilePath(bookDir, report.source_file) ?? ""
+      : "";
     return {
       chapter,
       chapterTitle: report.chapter_title,
+      sourceFile,
+      bodySource: report.body_source ?? (sourceFile ? bodySourceFromPath(sourceFile) : "original"),
+      sourceDecision: report.source_decision ?? "quality_report",
+      continuityFinalStatus: report.continuity_final_status,
       report,
       reportJsonPath,
       reportMarkdownPath,
@@ -1155,6 +1317,12 @@ async function readFanqieQualityReport(bookDir: string, chapter: number): Promis
   } catch {
     return null;
   }
+}
+
+async function hasUsableQualitySourceFile(bookDir: string, report: FanqieQualityReport): Promise<boolean> {
+  if (!report.source_file) return false;
+  const sourceFile = resolveUsedFilePath(bookDir, report.source_file);
+  return Boolean(sourceFile && await fileExists(sourceFile));
 }
 
 async function writeFanqiePolishedChapter(params: {
@@ -1282,9 +1450,10 @@ async function runContinuitySalvage(params: {
   readonly model: string;
   readonly issues: ContinuityReport["issues"];
   readonly maxFixAttempts: number;
+  readonly minChapterWords: number;
 }): Promise<ContinuitySalvageResult> {
-  const prev = await findChapterFile(params.bookDir, params.chapter - 1);
-  const current = await findChapterFile(params.bookDir, params.chapter);
+  const prev = await resolveReviewedChapterForContinuity(params.bookDir, params.chapter - 1);
+  const current = await resolveReviewedChapterForContinuity(params.bookDir, params.chapter);
   const [prevChapter, currentChapter] = await Promise.all([
     readFile(prev.file, "utf-8"),
     readFile(current.file, "utf-8"),
@@ -1293,6 +1462,7 @@ async function runContinuitySalvage(params: {
     prevChapter,
     currentChapterSummary: summarizeChapterForSalvage(currentChapter),
     issues: params.issues,
+    minChapterWords: params.minChapterWords,
   });
 
   const response = await chatCompletion(params.client, params.model, [
@@ -1327,6 +1497,7 @@ async function runContinuitySalvage(params: {
     currentOverridePath: outputPath,
     fixAttempt: params.maxFixAttempts,
     maxFixAttempts: params.maxFixAttempts,
+    minChapterWords: params.minChapterWords,
   });
   const salvageReport = {
     ...report.report,
@@ -1369,6 +1540,7 @@ function buildSalvageRewritePrompt(params: {
   readonly prevChapter: string;
   readonly currentChapterSummary: string;
   readonly issues: ContinuityReport["issues"];
+  readonly minChapterWords: number;
 }): string {
   const issues = params.issues.length
     ? params.issues.map((issue) => `[${issue.severity}] ${issue.type}: ${issue.detail}`).join("\n")
@@ -1395,6 +1567,7 @@ ${issues}
 5. 必须让危机升级（不能停滞）。
 6. 结尾必须形成新的钩子。
 7. 保持番茄风格：短句、快节奏、强冲突。
+8. 正文有效字数不得低于 ${params.minChapterWords} 字，建议目标 1500~2200 字。
 
 【允许】
 - 重写结构
@@ -1406,6 +1579,7 @@ ${issues}
 - 改变人物关系
 - 改变战力体系
 - 改变既有伏笔含义
+- 低于最低字数要求
 
 输出：完整章节正文`;
 }
@@ -1475,25 +1649,88 @@ async function listFixedAttempts(bookDir: string, chapter: number): Promise<numb
     .filter((attempt): attempt is number => attempt !== null);
 }
 
-function markManualReview(report: ContinuityReport, reason = ""): ContinuityReport {
+interface ContinuityDecisionMetadata {
+  readonly decisionSource: string;
+  readonly usedFile: string;
+  readonly bodySource: ContinuityBodySource;
+  readonly fixAttempt: number;
+  readonly maxFixAttempts: number;
+  readonly staleReportsIgnored?: ReadonlyArray<string>;
+}
+
+function makeContinuityDecisionReport(
+  report: ContinuityReport,
+  metadata: ContinuityDecisionMetadata & { readonly finalStatus: "PASS" | "MANUAL_REVIEW" | "DROP" },
+): ContinuityReport {
+  return {
+    ...report,
+    status: metadata.finalStatus === "PASS" ? "PASS" : report.status,
+    rewrite_mode: metadata.finalStatus === "PASS" ? "none" : report.rewrite_mode,
+    rewrite_prompt: metadata.finalStatus === "PASS" ? "" : report.rewrite_prompt,
+    manual_fix_prompt: metadata.finalStatus === "PASS" ? "" : report.manual_fix_prompt,
+    fix_attempt: metadata.fixAttempt,
+    max_fix_attempts: metadata.maxFixAttempts,
+    final_status: metadata.finalStatus,
+    decision_source: metadata.decisionSource,
+    used_file: metadata.usedFile,
+    body_source: metadata.bodySource,
+    stale_reports_ignored: metadata.staleReportsIgnored ?? [],
+  } as ContinuityReport;
+}
+
+async function staleContinuityReportsForInitialPass(reportDir: string, prefix: string): Promise<string[]> {
+  const candidates = [`${prefix}.salvage-report.json`];
+  const existing: string[] = [];
+  for (const name of candidates) {
+    try {
+      await stat(join(reportDir, name));
+      existing.push(name);
+    } catch {
+      // Missing stale reports are fine; only existing files are recorded.
+    }
+  }
+  return existing;
+}
+
+function markManualReview(
+  report: ContinuityReport,
+  reason = "",
+  metadata?: ContinuityDecisionMetadata,
+): ContinuityReport {
   const warning = "Chapter failed to reach PASS after max attempts. Manual review required.";
   const suffix = reason ? `${warning} ${reason}` : warning;
   return {
     ...report,
     status: "MANUAL_REVIEW",
+    fix_attempt: metadata?.fixAttempt ?? report.fix_attempt,
+    max_fix_attempts: metadata?.maxFixAttempts ?? report.max_fix_attempts,
     final_status: "MANUAL_REVIEW",
+    decision_source: metadata?.decisionSource ?? report.decision_source,
+    used_file: metadata?.usedFile ?? report.used_file,
+    body_source: metadata?.bodySource ?? (report as ContinuityReport & { body_source?: ContinuityBodySource }).body_source,
+    stale_reports_ignored: metadata?.staleReportsIgnored ?? report.stale_reports_ignored,
     summary: `${report.summary}\n\n${suffix}`,
-  };
+  } as ContinuityReport;
 }
 
-function markDrop(report: ContinuityReport, reason = ""): ContinuityReport {
+function markDrop(
+  report: ContinuityReport,
+  reason = "",
+  metadata?: ContinuityDecisionMetadata,
+): ContinuityReport {
   const warning = "Chapter failed salvage_rewrite and cannot enter the publish pool.";
   const suffix = reason ? `${warning} ${reason}` : warning;
   return {
     ...report,
+    fix_attempt: metadata?.fixAttempt ?? report.fix_attempt,
+    max_fix_attempts: metadata?.maxFixAttempts ?? report.max_fix_attempts,
     final_status: "DROP",
+    decision_source: metadata?.decisionSource ?? report.decision_source,
+    used_file: metadata?.usedFile ?? report.used_file,
+    body_source: metadata?.bodySource ?? (report as ContinuityReport & { body_source?: ContinuityBodySource }).body_source,
+    stale_reports_ignored: metadata?.staleReportsIgnored ?? report.stale_reports_ignored,
     summary: `${report.summary}\n\n${suffix}`,
-  };
+  } as ContinuityReport;
 }
 
 async function writeContinuityReportFiles(
@@ -1506,6 +1743,145 @@ async function writeContinuityReportFiles(
   await mkdir(dirname(jsonPath), { recursive: true });
   await writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`, "utf-8");
   await writeFile(markdownPath, renderContinuityMarkdown(report, chapter, chapterTitle), "utf-8");
+}
+
+async function resolveReviewedChapterForContinuity(bookDir: string, chapter: number): Promise<ContinuityChapterFile> {
+  const original = await findChapterFile(bookDir, chapter);
+  const warnings: string[] = [];
+  const finalReport = await readContinuityReportIfExists(bookDir, chapter, "final-report");
+
+  if (isContinuityPassReport(finalReport)) {
+    const usedFile = typeof finalReport?.used_file === "string" ? finalReport.used_file : "";
+    if (usedFile) {
+      const usedPath = resolveUsedFilePath(bookDir, usedFile);
+      if (usedPath) {
+        return {
+          ...original,
+          file: usedPath,
+          bodySource: bodySourceFromPath(usedPath),
+          decisionSource: "reviewed_existing",
+          fromExistingPass: true,
+          warnings,
+        };
+      }
+      warnings.push(`PASS final-report used_file is missing: ${usedFile}; falling back to reviewed candidates/original.`);
+    }
+  }
+
+  const polished = await findLatestPolishedPassFile(bookDir, chapter);
+  if (polished) {
+    return { ...original, file: polished, bodySource: "polished", fromExistingPass: false, warnings };
+  }
+
+  const salvageLightfix = join(bookDir, "chapters-salvaged", `${chapterNumberPrefix(chapter)}_salvage_lightfix.md`);
+  if (await fileExists(salvageLightfix) && await hasPassContinuityReport(bookDir, chapter, ["salvage-report", "final-report"])) {
+    return { ...original, file: salvageLightfix, bodySource: "salvaged", fromExistingPass: false, warnings };
+  }
+
+  const salvage = join(bookDir, "chapters-salvaged", `${chapterNumberPrefix(chapter)}_salvage.md`);
+  if (await fileExists(salvage) && await hasPassContinuityReport(bookDir, chapter, ["salvage-report", "final-report"])) {
+    return { ...original, file: salvage, bodySource: "salvaged", fromExistingPass: false, warnings };
+  }
+
+  const fixed = await findLatestFixedPassFile(bookDir, chapter);
+  if (fixed) {
+    return { ...original, file: fixed, bodySource: "fixed", fromExistingPass: false, warnings };
+  }
+
+  return { ...original, bodySource: "original", fromExistingPass: false, warnings };
+}
+
+async function resolveOverrideChapterSource(bookDir: string, chapter: number, overridePath: string): Promise<ReviewedChapterSource> {
+  const original = await findChapterFile(bookDir, chapter);
+  const continuityFinal = await readContinuityReportIfExists(bookDir, chapter, "final-report");
+  const continuityFinalStatus = normalizeContinuityFinalStatus(continuityFinal?.final_status ?? continuityFinal?.status);
+  const qualityFinal = await readQualityReportIfExists(bookDir, chapter, "final-quality-report");
+  return {
+    path: overridePath,
+    title: original.title,
+    body_source: bodySourceFromPath(overridePath),
+    decision_source: "override",
+    continuity_final_status: continuityFinalStatus,
+    quality_final_status: normalizeQualityFinalStatus(qualityFinal?.final_quality_status ?? qualityFinal?.quality_final_status),
+    publish_blocked_by_continuity: Boolean(continuityFinalStatus && continuityFinalStatus !== "PASS"),
+    warnings: [],
+  };
+}
+
+async function resolveReviewedChapterSource(
+  bookDir: string,
+  chapter: number,
+  options?: { readonly allowQualityFinal?: boolean },
+): Promise<ReviewedChapterSource> {
+  const original = await findChapterFile(bookDir, chapter);
+  const warnings: string[] = [];
+  const finalReport = await readContinuityReportIfExists(bookDir, chapter, "final-report");
+  const continuityFinalStatus = normalizeContinuityFinalStatus(finalReport?.final_status ?? finalReport?.status);
+  const qualityReport = await readQualityReportIfExists(bookDir, chapter, "final-quality-report");
+  const qualityFinalStatus = normalizeQualityFinalStatus(qualityReport?.final_quality_status ?? qualityReport?.quality_final_status);
+
+  if (options?.allowQualityFinal && qualityFinalStatus === "QUALITY_PASS" && typeof qualityReport?.used_polished_file === "string") {
+    const polishedPath = resolveUsedFilePath(bookDir, qualityReport.used_polished_file);
+    if (polishedPath) {
+      return {
+        path: polishedPath,
+        title: original.title,
+        body_source: "polished",
+        decision_source: "quality_final_report",
+        continuity_final_status: continuityFinalStatus,
+        quality_final_status: qualityFinalStatus,
+        publish_blocked_by_continuity: Boolean(continuityFinalStatus && continuityFinalStatus !== "PASS"),
+        warnings,
+      };
+    }
+    warnings.push(`QUALITY_PASS final-quality-report used_polished_file is missing: ${qualityReport.used_polished_file}; falling back to continuity/original.`);
+  }
+
+  if (continuityFinalStatus === "PASS") {
+    const usedFile = typeof finalReport?.used_file === "string" ? finalReport.used_file : "";
+    if (usedFile) {
+      const usedPath = resolveUsedFilePath(bookDir, usedFile);
+      if (usedPath) {
+        return {
+          path: usedPath,
+          title: original.title,
+          body_source: bodySourceFromPath(usedPath),
+          decision_source: "continuity_final_report",
+          continuity_final_status: continuityFinalStatus,
+          quality_final_status: qualityFinalStatus,
+          publish_blocked_by_continuity: false,
+          warnings,
+        };
+      }
+      warnings.push(`PASS final-report used_file is missing: ${usedFile}; falling back to reviewed candidates/original.`);
+    }
+  }
+
+  if (continuityFinalStatus && continuityFinalStatus !== "PASS") {
+    const usedFile = typeof finalReport?.used_file === "string" ? finalReport.used_file : "";
+    const usedPath = usedFile ? resolveUsedFilePath(bookDir, usedFile) : null;
+    return {
+      path: usedPath ?? original.file,
+      title: original.title,
+      body_source: usedPath ? bodySourceFromPath(usedPath) : "original",
+      decision_source: usedPath ? "continuity_final_report_blocked" : "fallback_original",
+      continuity_final_status: continuityFinalStatus,
+      quality_final_status: qualityFinalStatus,
+      publish_blocked_by_continuity: true,
+      warnings,
+    };
+  }
+
+  return {
+    path: original.file,
+    title: original.title,
+    body_source: "original",
+    decision_source: "fallback_original",
+    continuity_final_status: continuityFinalStatus,
+    quality_final_status: qualityFinalStatus,
+    publish_blocked_by_continuity: false,
+    warnings,
+  };
 }
 
 async function findChapterFile(bookDir: string, chapter: number): Promise<ContinuityChapterFile> {
@@ -1536,6 +1912,119 @@ async function findFixedChapterFile(bookDir: string, chapter: number): Promise<s
   return found;
 }
 
+async function findLatestFixedPassFile(bookDir: string, chapter: number): Promise<string | null> {
+  const finalReport = await readContinuityReportIfExists(bookDir, chapter, "final-report");
+  if (!isContinuityPassReport(finalReport)) return null;
+  const fixedDir = join(bookDir, "chapters-fixed");
+  const files = await listFiles(fixedDir).catch(() => []);
+  return files
+    .filter((file) => /\.(md|txt)$/i.test(file))
+    .filter((file) => getChapterNumberFromFile(file) === chapter)
+    .sort((a, b) => (getAttemptFromFilename(b) ?? 0) - (getAttemptFromFilename(a) ?? 0))[0] ?? null;
+}
+
+async function findLatestPolishedPassFile(bookDir: string, chapter: number): Promise<string | null> {
+  const qualityReport = await readQualityReportIfExists(bookDir, chapter, "final-quality-report");
+  if (qualityReport?.final_quality_status !== "QUALITY_PASS") return null;
+  const polishedDir = join(bookDir, "chapters-polished");
+  const files = await listFiles(polishedDir).catch(() => []);
+  return files
+    .filter((file) => /\.(md|txt)$/i.test(file))
+    .filter((file) => getChapterNumberFromFile(file) === chapter)
+    .sort((a, b) => (getPolishAttemptFromFilename(b) ?? 0) - (getPolishAttemptFromFilename(a) ?? 0))[0] ?? null;
+}
+
+async function hasPassContinuityReport(
+  bookDir: string,
+  chapter: number,
+  kinds: ReadonlyArray<"report" | "final-report" | "salvage-report">,
+): Promise<boolean> {
+  for (const kind of kinds) {
+    const report = await readContinuityReportIfExists(bookDir, chapter, kind);
+    if (isContinuityPassReport(report)) return true;
+  }
+  return false;
+}
+
+async function readContinuityReportIfExists(
+  bookDir: string,
+  chapter: number,
+  kind: "report" | "final-report" | "salvage-report",
+): Promise<Partial<ContinuityReport> | null> {
+  const file = join(bookDir, "reviews", "continuity", `${chapterNumberPrefix(chapter)}.${kind}.json`);
+  return readJsonIfExists<Partial<ContinuityReport>>(file);
+}
+
+async function readQualityReportIfExists(
+  bookDir: string,
+  chapter: number,
+  kind: "quality-report" | "final-quality-report",
+): Promise<Partial<FanqieQualityReport> | null> {
+  const file = join(bookDir, "reviews", "fanqie-quality", `${chapterNumberPrefix(chapter)}.${kind}.json`);
+  return readJsonIfExists<Partial<FanqieQualityReport>>(file);
+}
+
+async function readJsonIfExists<T>(file: string): Promise<T | null> {
+  try {
+    return JSON.parse(await readFile(file, "utf-8")) as T;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function fileExists(file: string): Promise<boolean> {
+  try {
+    await stat(file);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function isContinuityPassReport(report: Partial<ContinuityReport> | null): boolean {
+  if (!report) return false;
+  return (report.final_status ?? report.status) === "PASS";
+}
+
+function normalizeContinuityFinalStatus(value: unknown): "PASS" | "MANUAL_REVIEW" | "DROP" | undefined {
+  return value === "PASS" || value === "MANUAL_REVIEW" || value === "DROP" ? value : undefined;
+}
+
+function normalizeQualityFinalStatus(value: unknown): "QUALITY_PASS" | "QUALITY_MANUAL_REVIEW" | undefined {
+  return value === "QUALITY_PASS" || value === "QUALITY_MANUAL_REVIEW" ? value : undefined;
+}
+
+function resolveUsedFilePath(bookDir: string, usedFile: string): string | null {
+  const candidates = [
+    isAbsolute(usedFile) ? usedFile : "",
+    join(bookDir, usedFile),
+    join(dirname(dirname(bookDir)), usedFile),
+    join(dirname(dirname(dirname(bookDir))), usedFile),
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    const resolved = resolve(candidate);
+    if (existsSync(resolved)) return resolved;
+  }
+  return null;
+}
+
+function bodySourceFromPath(file: string): ContinuityBodySource {
+  if (file.includes("chapters-polished")) return "polished";
+  if (file.includes("chapters-salvaged")) return "salvaged";
+  if (file.includes("chapters-fixed")) return "fixed";
+  return "original";
+}
+
+function isContinuityPublishPass(report: ContinuityReport): boolean {
+  return report.score >= 85
+    && report.length_status === "PASS"
+    && report.publish_readiness === "PASS"
+    && report.final_status !== "DROP";
+}
+
 async function listFiles(dir: string): Promise<string[]> {
   const entries = await readdir(dir, { withFileTypes: true });
   const files: string[] = [];
@@ -1562,6 +2051,13 @@ function getChapterTitleFromFile(file: string): string {
 
 function getAttemptFromFilename(file: string): number | null {
   const match = basename(file).match(/_attempt(\d+)\.(?:md|txt)$/i);
+  if (!match) return null;
+  const attempt = Number.parseInt(match[1] ?? "", 10);
+  return Number.isInteger(attempt) && attempt > 0 ? attempt : null;
+}
+
+function getPolishAttemptFromFilename(file: string): number | null {
+  const match = basename(file).match(/_polished_attempt(\d+)\.(?:md|txt)$/i);
   if (!match) return null;
   const attempt = Number.parseInt(match[1] ?? "", 10);
   return Number.isInteger(attempt) && attempt > 0 ? attempt : null;

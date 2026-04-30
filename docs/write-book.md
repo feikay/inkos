@@ -34,7 +34,7 @@ node ../packages/cli/dist/index.js review continuity-auto --book 葬渊魔经 --
 cd ..
 
 # 全量重新导出
-node scripts/fanqie/export-fanqie.mjs 葬渊魔经 --from 1 --to 999 --title "气血为0，我却能撬动规则"
+node scripts/fanqie/export-fanqie.mjs 葬渊魔经 --from 1 --to 999 --use-reviewed --title "气血为0，我却能撬动规则"
 ```
 
 ```bash

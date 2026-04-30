@@ -1,7 +1,15 @@
-import type { ShortStoryChapterPlan, ShortStoryTheme } from "../../schema.js";
+import type { ShortStoryChapterPlan, ShortStoryTheme, ShortStoryVariant } from "../../schema.js";
 import type { ShortStoryCast, ShortStorySceneDraft } from "../index.js";
 
-export function resolveThrillerCast(_theme: ShortStoryTheme): ShortStoryCast {
+export function resolveThrillerCast(_theme: ShortStoryTheme, variant?: ShortStoryVariant): ShortStoryCast {
+  if (variant) {
+    return {
+      hero: variant.protagonist,
+      villain: variant.antagonist,
+      rival: variant.ally,
+      child: variant.keyRelation,
+    };
+  }
   return {
     hero: "许念",
     villain: "周砚",

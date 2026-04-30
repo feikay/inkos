@@ -7,6 +7,7 @@ import {
   auditShortStoryBook,
   countCjkDraftWords,
   createShortStoryChapterPlan,
+  createShortStoryVariant,
   createShortStoryPublishPackage,
   generateShortStoryTitles,
   generateShortStoryDraftChapters,
@@ -206,6 +207,87 @@ describe("short story chapter plan", () => {
       const paragraphs = draft.content.split(/\n\n+/).filter(Boolean);
       expect(paragraphs.filter((paragraph) => beatParagraphPattern.test(paragraph)).length).toBeGreaterThanOrEqual(4);
     }
+  });
+
+  it("keeps variant runs isolated from legacy characters and forbidden scenes", () => {
+    const variant = createShortStoryVariant({
+      theme: "悬疑惊悚",
+      runIndex: 2,
+      timestamp: "variant-isolation",
+    });
+    const sourcePlan = createShortStoryChapterPlan({
+      theme: "悬疑惊悚",
+      targetWords: 12_000,
+      variant,
+    });
+    const drafts = generateShortStoryDraftChapters({
+      theme: "悬疑惊悚",
+      targetWords: 12_000,
+      chapterTargetWords: 1_500,
+      variant,
+      chapters: sourcePlan,
+    });
+    const content = drafts.map((draft) => draft.content).join("\n");
+
+    expect(content).toContain(variant.protagonist);
+    for (const forbidden of variant.forbiddenElements) {
+      expect(content).not.toContain(forbidden);
+    }
+  });
+
+  it("serializes variant runs through the shared baseWorld and derived shape", () => {
+    const variant = createShortStoryVariant({
+      theme: "都市复仇",
+      runIndex: 3,
+      timestamp: "generic-world",
+    });
+    const serialized = JSON.parse(JSON.stringify(variant)) as Record<string, unknown>;
+
+    expect(serialized).toMatchObject({
+      theme: "都市复仇",
+      runIndex: 3,
+      writingMode: expect.stringMatching(/^(logic|emotion|conflict|weird)$/),
+      hookMode: "viral",
+      baseWorld: {
+        protagonist: expect.any(String),
+        role: expect.any(String),
+        setting: expect.any(String),
+        coreConflict: expect.any(String),
+        supportingCharacters: expect.any(Array),
+      },
+      derived: {
+        mainThreat: expect.any(String),
+        twistDirection: expect.any(String),
+      },
+    });
+    expect(serialized).not.toHaveProperty("protagonist");
+    expect(serialized).not.toHaveProperty("premise");
+    expect(variant.protagonist).toBe(variant.baseWorld.protagonist);
+    expect(variant.premise).toBe(variant.derived.premise);
+  });
+
+  it("assigns different writing modes across adjacent batch variants", () => {
+    const variants = [1, 2, 3].map((runIndex) =>
+      createShortStoryVariant({
+        theme: "悬疑惊悚",
+        runIndex,
+        timestamp: "writing-mode-batch",
+      })
+    );
+
+    expect(new Set(variants.map((variant) => variant.writingMode)).size).toBeGreaterThanOrEqual(2);
+  });
+
+  it("assigns hook modes by run order for click-potential tiers", () => {
+    const variants = [1, 2, 3].map((runIndex) =>
+      createShortStoryVariant({
+        theme: "悬疑惊悚",
+        runIndex,
+        timestamp: "hook-mode-batch",
+      })
+    );
+
+    expect(variants.map((variant) => variant.hookMode)).toEqual(["normal", "strong", "viral"]);
   });
 
   it("optimizes thriller first chapter hook without changing the chapter shell", () => {

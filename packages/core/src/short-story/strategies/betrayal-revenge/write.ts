@@ -1,7 +1,15 @@
-import type { ShortStoryChapterPlan, ShortStoryTheme } from "../../schema.js";
+import type { ShortStoryChapterPlan, ShortStoryTheme, ShortStoryVariant } from "../../schema.js";
 import type { ShortStoryCast, ShortStorySceneDraft } from "../index.js";
 
-export function resolveBetrayalRevengeCast(_theme: ShortStoryTheme): ShortStoryCast {
+export function resolveBetrayalRevengeCast(_theme: ShortStoryTheme, variant?: ShortStoryVariant): ShortStoryCast {
+  if (variant) {
+    return {
+      hero: variant.protagonist,
+      villain: variant.antagonist,
+      rival: variant.keyRelation,
+      child: variant.keyRelation.includes("女儿") ? "女儿" : variant.keyRelation,
+    };
+  }
   return {
     hero: "林晚",
     villain: "顾沉",

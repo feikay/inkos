@@ -1,5 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { basename, dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { chatCompletion, type LLMClient } from "../llm/provider.js";
 
 export type ContinuityStatus = "PASS" | "NEED_FIX" | "REWRITE_REQUIRED" | "MANUAL_REVIEW";
@@ -7,10 +7,17 @@ export type ContinuityLevel = "优秀" | "可用" | "不合格";
 export type ContinuityRewriteMode = "none" | "light_fix" | "full_rewrite";
 export type ContinuityRewriteStrategy = "salvage_rewrite";
 export type ContinuityFinalStatus = "PASS" | "MANUAL_REVIEW" | "DROP" | "RETRY";
+export type ContinuityLengthStatus = "PASS" | "TOO_SHORT";
+export type ContinuityPublishReadiness = "PASS" | "BLOCKED";
 
 export interface ContinuityIssue {
   readonly type: string;
   readonly severity: "低" | "中" | "高";
+  readonly detail: string;
+}
+
+export interface ContinuityPublishBlocker {
+  readonly type: string;
   readonly detail: string;
 }
 
@@ -31,6 +38,16 @@ export interface ContinuityReport {
   readonly rewrite_mode: ContinuityRewriteMode;
   readonly rewrite_strategy?: ContinuityRewriteStrategy;
   readonly rewrite_prompt: string;
+  readonly manual_fix_prompt: string;
+  readonly used_file?: string;
+  readonly decision_source?: string;
+  readonly body_source?: string;
+  readonly stale_reports_ignored?: ReadonlyArray<string>;
+  readonly word_count: number;
+  readonly min_chapter_words: number;
+  readonly length_status: ContinuityLengthStatus;
+  readonly publish_readiness: ContinuityPublishReadiness;
+  readonly publish_blockers: ReadonlyArray<ContinuityPublishBlocker>;
   readonly fix_attempt: number;
   readonly max_fix_attempts: number;
   readonly final_status: ContinuityFinalStatus;
@@ -47,6 +64,7 @@ export interface RunContinuityCheckInput {
   readonly reportMarkdownPath?: string;
   readonly fixAttempt?: number;
   readonly maxFixAttempts?: number;
+  readonly minChapterWords?: number;
 }
 
 export interface RunContinuityFixInput {
@@ -77,6 +95,7 @@ export async function runChapterContinuityCheck(
   const guarded = applyContinuityGuardrails(parsed, input.prevChapter, input.currentChapter, {
     fixAttempt: input.fixAttempt ?? 0,
     maxFixAttempts: input.maxFixAttempts ?? 2,
+    minChapterWords: input.minChapterWords ?? 1000,
   });
 
   if (input.reportJsonPath) {
@@ -86,6 +105,7 @@ export async function runChapterContinuityCheck(
   if (input.reportMarkdownPath) {
     await mkdir(dirname(input.reportMarkdownPath), { recursive: true });
     await writeFile(input.reportMarkdownPath, renderContinuityMarkdown(guarded, input.chapterIndex, input.chapterTitle), "utf-8");
+    await writeManualFixFileIfNeeded(guarded, input.reportMarkdownPath);
   }
 
   return guarded;
@@ -100,6 +120,7 @@ export async function runLocalChapterContinuityCheck(input: {
   readonly reportMarkdownPath?: string;
   readonly fixAttempt?: number;
   readonly maxFixAttempts?: number;
+  readonly minChapterWords?: number;
 }): Promise<ContinuityReport> {
   const report = applyContinuityGuardrails(
     buildLocalContinuityReport(input.prevChapter, input.currentChapter),
@@ -108,6 +129,7 @@ export async function runLocalChapterContinuityCheck(input: {
     {
       fixAttempt: input.fixAttempt ?? 0,
       maxFixAttempts: input.maxFixAttempts ?? 2,
+      minChapterWords: input.minChapterWords ?? 1000,
     },
   );
   if (input.reportJsonPath) {
@@ -117,6 +139,7 @@ export async function runLocalChapterContinuityCheck(input: {
   if (input.reportMarkdownPath) {
     await mkdir(dirname(input.reportMarkdownPath), { recursive: true });
     await writeFile(input.reportMarkdownPath, renderContinuityMarkdown(report, input.chapterIndex, input.chapterTitle), "utf-8");
+    await writeManualFixFileIfNeeded(report, input.reportMarkdownPath);
   }
   return report;
 }
@@ -179,6 +202,10 @@ export function renderContinuityMarkdown(
 ${report.rewrite_strategy ? `- 重写策略：${report.rewrite_strategy}\n` : ""}
 - 修复次数：${report.fix_attempt}/${report.max_fix_attempts}
 - 最终状态：${report.final_status}
+${report.decision_source ? `- 裁决来源：${report.decision_source}\n` : ""}${report.used_file ? `- 使用文件：${report.used_file}\n` : ""}${report.stale_reports_ignored?.length ? `- 已忽略旧报告：${report.stale_reports_ignored.join("、")}\n` : ""}
+- 有效字数：${report.word_count}/${report.min_chapter_words}
+- 字数状态：${report.length_status}
+- 发布就绪：${report.publish_readiness}
 - 当前目标：${report.current_goal || "未识别"}
 - 目标清晰：${report.goal_clear}
 - 危机推进：${report.crisis_progress}
@@ -216,6 +243,7 @@ ${JSON.stringify(report.foreshadowing_continuity, null, 2)}
 ## 修复建议
 
 ${suggestions}
+${report.manual_fix_prompt ? `\n## 人工修复建议\n\n${report.manual_fix_prompt}\n` : ""}
 `;
 }
 
@@ -252,17 +280,30 @@ export function buildContinuityRewritePrompt(params: {
   readonly currentChapter: string;
   readonly issues: ReadonlyArray<ContinuityIssue> | string;
   readonly mode: ContinuityRewriteMode;
+  readonly lengthGate?: NovelLengthGate;
 }): string {
   if (params.mode === "none") return "";
   const issues = typeof params.issues === "string"
     ? params.issues
     : params.issues.map((issue) => `[${issue.severity}] ${issue.type}: ${issue.detail}`).join("\n");
+  const lengthRequirement = buildLengthExpansionRequirement(params.lengthGate);
   return params.mode === "light_fix"
-    ? buildLightFixRewritePrompt(params.prevChapter, params.currentChapter, issues)
-    : buildFullRewritePrompt(params.prevChapter, params.currentChapter, issues);
+    ? buildLightFixRewritePrompt(params.prevChapter, params.currentChapter, issues, lengthRequirement)
+    : buildFullRewritePrompt(params.prevChapter, params.currentChapter, issues, lengthRequirement);
 }
 
-function buildLightFixRewritePrompt(prevChapter: string, currentChapter: string, issues: string): string {
+interface NovelLengthGate {
+  readonly wordCount: number;
+  readonly minChapterWords: number;
+  readonly lengthStatus: ContinuityLengthStatus;
+}
+
+function buildLengthExpansionRequirement(lengthGate?: NovelLengthGate): string {
+  if (!lengthGate || lengthGate.lengthStatus !== "TOO_SHORT") return "";
+  return `\n\n【字数扩写要求】\n当前正文有效字数：${lengthGate.wordCount}\n最低要求：${lengthGate.minChapterWords}\n\n请在不改变主线、不注水、不重复解释的前提下，将章节扩写到至少 ${lengthGate.minChapterWords} 字。\n\n扩写方向：\n1. 增加即时动作链\n2. 增加角色反应\n3. 增加危机压迫\n4. 增加对抗过程\n5. 增加选择与代价\n6. 增加结尾钩子铺垫\n\n禁止：\n- 禁止水字数\n- 禁止重复设定\n- 禁止大段说明\n- 禁止无意义心理独白`;
+}
+
+function buildLightFixRewritePrompt(prevChapter: string, currentChapter: string, issues: string, lengthRequirement = ""): string {
   return `你正在修复一章“轻微连续性不足”的番茄网文连载章节。
 
 请根据以下内容，对 current_chapter 做轻量修复：
@@ -275,6 +316,7 @@ ${currentChapter}
 
 【检测问题】
 ${issues || "无明确问题，但检测分数低于发布阈值。"}
+${lengthRequirement}
 
 【修复目标】
 1. 开头必须更直接承接上一章最后画面、声音、动作或危机。
@@ -297,7 +339,7 @@ ${issues || "无明确问题，但检测分数低于发布阈值。"}
 - 禁止输出解释说明`;
 }
 
-function buildFullRewritePrompt(prevChapter: string, currentChapter: string, issues: string): string {
+function buildFullRewritePrompt(prevChapter: string, currentChapter: string, issues: string, lengthRequirement = ""): string {
   return `你正在重写一章“严重连续性不足”的番茄网文连载章节。
 
 当前章节不能直接发布，必须完整重写。
@@ -313,6 +355,7 @@ ${currentChapter}
 
 【检测问题】
 ${issues || "无明确问题，但检测分数低于发布阈值。"}
+${lengthRequirement}
 
 【重写目标】
 1. 本章开头必须直接接住上一章最后一句、最后动作、最后危机或最后钩子。
@@ -344,6 +387,7 @@ function buildContinuityCheckPrompt(input: RunContinuityCheckInput): string {
 【输入】
 chapter_index: ${input.chapterIndex}
 chapter_title: ${input.chapterTitle ?? ""}
+min_chapter_words: ${input.minChapterWords ?? 1000}
 
 【prev_chapter】
 ${input.prevChapter}
@@ -360,7 +404,8 @@ ${input.currentChapter}
 
 【评分规则】
 score 为 0 到 100 的数字。
-score >= 85：level=优秀，status=PASS，rewrite_mode=none，rewrite_prompt 必须为空字符串。
+score >= 85 且正文有效字数 >= min_chapter_words：level=优秀，status=PASS，rewrite_mode=none，rewrite_prompt 必须为空字符串。
+score >= 85 但正文有效字数 < min_chapter_words：status=NEED_FIX，rewrite_mode=light_fix，final_status=RETRY，并增加“章节字数不足，需扩写到至少 min_chapter_words 字”。
 70 <= score < 85：level=可用，status=NEED_FIX，rewrite_mode=light_fix，rewrite_prompt 必须非空。
 score < 70：level=不合格，status=REWRITE_REQUIRED，rewrite_mode=full_rewrite，rewrite_prompt 必须非空。
 
@@ -385,11 +430,17 @@ score < 70：level=不合格，status=REWRITE_REQUIRED，rewrite_mode=full_rewri
   "foreshadowing_continuity": {"已承接元素": [], "被忽略元素": []},
   "crisis_progress": "升级",
   "fix_suggestions": [],
-  "rewrite_mode": "none",
-  "rewrite_prompt": "",
-  "fix_attempt": 0,
-  "max_fix_attempts": 2,
-  "final_status": "PASS"
+      "rewrite_mode": "none",
+      "rewrite_prompt": "",
+      "manual_fix_prompt": "",
+      "word_count": 1800,
+      "min_chapter_words": ${input.minChapterWords ?? 1000},
+      "length_status": "PASS",
+      "publish_readiness": "PASS",
+      "publish_blockers": [],
+      "fix_attempt": 0,
+      "max_fix_attempts": 2,
+      "final_status": "PASS"
 }`;
 }
 
@@ -512,6 +563,12 @@ function buildLocalContinuityReport(prevChapter: string, currentChapter: string)
     fix_suggestions: issues.map((issue) => issue.detail),
     rewrite_mode: "none",
     rewrite_prompt: "",
+    manual_fix_prompt: "",
+    word_count: 0,
+    min_chapter_words: 1000,
+    length_status: "PASS",
+    publish_readiness: "BLOCKED",
+    publish_blockers: [],
     fix_attempt: 0,
     max_fix_attempts: 2,
     final_status: "MANUAL_REVIEW",
@@ -563,6 +620,16 @@ function parseContinuityReport(raw: string): ContinuityReport {
     rewrite_mode: rewriteMode,
     rewrite_strategy: parsed.rewrite_strategy === "salvage_rewrite" ? "salvage_rewrite" : undefined,
     rewrite_prompt: stringValue(parsed.rewrite_prompt),
+    manual_fix_prompt: stringValue(parsed.manual_fix_prompt),
+    used_file: stringValue(parsed.used_file) || undefined,
+    decision_source: stringValue(parsed.decision_source) || undefined,
+    body_source: stringValue(parsed.body_source) || undefined,
+    stale_reports_ignored: stringArray(parsed.stale_reports_ignored),
+    word_count: normalizeNonNegativeInt(parsed.word_count, 0),
+    min_chapter_words: normalizePositiveInt(parsed.min_chapter_words, 1000),
+    length_status: parsed.length_status === "TOO_SHORT" ? "TOO_SHORT" : "PASS",
+    publish_readiness: parsed.publish_readiness === "BLOCKED" ? "BLOCKED" : "PASS",
+    publish_blockers: normalizePublishBlockers(parsed.publish_blockers),
     fix_attempt: normalizeNonNegativeInt(parsed.fix_attempt, 0),
     max_fix_attempts: normalizePositiveInt(parsed.max_fix_attempts, 2),
     final_status: isContinuityFinalStatus(parsed.final_status)
@@ -575,7 +642,7 @@ function applyContinuityGuardrails(
   report: ContinuityReport,
   prevChapter: string,
   currentChapter: string,
-  attempts?: { readonly fixAttempt: number; readonly maxFixAttempts: number },
+  attempts?: { readonly fixAttempt: number; readonly maxFixAttempts: number; readonly minChapterWords?: number },
 ): ContinuityReport {
   let next = normalizeStatusAndPrompt(report, prevChapter, currentChapter, attempts);
   const issues = [...next.issues];
@@ -620,34 +687,255 @@ function normalizeStatusAndPrompt(
   report: ContinuityReport,
   prevChapter: string,
   currentChapter: string,
-  attempts?: { readonly fixAttempt: number; readonly maxFixAttempts: number },
+  attempts?: { readonly fixAttempt: number; readonly maxFixAttempts: number; readonly minChapterWords?: number },
 ): ContinuityReport {
   const score = clampScore(report.score);
-  const status = resolveContinuityStatus(score);
+  const minChapterWords = normalizePositiveInt(attempts?.minChapterWords ?? report.min_chapter_words, 1000);
+  const lengthGate = countChineseNovelWords(currentChapter, minChapterWords);
+  const tooShort = lengthGate.length_status === "TOO_SHORT";
+  const status = tooShort && score >= 85 ? "NEED_FIX" : resolveContinuityStatus(score);
   const level = resolveContinuityLevel(score);
-  const rewriteMode = resolveContinuityRewriteMode(score);
+  const rewriteMode = tooShort && score >= 85 ? "light_fix" : resolveContinuityRewriteMode(score);
   const maxFixAttempts = normalizePositiveInt(attempts?.maxFixAttempts ?? report.max_fix_attempts, 2);
   const fixAttempt = Math.min(normalizeNonNegativeInt(attempts?.fixAttempt ?? report.fix_attempt, 0), maxFixAttempts);
-  const finalStatus = resolveFinalStatus(score, fixAttempt, maxFixAttempts);
+  const finalStatus = report.final_status === "DROP"
+    ? "DROP"
+    : tooShort && fixAttempt >= maxFixAttempts
+      ? "MANUAL_REVIEW"
+      : tooShort
+        ? "RETRY"
+        : resolveFinalStatus(score, fixAttempt, maxFixAttempts);
+  const lengthIssue: ContinuityIssue = {
+    type: "章节字数不足",
+    severity: "高",
+    detail: `正文有效字数 ${lengthGate.word_count}，低于最低要求 ${lengthGate.min_chapter_words}，需扩写到至少 ${lengthGate.min_chapter_words} 字。`,
+  };
+  const issues = tooShort && !report.issues.some((issue) => issue.type === lengthIssue.type)
+    ? [...report.issues, lengthIssue]
+    : report.issues;
+  const publishBlockers: ContinuityPublishBlocker[] = [
+    ...report.publish_blockers.filter((blocker) => blocker.type !== "TOO_SHORT"),
+    ...(tooShort ? [{ type: "TOO_SHORT", detail: `正文有效字数 ${lengthGate.word_count}，低于最低要求 ${lengthGate.min_chapter_words}` }] : []),
+  ];
+  const publishReadiness: ContinuityPublishReadiness = score >= 85 && !tooShort && report.final_status !== "DROP" ? "PASS" : "BLOCKED";
   const rewritePrompt = rewriteMode === "none"
     ? ""
     : buildContinuityRewritePrompt({
         prevChapter,
         currentChapter,
-        issues: report.issues,
+        issues,
         mode: rewriteMode,
+        lengthGate: {
+          wordCount: lengthGate.word_count,
+          minChapterWords: lengthGate.min_chapter_words,
+          lengthStatus: lengthGate.length_status,
+        },
       });
+  const manual_fix_prompt = finalStatus === "DROP" || finalStatus === "MANUAL_REVIEW"
+    ? buildManualFixPrompt({
+        prevChapter,
+        currentChapter,
+        report: {
+          ...report,
+          score,
+          status,
+          level,
+          issues,
+          rewrite_mode: rewriteMode,
+          rewrite_prompt: rewritePrompt,
+          final_status: finalStatus,
+          word_count: lengthGate.word_count,
+          min_chapter_words: lengthGate.min_chapter_words,
+          length_status: lengthGate.length_status,
+          publish_readiness: publishReadiness,
+          publish_blockers: publishBlockers,
+        },
+      })
+    : "";
   return {
     ...report,
     score,
     status,
     level,
+    issues,
     rewrite_mode: rewriteMode,
     rewrite_prompt: rewritePrompt,
+    manual_fix_prompt,
+    word_count: lengthGate.word_count,
+    min_chapter_words: lengthGate.min_chapter_words,
+    length_status: lengthGate.length_status,
+    publish_readiness: publishReadiness,
+    publish_blockers: publishBlockers,
     fix_attempt: fixAttempt,
     max_fix_attempts: maxFixAttempts,
     final_status: finalStatus,
   };
+}
+
+export function buildManualFixPrompt(params: {
+  readonly prevChapter: string;
+  readonly currentChapter: string;
+  readonly report: ContinuityReport;
+}): string {
+  const prevHook = extractContinuityHook(params.prevChapter);
+  const currentOpening = firstNonEmptyParagraphs(params.currentChapter, 2).join("\n\n") || "当前章开头缺失或无法识别。";
+  const ignoredHooks = extractIgnoredHooks(params.report.foreshadowing_continuity);
+  const issueSummary = buildManualIssueSummary(params.report, prevHook);
+  const openingProblem = openingProblemText(params.report, currentOpening, prevHook);
+  const currentGoal = params.report.current_goal.trim().replace(/[。！？.!?]+$/u, "");
+  const goalProblem = params.report.goal_clear === "YES" && params.report.current_goal.trim()
+    ? `当前目标已有雏形：${currentGoal}，但需要在开头后持续落到动作上。`
+    : "主角当前要做什么不够明确，读者不知道他是在逃、探、破局，还是等待事件发生。";
+  const crisisProblem = params.report.crisis_progress === "升级"
+    ? "危机已有推进，但压迫要更具体，最好让威胁在三段内逼近或出手。"
+    : `危机推进为“${params.report.crisis_progress || "未识别"}”，目前更像停留在观察或说明，没有形成新的阻碍。`;
+  const hookToAdvance = ignoredHooks[0] || inferHookToAdvance(prevHook, params.report);
+  const example = buildOpeningRewriteExample(prevHook, hookToAdvance, currentGoal);
+
+  return `# 第${extractChapterNumber(params.currentChapter) || ""}章人工修复建议
+
+## 问题总结
+${issueSummary.map((item) => `- ${item}`).join("\n")}
+
+## 必须修改
+
+### 1. 开头
+当前问题：
+${openingProblem}
+
+修改方式：
+直接承接上一章尾钩“${prevHook || "上一章最后的声音、动作或危机"}”。第一段写威胁更近，第二段写主角/同伴即时反应，第三段进入选择或冲突。
+
+### 2. 主角目标
+当前问题：
+${goalProblem}
+
+修改方式：
+把目标写成可执行动作，例如“避开正面冲突，找到通道”“抢在敌人合围前破开机关”“带云岚脱离当前死局”。目标出现后，每一小节都要围绕它推进。
+
+### 3. 危机推进
+当前问题：
+${crisisProblem}
+
+修改方式：
+推进伏笔“${hookToAdvance}”，让它变成具体阻碍：敌人现身、机关反噬、伤势恶化、通道封死或同伴被锁定。不要只解释设定。
+
+## 可选优化
+- 删除与上一章重复的世界观、境界、真名或战力说明。
+- 增加一次主角和同伴的短对话，用来确认目标和代价。
+- 在中段加入一次失败或反噬，让危机比上一章更近、更具体。
+
+## 示例改写（开头）
+
+${example}
+
+## 修改后目标
+- 开头直接承接上一章，不重新铺环境。
+- 3段内进入危机或行动选择。
+- 明确主角目标，并让目标贯穿本章。
+- 至少推进一个上一章伏笔。
+- 结尾形成新的危险钩子。`;
+}
+
+async function writeManualFixFileIfNeeded(report: ContinuityReport, reportMarkdownPath: string): Promise<void> {
+  if (!report.manual_fix_prompt.trim()) return;
+  const outputPath = manualFixPathFromReportPath(reportMarkdownPath);
+  await mkdir(dirname(outputPath), { recursive: true });
+  await writeFile(outputPath, `${report.manual_fix_prompt.trimEnd()}\n`, "utf-8");
+}
+
+function manualFixPathFromReportPath(reportMarkdownPath: string): string {
+  const name = basename(reportMarkdownPath).replace(/\.(?:report|final-report|salvage-report)\.md$/u, ".manual-fix.md");
+  return join(dirname(reportMarkdownPath), name);
+}
+
+function buildManualIssueSummary(report: ContinuityReport, prevHook: string): string[] {
+  const issues = report.issues
+    .slice(0, 3)
+    .map((issue) => summarizeIssue(issue));
+  if (issues.length) return issues;
+
+  const summary = [];
+  if (report.opening_check && JSON.stringify(report.opening_check).includes("FAIL")) {
+    summary.push(`开头没有承接上一章“${prevHook}”，导致断链。`);
+  }
+  if (report.goal_clear !== "YES") summary.push("中段缺少明确行动目标，主角像在被剧情推着走。");
+  if (report.crisis_progress !== "升级") summary.push("危机没有推进，整体停滞。");
+  return summary.slice(0, 3).length ? summary.slice(0, 3) : ["当前章未达到发布连续性标准，需要人工重修开头、目标和危机推进。"];
+}
+
+function summarizeIssue(issue: ContinuityIssue): string {
+  const detail = issue.detail.replace(/\s+/g, " ").trim();
+  return `${issue.type}：${detail || "需要人工检查并修复。"}`
+    .replace(/。$/, "");
+}
+
+function openingProblemText(report: ContinuityReport, currentOpening: string, prevHook: string): string {
+  const opening = JSON.stringify(report.opening_check);
+  if (opening.includes("FAIL")) {
+    return `当前开头没有直接接住上一章“${prevHook || "尾钩"}”，而是从新画面或说明开始。`;
+  }
+  if (/重复|说明|设定/.test(`${opening}\n${currentOpening}`)) {
+    return "当前开头虽然有关联，但说明和回顾偏多，危机没有立刻压到人物身上。";
+  }
+  return "当前开头承接不够锋利，需要把上一章尾钩转成更近的动作、声音或攻击。";
+}
+
+function buildOpeningRewriteExample(prevHook: string, hookToAdvance: string, currentGoal: string): string {
+  const hook = prevHook || "黑暗深处的动静";
+  const goal = currentGoal?.trim() || "先避开正面冲突，找到能破局的通道";
+  const threat = hookToAdvance || "上一章留下的危险";
+  const threatAction = /声|脚步|拖拽/.test(threat)
+    ? `${threat}骤然贴近`
+    : `${threat}骤然亮起`;
+  return [
+    `${hook}没有远去，反而贴着石壁一点点逼近。楚夜握紧手里的短刃，右臂废掉后的麻木还在往肩头爬，云岚后颈那道疤却先一步发烫。`,
+    `“别回头。”楚夜压低声音，目光扫过脚下暗河的水线，“我们不能和它硬碰，先找通道。”`,
+    `话音刚落，${threatAction}，一道冷光从黑暗里斩出，正落在两人刚才站立的位置。碎石迸溅，退路被硬生生截断。`,
+  ].join("\n\n");
+}
+
+function extractContinuityHook(text: string): string {
+  const tail = firstNonEmptyParagraphs(text, 6, "tail").join(" ");
+  const matches = [...tail.matchAll(/([^。！？\n]*(?:拖拽|铁器|脚步|声音|逼近|裂开|苏醒|黑影|血|门|暗河|疤痕|图纹|棺|石碑)[^。！？\n]*[。！？]?)/gu)];
+  return cleanSnippet(matches.at(-1)?.[1] || firstNonEmptyParagraphs(text, 1, "tail")[0] || "");
+}
+
+function extractIgnoredHooks(value: unknown): string[] {
+  if (!value || typeof value !== "object") return [];
+  const source = value as Record<string, unknown>;
+  const ignored = source["被忽略元素"] || source.ignored || source.missing;
+  return Array.isArray(ignored) ? ignored.map((item) => cleanSnippet(String(item))).filter(Boolean) : [];
+}
+
+function inferHookToAdvance(prevHook: string, report: ContinuityReport): string {
+  const text = `${prevHook}\n${JSON.stringify(report.foreshadowing_continuity)}\n${report.summary}`;
+  if (/铁器|拖拽/.test(text)) return "逼近的铁器拖拽声";
+  if (/脚步/.test(text)) return "逼近的脚步声";
+  if (/石碑|符文|图纹/.test(text)) return "石碑/图纹异动";
+  if (/疤痕|云岚|后颈/.test(text)) return "云岚后颈疤痕共鸣";
+  if (/血|伤|右臂|反噬/.test(text)) return "楚夜伤势或反噬";
+  if (/暗河|通道|门/.test(text)) return "暗河通道";
+  return "上一章最后留下的危险";
+}
+
+function firstNonEmptyParagraphs(text: string, count: number, from: "head" | "tail" = "head"): string[] {
+  const paragraphs = text.split(/\n{2,}/).map((item) => item.trim()).filter(Boolean);
+  const selected = from === "tail" ? paragraphs.slice(-count) : paragraphs.slice(0, count);
+  return selected.map(cleanSnippet).filter(Boolean);
+}
+
+function cleanSnippet(text: string): string {
+  return text
+    .replace(/^#{1,6}\s*/u, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+}
+
+function extractChapterNumber(text: string): string {
+  const match = text.match(/第\s*(\d+)\s*章/u);
+  return match?.[1] || "";
 }
 
 function extractJsonObject(raw: string): string {
@@ -682,6 +970,17 @@ function normalizeIssues(value: unknown): ContinuityIssue[] {
   });
 }
 
+function normalizePublishBlockers(value: unknown): ContinuityPublishBlocker[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => {
+    const source = item && typeof item === "object" ? item as Record<string, unknown> : {};
+    return {
+      type: stringValue(source.type || "BLOCKED"),
+      detail: stringValue(source.detail || item),
+    };
+  }).filter((item) => item.type || item.detail);
+}
+
 function stringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.map((item) => stringValue(item)).filter(Boolean);
@@ -710,6 +1009,32 @@ function normalizePositiveInt(value: unknown, fallback: number): number {
 
 function countChars(text: string): number {
   return [...text.replace(/\s/g, "")].length;
+}
+
+export function countChineseNovelWords(text: string, minChapterWords = 1000): {
+  readonly word_count: number;
+  readonly min_chapter_words: number;
+  readonly length_status: ContinuityLengthStatus;
+} {
+  const withoutCode = text.replace(/```[\s\S]*?```/g, "\n");
+  const body = withoutCode
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !/^(?:#{1,6}\s*)?第\s*\d+\s*章(?:\s+.*)?$/u.test(line))
+    .map((line) => line.replace(/^#{1,6}\s*/u, ""))
+    .join("\n");
+
+  const chineseChars = body.match(/[\u3400-\u9fff]/gu)?.length ?? 0;
+  const latinTokens = body
+    .replace(/[\u3400-\u9fff]/gu, " ")
+    .match(/[A-Za-z0-9]+(?:[-_'][A-Za-z0-9]+)*/g)?.length ?? 0;
+  const wordCount = chineseChars + latinTokens;
+  const minWords = normalizePositiveInt(minChapterWords, 1000);
+  return {
+    word_count: wordCount,
+    min_chapter_words: minWords,
+    length_status: wordCount >= minWords ? "PASS" : "TOO_SHORT",
+  };
 }
 
 function isContinuityStatus(value: unknown): value is ContinuityStatus {
