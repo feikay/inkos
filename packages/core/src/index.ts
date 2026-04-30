@@ -226,6 +226,22 @@ export {
   type RunContinuityCheckInput,
   type RunContinuityFixInput,
 } from "./agents/chapter-continuity.js";
+export {
+  runFanqieQualityCheck,
+  runLocalFanqieQualityCheck,
+  renderFanqieQualityMarkdown,
+  buildFanqiePolishPrompt,
+  resolveFanqieQualityLevel,
+  resolveFanqieQualityStatus,
+  type FanqieQualityIssue,
+  type FanqieFinalQualityStatus,
+  type FanqieQualityLevel,
+  type FanqieQualityReport,
+  type FanqieQualityScores,
+  type FanqieQualitySeverity,
+  type FanqieQualityStatus,
+  type RunFanqieQualityCheckInput,
+} from "./agents/fanqie-quality.js";
 export { ReviserAgent, DEFAULT_REVISE_MODE, type ReviseOutput, type ReviseMode } from "./agents/reviser.js";
 export { RadarAgent, type RadarResult, type RadarRecommendation } from "./agents/radar.js";
 export { FanqieRadarSource, QidianRadarSource, TextRadarSource, type RadarSource, type PlatformRankings, type RankingEntry } from "./agents/radar-source.js";

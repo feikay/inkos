@@ -9,6 +9,14 @@ node ../packages/cli/dist/index.js write next 葬渊魔经
 # 连续性自动检测+自动修复
 node ../packages/cli/dist/index.js review continuity-auto --book 葬渊魔经 --chapter 84 --max-fix-attempts 2
 
+# 番茄质量检测：爽点 / 节奏 / 钩子
+node ../packages/cli/dist/index.js review fanqie-quality --book 葬渊魔经 --chapter 84
+
+# 优化爽点/节奏（单章） 
+node ../packages/cli/dist/index.js review fanqie-polish --book 葬渊魔经 --chapter 84 --max-polish-attempts 2
+# 批量优化（可选）
+node ../packages/cli/dist/index.js review fanqie-polish --book 葬渊魔经 --from 2 --to 200
+
 cd ..
 
 # 导出番茄
@@ -51,7 +59,24 @@ auto 修 2 次
 # 修复连贯性问题（轻微断链 70 ≤ score < 85 修复指定章节）
 node ../packages/cli/dist/index.js review continuity-fix --book 葬渊魔经 --chapter 84
 # 修复连贯性问题（严重断链 score < 70 章节重写）
-node ../packages/cli/dist/index.js review continuity-fix --book 葬渊魔经 --chapter 84 --mode rewrite
+cp my-novel/books/葬渊魔经/chapters-salvaged/0019_salvage.md my-novel/books/葬渊魔经/chapters/0019_xxx.md
+node ../packages/cli/dist/index.js review continuity-auto --book 葬渊魔经 --chapter 19
+
+```
+
+```bash
+# 番茄推荐机制优化（爽点+节奏+钩子检测）
+#单章检测：
+node ../packages/cli/dist/index.js review fanqie-quality --book 葬渊魔经 --chapter 84
+
+#批量检测：
+node ../packages/cli/dist/index.js review fanqie-quality --book 葬渊魔经 --from 2 --to 200
+
+# fanqie-quality: score >= 85 不用
+# fanqie-quality: score in 70~84
+node ../packages/cli/dist/index.js review fanqie-polish --book 葬渊魔经 --chapter 84
+# fanqie-quality: score < 70 两次 走 salvage
+node ../packages/cli/dist/index.js review continuity-auto --book 葬渊魔经 --from 2 --to 200 --max-fix-attempts 0
 
 ```
 

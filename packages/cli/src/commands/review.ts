@@ -9,18 +9,137 @@ import {
   LLMConfigSchema,
   readGenreProfile,
   renderContinuityMarkdown,
+  renderFanqieQualityMarkdown,
+  runFanqieQualityCheck,
   resolveLengthCountingMode,
+  runLocalFanqieQualityCheck,
   runLocalChapterContinuityCheck,
   runChapterContinuityCheck,
   runChapterContinuityFix,
   type ContinuityReport,
+  type FanqieQualityReport,
 } from "@actalk/inkos-core";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { createClient, findProjectRoot, loadConfig, resolveBookId, log, logError, loadReviewPresentation, GLOBAL_ENV_PATH } from "../utils.js";
 
 export const reviewCommand = new Command("review")
   .description("Review and approve chapters");
+
+reviewCommand
+  .command("fanqie-quality")
+  .description("Check Fanqie-style chapter quality before publishing")
+  .requiredOption("--book <book-id>", "Book ID")
+  .option("--chapter <number>", "Single chapter number")
+  .option("--from <number>", "First chapter number in range")
+  .option("--to <number>", "Last chapter number in range")
+  .option("--next-outline <text>", "Optional next chapter outline")
+  .option("--json", "Output JSON")
+  .action(async (opts) => {
+    try {
+      const root = findProjectRoot();
+      const runtime = await loadContinuityRuntime(false);
+      const book = await resolveContinuityBook(root, opts.book);
+      const range = resolveContinuityRange(opts);
+      const results: FanqieQualityCommandResult[] = [];
+
+      for (let chapter = range.from; chapter <= range.to; chapter += 1) {
+        const result = await checkFanqieQualityChapter({
+          bookId: book.id,
+          bookDir: book.dir,
+          chapter,
+          client: runtime?.client,
+          model: runtime?.model,
+          nextOutline: opts.nextOutline,
+        });
+        results.push(result);
+
+        if (!opts.json) {
+          log("[fanqie-quality]");
+          log(`chapter: ${chapterNumberPrefix(chapter)}`);
+          log(`score: ${result.report.quality_score}`);
+          log(`status: ${result.report.status}`);
+          if (result.report.issues.length) {
+            log("main issues:");
+            for (const issue of result.report.issues.slice(0, 3)) {
+              log(`- ${issue.detail || issue.type}`);
+            }
+          }
+          log(`report: ${result.reportJsonPath}`);
+        }
+      }
+
+      if (range.to > range.from) {
+        const summaryPath = await writeFanqieQualitySummary(book.dir, results);
+        if (!opts.json) log(`summary: ${summaryPath}`);
+      }
+
+      if (opts.json) log(JSON.stringify({ bookId: book.id, results }, null, 2));
+    } catch (e) {
+      if (opts.json) log(JSON.stringify({ error: String(e) }));
+      else logError(`Fanqie quality check failed: ${e}`);
+      process.exit(1);
+    }
+  });
+
+reviewCommand
+  .command("fanqie-polish")
+  .description("Polish chapters below Fanqie quality score 85 and re-check quality")
+  .requiredOption("--book <book-id>", "Book ID")
+  .option("--chapter <number>", "Single chapter number")
+  .option("--from <number>", "First chapter number in range")
+  .option("--to <number>", "Last chapter number in range")
+  .option("--max-polish-attempts <number>", "Maximum polish attempts", "2")
+  .option("--json", "Output JSON")
+  .action(async (opts) => {
+    try {
+      const root = findProjectRoot();
+      const runtime = await loadContinuityRuntime(true);
+      const book = await resolveContinuityBook(root, opts.book);
+      const range = resolveContinuityRange(opts);
+      const maxPolishAttempts = parsePositiveInt(opts.maxPolishAttempts, "--max-polish-attempts");
+      const results: FanqiePolishCommandResult[] = [];
+
+      for (let chapter = range.from; chapter <= range.to; chapter += 1) {
+        if (!opts.json) {
+          log("[fanqie-polish]");
+          log(`chapter: ${chapterNumberPrefix(chapter)}`);
+        }
+        const result = await polishFanqieQualityChapter({
+          bookId: book.id,
+          bookDir: book.dir,
+          chapter,
+          client: runtime.client!,
+          model: runtime.model!,
+          maxPolishAttempts,
+          json: Boolean(opts.json),
+        });
+        results.push(result);
+        if (!opts.json) {
+          if (result.blockedByContinuity) {
+            log("Blocked by continuity. Run continuity-auto first.");
+          } else if (result.initialScore >= 85) {
+            log(`score: ${result.initialScore}`);
+            log("result: already QUALITY_PASS");
+          } else {
+            log(`result: ${result.finalQualityStatus}`);
+          }
+          log(`report: ${result.finalReportJsonPath}`);
+        }
+      }
+
+      if (range.to > range.from) {
+        const summaryPath = await writeFanqiePolishSummary(book.dir, results);
+        if (!opts.json) log(`summary: ${summaryPath}`);
+      }
+
+      if (opts.json) log(JSON.stringify({ bookId: book.id, results }, null, 2));
+    } catch (e) {
+      if (opts.json) log(JSON.stringify({ error: String(e) }));
+      else logError(`Fanqie polish failed: ${e}`);
+      process.exit(1);
+    }
+  });
 
 reviewCommand
   .command("continuity")
@@ -143,6 +262,8 @@ reviewCommand
       const range = resolveContinuityRange(opts);
       const maxFixAttempts = parsePositiveInt(opts.maxFixAttempts, "--max-fix-attempts");
       const results: ContinuityAutoResult[] = [];
+      const isBatchMode = Boolean(!opts.chapter && opts.from && opts.to);
+      let batchStopped: ContinuityBatchStop | undefined;
 
       for (let chapter = range.from; chapter <= range.to; chapter += 1) {
         if (!opts.json) {
@@ -323,9 +444,22 @@ reviewCommand
           final: { ...current, report: finalReport },
           finalStatus,
         });
+
+        if (isBatchMode && finalReport.final_status === "DROP") {
+          batchStopped = {
+            chapter,
+            message: `Chapter ${chapterNumberPrefix(chapter)} is DROP. Batch stopped to avoid continuity pollution.`,
+            instruction: `Run continuity-fix --mode rewrite or manually rewrite chapter ${chapterNumberPrefix(chapter)}, then resume from chapter ${chapter + 1}.`,
+          };
+          if (!opts.json) {
+            log(batchStopped.message);
+            log(batchStopped.instruction);
+          }
+          break;
+        }
       }
 
-      if (opts.json) log(JSON.stringify({ bookId: book.id, results }, null, 2));
+      if (opts.json) log(JSON.stringify({ bookId: book.id, results, batchStopped }, null, 2));
       else {
         for (const result of results) {
           log(`Ch.${result.chapter}: final=${result.finalStatus}`);
@@ -547,6 +681,26 @@ interface ContinuityCommandResult {
   readonly reportMarkdownPath: string;
 }
 
+interface FanqieQualityCommandResult {
+  readonly chapter: number;
+  readonly chapterTitle: string;
+  readonly report: FanqieQualityReport;
+  readonly reportJsonPath: string;
+  readonly reportMarkdownPath: string;
+}
+
+interface FanqiePolishCommandResult {
+  readonly chapter: number;
+  readonly initialScore: number;
+  readonly finalScore: number;
+  readonly finalQualityStatus: "QUALITY_PASS" | "QUALITY_MANUAL_REVIEW";
+  readonly attempts: number;
+  readonly usedPolishedFile: string;
+  readonly finalReportJsonPath: string;
+  readonly finalReportMarkdownPath: string;
+  readonly blockedByContinuity: boolean;
+}
+
 interface ContinuityFixResult {
   readonly chapter: number;
   readonly fixedChapterPath: string;
@@ -569,6 +723,12 @@ interface ContinuityAutoResult {
   readonly salvage?: ContinuitySalvageResult;
   readonly final?: ContinuityCommandResult;
   readonly finalStatus: string;
+}
+
+interface ContinuityBatchStop {
+  readonly chapter: number;
+  readonly message: string;
+  readonly instruction: string;
 }
 
 async function loadContinuityRuntime(requireLlm: boolean): Promise<{
@@ -750,6 +910,336 @@ async function checkContinuityChapter(params: {
     reportJsonPath,
     reportMarkdownPath,
   };
+}
+
+async function checkFanqieQualityChapter(params: {
+  readonly bookId: string;
+  readonly bookDir: string;
+  readonly chapter: number;
+  readonly client?: ReturnType<typeof createClient>;
+  readonly model?: string;
+  readonly nextOutline?: string;
+  readonly currentOverridePath?: string;
+  readonly reportKind?: "quality-report" | "final-quality-report";
+  readonly polishAttempt?: number;
+  readonly maxPolishAttempts?: number;
+  readonly finalQualityScore?: number;
+  readonly finalQualityStatus?: "QUALITY_PASS" | "QUALITY_MANUAL_REVIEW";
+  readonly usedPolishedFile?: string;
+}): Promise<FanqieQualityCommandResult> {
+  const current = await findChapterFile(params.bookDir, params.chapter);
+  const prev = params.chapter > 1 ? await findChapterFile(params.bookDir, params.chapter - 1).catch(() => null) : null;
+  const [chapterText, prevChapter] = await Promise.all([
+    readFile(params.currentOverridePath ?? current.file, "utf-8"),
+    prev ? readFile(prev.file, "utf-8") : Promise.resolve(""),
+  ]);
+  const publishBlockedByContinuity = await isPublishBlockedByContinuity(params.bookDir, params.chapter);
+  const reportDir = join(params.bookDir, "reviews", "fanqie-quality");
+  const prefix = chapterNumberPrefix(params.chapter);
+  const reportKind = params.reportKind ?? "quality-report";
+  const reportJsonPath = join(reportDir, `${prefix}.${reportKind}.json`);
+  const reportMarkdownPath = join(reportDir, `${prefix}.${reportKind}.md`);
+  const input = {
+    chapterText,
+    prevChapter,
+    nextOutline: params.nextOutline,
+    bookName: params.bookId,
+    chapterIndex: params.chapter,
+    chapterTitle: current.title,
+    publishBlockedByContinuity,
+    polishAttempt: params.polishAttempt,
+    maxPolishAttempts: params.maxPolishAttempts,
+    finalQualityScore: params.finalQualityScore,
+    finalQualityStatus: params.finalQualityStatus,
+    usedPolishedFile: params.usedPolishedFile,
+    reportJsonPath,
+    reportMarkdownPath,
+  };
+  const report = params.client && params.model
+    ? await runFanqieQualityCheck({
+        client: params.client,
+        model: params.model,
+        ...input,
+      })
+    : await runLocalFanqieQualityCheck(input);
+
+  return {
+    chapter: params.chapter,
+    chapterTitle: current.title,
+    report,
+    reportJsonPath,
+    reportMarkdownPath,
+  };
+}
+
+async function isPublishBlockedByContinuity(bookDir: string, chapter: number): Promise<boolean> {
+  const reportDir = join(bookDir, "reviews", "continuity");
+  const prefix = chapterNumberPrefix(chapter);
+  const candidates = [
+    join(reportDir, `${prefix}.final-report.json`),
+    join(reportDir, `${prefix}.report.json`),
+  ];
+  for (const candidate of candidates) {
+    try {
+      const report = JSON.parse(await readFile(candidate, "utf-8")) as Partial<ContinuityReport>;
+      const finalStatus = report.final_status ?? report.status;
+      return finalStatus !== "PASS";
+    } catch {
+      continue;
+    }
+  }
+  return false;
+}
+
+async function writeFanqieQualitySummary(
+  bookDir: string,
+  results: ReadonlyArray<FanqieQualityCommandResult>,
+): Promise<string> {
+  const summaryPath = join(bookDir, "reviews", "fanqie-quality", "summary.md");
+  const rows = results.map((result) => {
+    const mainIssue = result.report.issues[0]?.type || result.report.reader_drop_risks[0] || "";
+    return `| ${chapterNumberPrefix(result.chapter)} | ${result.report.quality_score} | ${result.report.status} | ${mainIssue.replace(/\|/g, "/")} |`;
+  }).join("\n");
+  await mkdir(dirname(summaryPath), { recursive: true });
+  await writeFile(summaryPath, `# 番茄质量检测汇总
+
+| chapter | score | status | main_issue |
+|---|---:|---|---|
+${rows}
+`, "utf-8");
+  return summaryPath;
+}
+
+async function polishFanqieQualityChapter(params: {
+  readonly bookId: string;
+  readonly bookDir: string;
+  readonly chapter: number;
+  readonly client: ReturnType<typeof createClient>;
+  readonly model: string;
+  readonly maxPolishAttempts: number;
+  readonly json: boolean;
+}): Promise<FanqiePolishCommandResult> {
+  let quality = await readFanqieQualityReport(params.bookDir, params.chapter)
+    ?? await checkFanqieQualityChapter({
+      bookId: params.bookId,
+      bookDir: params.bookDir,
+      chapter: params.chapter,
+      client: params.client,
+      model: params.model,
+    });
+
+  const initialScore = quality.report.quality_score;
+  let attempts = 0;
+  let usedPolishedFile = "";
+  let finalScore = initialScore;
+  let finalStatus: "QUALITY_PASS" | "QUALITY_MANUAL_REVIEW" = initialScore >= 85 ? "QUALITY_PASS" : "QUALITY_MANUAL_REVIEW";
+
+  if (quality.report.publish_blocked_by_continuity) {
+    const finalReport = markFinalFanqieQualityReport(quality.report, {
+      polishAttempt: 0,
+      maxPolishAttempts: params.maxPolishAttempts,
+      finalQualityScore: initialScore,
+      finalQualityStatus: "QUALITY_MANUAL_REVIEW",
+      usedPolishedFile: "",
+    });
+    const paths = fanqieFinalReportPaths(params.bookDir, params.chapter);
+    await writeFanqieQualityReportFiles(finalReport, paths.jsonPath, paths.markdownPath);
+    return {
+      chapter: params.chapter,
+      initialScore,
+      finalScore: initialScore,
+      finalQualityStatus: "QUALITY_MANUAL_REVIEW",
+      attempts: 0,
+      usedPolishedFile: "",
+      finalReportJsonPath: paths.jsonPath,
+      finalReportMarkdownPath: paths.markdownPath,
+      blockedByContinuity: true,
+    };
+  }
+
+  if (initialScore >= 85 || !quality.report.polish_prompt.trim()) {
+    const finalReport = markFinalFanqieQualityReport(quality.report, {
+      polishAttempt: 0,
+      maxPolishAttempts: params.maxPolishAttempts,
+      finalQualityScore: initialScore,
+      finalQualityStatus: initialScore >= 85 ? "QUALITY_PASS" : "QUALITY_MANUAL_REVIEW",
+      usedPolishedFile: "",
+    });
+    const paths = fanqieFinalReportPaths(params.bookDir, params.chapter);
+    await writeFanqieQualityReportFiles(finalReport, paths.jsonPath, paths.markdownPath);
+    return {
+      chapter: params.chapter,
+      initialScore,
+      finalScore: initialScore,
+      finalQualityStatus: finalReport.final_quality_status ?? "QUALITY_MANUAL_REVIEW",
+      attempts: 0,
+      usedPolishedFile: "",
+      finalReportJsonPath: paths.jsonPath,
+      finalReportMarkdownPath: paths.markdownPath,
+      blockedByContinuity: false,
+    };
+  }
+
+  while (finalScore < 85 && attempts < params.maxPolishAttempts) {
+    const nextAttempt = attempts + 1;
+    if (!quality.report.polish_prompt.trim()) break;
+    if (!params.json) {
+      log(`attempt ${nextAttempt}/${params.maxPolishAttempts} -> score: ${finalScore} -> polishing...`);
+    }
+    const polishedPath = await writeFanqiePolishedChapter({
+      bookDir: params.bookDir,
+      chapter: params.chapter,
+      attempt: nextAttempt,
+      client: params.client,
+      model: params.model,
+      polishPrompt: quality.report.polish_prompt,
+    });
+    usedPolishedFile = relative(params.bookDir, polishedPath);
+    attempts = nextAttempt;
+    quality = await checkFanqieQualityChapter({
+      bookId: params.bookId,
+      bookDir: params.bookDir,
+      chapter: params.chapter,
+      client: params.client,
+      model: params.model,
+      currentOverridePath: polishedPath,
+      reportKind: "final-quality-report",
+      polishAttempt: attempts,
+      maxPolishAttempts: params.maxPolishAttempts,
+      usedPolishedFile,
+    });
+    finalScore = quality.report.quality_score;
+    if (!params.json && finalScore >= 85) {
+      log(`attempt ${nextAttempt}/${params.maxPolishAttempts} -> final score: ${finalScore}`);
+    }
+  }
+
+  finalStatus = finalScore >= 85 ? "QUALITY_PASS" : "QUALITY_MANUAL_REVIEW";
+  const finalReport = markFinalFanqieQualityReport(quality.report, {
+    polishAttempt: attempts,
+    maxPolishAttempts: params.maxPolishAttempts,
+    finalQualityScore: finalScore,
+    finalQualityStatus: finalStatus,
+    usedPolishedFile,
+  });
+  const paths = fanqieFinalReportPaths(params.bookDir, params.chapter);
+  await writeFanqieQualityReportFiles(finalReport, paths.jsonPath, paths.markdownPath);
+
+  return {
+    chapter: params.chapter,
+    initialScore,
+    finalScore,
+    finalQualityStatus: finalStatus,
+    attempts,
+    usedPolishedFile,
+    finalReportJsonPath: paths.jsonPath,
+    finalReportMarkdownPath: paths.markdownPath,
+    blockedByContinuity: false,
+  };
+}
+
+async function readFanqieQualityReport(bookDir: string, chapter: number): Promise<FanqieQualityCommandResult | null> {
+  const reportDir = join(bookDir, "reviews", "fanqie-quality");
+  const prefix = chapterNumberPrefix(chapter);
+  const reportJsonPath = join(reportDir, `${prefix}.quality-report.json`);
+  const reportMarkdownPath = join(reportDir, `${prefix}.quality-report.md`);
+  try {
+    const report = JSON.parse(await readFile(reportJsonPath, "utf-8")) as FanqieQualityReport;
+    return {
+      chapter,
+      chapterTitle: report.chapter_title,
+      report,
+      reportJsonPath,
+      reportMarkdownPath,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function writeFanqiePolishedChapter(params: {
+  readonly bookDir: string;
+  readonly chapter: number;
+  readonly attempt: number;
+  readonly client: ReturnType<typeof createClient>;
+  readonly model: string;
+  readonly polishPrompt: string;
+}): Promise<string> {
+  const response = await chatCompletion(params.client, params.model, [
+    {
+      role: "system",
+      content: [
+        "你是番茄网文章节优化编辑。",
+        "只输出优化后的完整章节正文。",
+        "不要输出说明、报告、JSON、Markdown 代码块。",
+      ].join("\n"),
+    },
+    { role: "user", content: params.polishPrompt },
+  ], { temperature: 0.35, maxTokens: 8192 });
+  const polished = stripMarkdownCodeFence(response.content).trim();
+  if (!polished) throw new Error("fanqie-polish returned empty chapter content");
+  const outDir = join(params.bookDir, "chapters-polished");
+  const outputPath = join(outDir, `${chapterNumberPrefix(params.chapter)}_polished_attempt${params.attempt}.md`);
+  await mkdir(outDir, { recursive: true });
+  await writeFile(outputPath, `${polished.trimEnd()}\n`, "utf-8");
+  return outputPath;
+}
+
+function markFinalFanqieQualityReport(report: FanqieQualityReport, params: {
+  readonly polishAttempt: number;
+  readonly maxPolishAttempts: number;
+  readonly finalQualityScore: number;
+  readonly finalQualityStatus: "QUALITY_PASS" | "QUALITY_MANUAL_REVIEW";
+  readonly usedPolishedFile: string;
+}): FanqieQualityReport {
+  return {
+    ...report,
+    polish_attempt: params.polishAttempt,
+    max_polish_attempts: params.maxPolishAttempts,
+    final_quality_score: params.finalQualityScore,
+    final_quality_status: params.finalQualityStatus,
+    used_polished_file: params.usedPolishedFile,
+  };
+}
+
+async function writeFanqieQualityReportFiles(
+  report: FanqieQualityReport,
+  jsonPath: string,
+  markdownPath: string,
+): Promise<void> {
+  await mkdir(dirname(jsonPath), { recursive: true });
+  await writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`, "utf-8");
+  await writeFile(markdownPath, renderFanqieQualityMarkdown(report), "utf-8");
+}
+
+function fanqieFinalReportPaths(bookDir: string, chapter: number): {
+  readonly jsonPath: string;
+  readonly markdownPath: string;
+} {
+  const reportDir = join(bookDir, "reviews", "fanqie-quality");
+  const prefix = chapterNumberPrefix(chapter);
+  return {
+    jsonPath: join(reportDir, `${prefix}.final-quality-report.json`),
+    markdownPath: join(reportDir, `${prefix}.final-quality-report.md`),
+  };
+}
+
+async function writeFanqiePolishSummary(
+  bookDir: string,
+  results: ReadonlyArray<FanqiePolishCommandResult>,
+): Promise<string> {
+  const summaryPath = join(bookDir, "reviews", "fanqie-quality", "polish-summary.md");
+  const rows = results.map((result) =>
+    `| ${chapterNumberPrefix(result.chapter)} | ${result.initialScore} | ${result.finalScore} | ${result.finalQualityStatus} | ${result.attempts} | ${result.usedPolishedFile} |`
+  ).join("\n");
+  await mkdir(dirname(summaryPath), { recursive: true });
+  await writeFile(summaryPath, `# 番茄质量优化汇总
+
+| chapter | initial_score | final_score | final_quality_status | attempts | file |
+|---|---:|---:|---|---:|---|
+${rows}
+`, "utf-8");
+  return summaryPath;
 }
 
 async function fixContinuityChapter(params: {
