@@ -17,7 +17,7 @@ npm run dev -- short-story analyze --theme 悬疑惊悚
 npm run dev -- short-story batch \
   --themes 悬疑惊悚,出轨复仇 \
   --count 3 \
-  --target-words 50000
+  --target-words 35000
   
 # 数据采集（非爬虫，手工输入）
 npm run dev -- short-story collect --theme 悬疑惊悚 --run run-20260429-092059-01

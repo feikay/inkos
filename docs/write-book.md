@@ -6,6 +6,7 @@ cd my-novel
 # 写新章
 node ../packages/cli/dist/index.js write next 葬渊魔经
 
+-----------------------------
 # 连续性自动检测+自动修复
 node ../packages/cli/dist/index.js review continuity-auto --book 葬渊魔经 --chapter 84 --max-fix-attempts 2
 
@@ -16,6 +17,11 @@ node ../packages/cli/dist/index.js review fanqie-quality --book 葬渊魔经 --c
 node ../packages/cli/dist/index.js review fanqie-polish --book 葬渊魔经 --chapter 84 --max-polish-attempts 2
 # 批量优化（可选）
 node ../packages/cli/dist/index.js review fanqie-polish --book 葬渊魔经 --from 2 --to 200
+--------------------------------
+# 综合输出（单章） 包含 continuity-auto -> fanqie-quality -> fanqie-polish -> continuity-auto
+node ../packages/cli/dist/index.js review publish-ready --book 葬渊魔经 --chapter 84
+# 综合输出（批量） 包含 continuity-auto -> fanqie-quality -> fanqie-polish -> continuity-auto
+node ../packages/cli/dist/index.js review publish-ready --book 葬渊魔经 --from 2 --to 200
 
 cd ..
 
@@ -80,7 +86,33 @@ node ../packages/cli/dist/index.js review continuity-auto --book 葬渊魔经 --
 
 ```
 
+# 重写
+```bash
+cd my-novel
 
+rm books/葬渊魔经/reviews/continuity/0019.final-report.json
+rm books/葬渊魔经/reviews/continuity/0019.salvage-report.json
+
+node ../packages/cli/dist/index.js review continuity-auto --book 葬渊魔经 --chapter 19 --max-fix-attempts 0
+```
+👉 这样：
+```
+旧状态清空
+→ 用原稿
+→ 直接 salvage 重写
+```
+什么时候你应该“强制重写”
+看到这些信号，就不要再修了：
+1. score < 70 且多次修复无明显提升
+2. salvage 之后仍 < 80
+3. issues 出现：
+   - 开头断链
+   - 没有目标
+   - 没有推进
+4. 读起来像“说明文”
+
+👉 结论：
+❗ 这是结构问题 → 必须重写
 
 ```bash
 npm run dev -- review continuity --book 葬渊魔经 --chapter 83

@@ -28,10 +28,12 @@ const useReviewed = hasFlag("use-reviewed");
 const bookDir = path.join(root, "my-novel", "books", bookName);
 const chaptersDirSource = path.join(bookDir, "chapters");
 const chaptersPolishedDir = path.join(bookDir, "chapters-polished");
+const chaptersReviewedDir = path.join(bookDir, "chapters-reviewed");
 const chaptersSalvagedDir = path.join(bookDir, "chapters-salvaged");
 const chaptersFixedDir = path.join(bookDir, "chapters-fixed");
 const continuityReviewDir = path.join(bookDir, "reviews", "continuity");
 const fanqieQualityReviewDir = path.join(bookDir, "reviews", "fanqie-quality");
+const publishReadyReviewDir = path.join(bookDir, "reviews", "publish-ready");
 const outDir = path.join(root, "publish", bookName, "fanqie");
 const chapterOutDir = path.join(outDir, "chapters");
 const markerFile = path.join(outDir, ".last_export");
@@ -216,6 +218,7 @@ function reportPaths(no) {
     report: path.join(continuityReviewDir, `${idx}.report.json`),
     salvageReport: path.join(continuityReviewDir, `${idx}.salvage-report.json`),
     qualityReport: path.join(fanqieQualityReviewDir, `${idx}.final-quality-report.json`),
+    publishReadyReport: path.join(publishReadyReviewDir, `${idx}.publish-report.json`),
   };
 }
 
@@ -226,6 +229,7 @@ function getReviewReports(no) {
     report: readJsonIfExists(paths.report),
     salvageReport: readJsonIfExists(paths.salvageReport),
     qualityReport: readJsonIfExists(paths.qualityReport),
+    publishReadyReport: readJsonIfExists(paths.publishReadyReport),
   };
 }
 
@@ -269,6 +273,19 @@ function hasBlockingReviewedStatus(no, reports) {
 function selectReviewedChapterFile(no, originalFile) {
   const idx = formatChapterIndex(no);
   const reports = getReviewReports(no);
+  if (reports.publishReadyReport?.publish_status === "READY_TO_EXPORT") {
+    const reportedFile = typeof reports.publishReadyReport.final_candidate_file === "string"
+      ? reports.publishReadyReport.final_candidate_file
+      : "";
+    const candidates = [
+      path.join(chaptersReviewedDir, `${idx}_final.md`),
+      path.isAbsolute(reportedFile) ? reportedFile : "",
+      reportedFile ? path.join(bookDir, reportedFile) : "",
+      reportedFile ? path.join(path.dirname(path.dirname(bookDir)), reportedFile) : "",
+    ].filter(Boolean);
+    const finalFile = candidates.find((file) => fs.existsSync(file));
+    if (finalFile) return { file: finalFile };
+  }
   const blocked = hasBlockingReviewedStatus(no, reports);
   if (blocked) return { blocked };
   const continuityDecisionReport = reports.finalReport || reports.report;
