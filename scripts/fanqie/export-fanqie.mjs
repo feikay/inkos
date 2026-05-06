@@ -23,9 +23,17 @@ const publishTitle = getArg("title", "气血为0，我却能撬动规则");
 const incremental = hasFlag("incremental");
 const reset = hasFlag("reset");
 const dryRun = hasFlag("dry-run");
+const useReviewed = hasFlag("use-reviewed");
 
 const bookDir = path.join(root, "my-novel", "books", bookName);
 const chaptersDirSource = path.join(bookDir, "chapters");
+const chaptersPolishedDir = path.join(bookDir, "chapters-polished");
+const chaptersReviewedDir = path.join(bookDir, "chapters-reviewed");
+const chaptersSalvagedDir = path.join(bookDir, "chapters-salvaged");
+const chaptersFixedDir = path.join(bookDir, "chapters-fixed");
+const continuityReviewDir = path.join(bookDir, "reviews", "continuity");
+const fanqieQualityReviewDir = path.join(bookDir, "reviews", "fanqie-quality");
+const publishReadyReviewDir = path.join(bookDir, "reviews", "publish-ready");
 const outDir = path.join(root, "publish", bookName, "fanqie");
 const chapterOutDir = path.join(outDir, "chapters");
 const markerFile = path.join(outDir, ".last_export");
@@ -49,6 +57,15 @@ function readIfExists(file) {
   return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
 }
 
+function readJsonIfExists(file) {
+  if (!fs.existsSync(file)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (error) {
+    throw new Error(`无法解析 JSON：${path.relative(root, file)}\n${error.message}`);
+  }
+}
+
 function isChapterSourceFile(file) {
   const name = path.basename(file);
   return /^0*(\d+)(?:[_\-.].*)?\.(md|txt)$/i.test(name);
@@ -60,16 +77,258 @@ function getChapterNo(file) {
   return match ? Number(match[1]) : null;
 }
 
+function formatChapterIndex(no) {
+  return String(no).padStart(4, "0");
+}
+
 function getChapterTitleFromFilename(file) {
-  const name = path.basename(file);
-  const match = name.match(/^0*\d+(?:[_\-.](.+?))?\.(md|txt)$/i);
-  if (!match?.[1]) return "";
-  return normalizeTitleCandidate(
-    match[1]
-    .replace(/[_\-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
+  return extractTitleFromOriginalFilename(file, getChapterNo(file));
+}
+
+function findOriginalChapterPath(bookDir, chapterIndex) {
+  const chaptersDir = path.join(bookDir, "chapters");
+  if (!fs.existsSync(chaptersDir)) return null;
+
+  const candidates = fs.readdirSync(chaptersDir)
+    .filter((name) => /\.(md|txt)$/i.test(name))
+    .map((name) => {
+      const file = path.join(chaptersDir, name);
+      const base = path.basename(name, path.extname(name));
+      const numbered = base.match(/^0*(\d+)(?:[_\-\s]+(.+))?$/u);
+      const titled = base.match(/^第\s*0*(\d+)\s*章\s*(.*)$/u);
+      const matchedNo = numbered ? Number(numbered[1]) : titled ? Number(titled[1]) : null;
+      const title = extractTitleFromOriginalFilename(file, chapterIndex);
+      const stat = fs.statSync(file);
+      return { name, file, base, matchedNo, title, stat };
+    })
+    .filter((candidate) => candidate.matchedNo === chapterIndex)
+    .sort((a, b) => {
+      const aUnderscore = a.base.includes("_") ? 0 : 1;
+      const bUnderscore = b.base.includes("_") ? 0 : 1;
+      if (aUnderscore !== bUnderscore) return aUnderscore - bUnderscore;
+
+      const aHasTitle = a.title ? 0 : 1;
+      const bHasTitle = b.title ? 0 : 1;
+      if (aHasTitle !== bHasTitle) return aHasTitle - bHasTitle;
+
+      const mtimeDiff = b.stat.mtimeMs - a.stat.mtimeMs;
+      if (mtimeDiff) return mtimeDiff;
+
+      return a.name.length - b.name.length || a.name.localeCompare(b.name);
+    });
+
+  return candidates[0]?.file || null;
+}
+
+function getOriginalChapterDebugInfo(bookDir, chapterIndex) {
+  const chaptersDir = path.join(bookDir, "chapters");
+  const mdFiles = fs.existsSync(chaptersDir)
+    ? fs.readdirSync(chaptersDir).filter((name) => /\.md$/i.test(name)).sort((a, b) => a.localeCompare(b))
+    : [];
+  const matchedCandidates = mdFiles.filter((name) => {
+    const base = path.basename(name, path.extname(name));
+    const numbered = base.match(/^0*(\d+)(?:[_\-\s]+(.+))?$/u);
+    const titled = base.match(/^第\s*0*(\d+)\s*章\s*(.*)$/u);
+    const matchedNo = numbered ? Number(numbered[1]) : titled ? Number(titled[1]) : null;
+    return matchedNo === chapterIndex;
+  });
+  const nearbyNumbers = new Set([chapterIndex - 1, chapterIndex, chapterIndex + 1].map(String));
+  const nearbyFiles = mdFiles
+    .map((name, index) => ({ name, index }))
+    .filter(({ name, index }) => {
+      const base = path.basename(name, path.extname(name));
+      const numbered = base.match(/^0*(\d+)/u);
+      const titled = base.match(/^第\s*0*(\d+)\s*章/u);
+      const matchedNo = numbered ? Number(numbered[1]) : titled ? Number(titled[1]) : null;
+      if (matchedNo && nearbyNumbers.has(String(matchedNo))) return true;
+      const insertion = mdFiles.findIndex((item) => item.localeCompare(`${formatChapterIndex(chapterIndex)}_`) >= 0);
+      return insertion >= 0 && Math.abs(index - insertion) <= 2;
+    })
+    .map(({ name }) => name);
+
+  return {
+    chaptersDir,
+    candidateMdCount: mdFiles.length,
+    matchedCandidates,
+    nearbyFiles,
+  };
+}
+
+function normalizeOriginalMetadataTitle(text) {
+  const value = normalizeTitleCandidate(text);
+  if (!value) return "";
+  return value
+    .split(/[，。！？；：,!?;:]/u)[0]
+    .replace(/\s+/g, "")
+    .trim();
+}
+
+function extractTitleFromOriginalFilename(filePath, chapterIndex) {
+  if (!filePath) return "";
+  const name = path.basename(filePath);
+  const numbered = name.match(/^0*(\d+)(?:[_\-\s]+(.+?))?\.(?:md|txt)$/iu);
+  if (numbered && (!chapterIndex || Number(numbered[1]) === chapterIndex)) {
+    return normalizeOriginalMetadataTitle(numbered[2] || "");
+  }
+  const titled = name.match(/^第\s*0*(\d+)\s*章\s*(.+?)\.(?:md|txt)$/iu);
+  if (titled && (!chapterIndex || Number(titled[1]) === chapterIndex)) {
+    return normalizeOriginalMetadataTitle(titled[2] || "");
+  }
+  return "";
+}
+
+function getFirstNonEmptyLine(text) {
+  return (text || "").split(/\r?\n/).find((line) => line.trim()) || "";
+}
+
+function extractTitleFromMarkdownFirstLine(text, chapterIndex) {
+  const line = getFirstNonEmptyLine(text);
+  const value = (line || "").trim();
+  if (!value) return "";
+  const match = value.match(/^(?:#{1,6}\s*)?第\s*0*(\d+)\s*章(?:\s*[:：\-]\s*|\s+)(.+?)\s*$/u);
+  if (!match || Number(match[1]) !== chapterIndex) return "";
+  return normalizeTitleCandidate(match[2]);
+}
+
+function getChapterTitleFromFirstLine(text) {
+  const value = getFirstNonEmptyLine(text).trim();
+  const match = value.match(/^(?:#{1,6}\s*)?第\s*0*(\d+)\s*章(?:\s*[:：\-]\s*|\s+)(.+?)\s*$/u);
+  return match?.[2] ? normalizeTitleCandidate(match[2]) : "";
+}
+
+function listFilesIfDir(dir) {
+  return fs.existsSync(dir) ? fs.readdirSync(dir).map((name) => path.join(dir, name)) : [];
+}
+
+function pickHighestAttempt(dir, pattern) {
+  const candidates = listFilesIfDir(dir)
+    .map((file) => {
+      const match = path.basename(file).match(pattern);
+      return match ? { file, attempt: Number(match[1]) } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.attempt - a.attempt);
+  return candidates[0]?.file || null;
+}
+
+function reportPaths(no) {
+  const idx = formatChapterIndex(no);
+  return {
+    finalReport: path.join(continuityReviewDir, `${idx}.final-report.json`),
+    report: path.join(continuityReviewDir, `${idx}.report.json`),
+    salvageReport: path.join(continuityReviewDir, `${idx}.salvage-report.json`),
+    qualityReport: path.join(fanqieQualityReviewDir, `${idx}.final-quality-report.json`),
+    publishReadyReport: path.join(publishReadyReviewDir, `${idx}.publish-report.json`),
+  };
+}
+
+function getReviewReports(no) {
+  const paths = reportPaths(no);
+  return {
+    finalReport: readJsonIfExists(paths.finalReport),
+    report: readJsonIfExists(paths.report),
+    salvageReport: readJsonIfExists(paths.salvageReport),
+    qualityReport: readJsonIfExists(paths.qualityReport),
+    publishReadyReport: readJsonIfExists(paths.publishReadyReport),
+  };
+}
+
+function statusOf(report, field) {
+  return typeof report?.[field] === "string" ? report[field] : "";
+}
+
+function isPassStatus(report) {
+  return statusOf(report, "final_status") === "PASS";
+}
+
+function hasBlockingReviewedStatus(no, reports) {
+  const continuityDecisionReport = reports.finalReport || reports.report;
+  const status = statusOf(continuityDecisionReport, "final_status");
+  if (status && status !== "PASS") {
+    return `Chapter ${formatChapterIndex(no)} blocked: final_status=${status}. Please fix before export.`;
+  }
+  if (status === "DROP" || status === "MANUAL_REVIEW") {
+    return `Chapter ${formatChapterIndex(no)} blocked: final_status=${status}. Please fix before export.`;
+  }
+  const wordCount = Number(continuityDecisionReport?.word_count);
+  const minChapterWords = Number(continuityDecisionReport?.min_chapter_words);
+  if (
+    status === "PASS"
+    && Number.isFinite(wordCount)
+    && Number.isFinite(minChapterWords)
+    && minChapterWords > 0
+    && wordCount < minChapterWords
+  ) {
+    return `Chapter ${formatChapterIndex(no)} blocked: word_count=${wordCount} < ${minChapterWords}.`;
+  }
+
+  const qualityStatus = statusOf(reports.qualityReport, "final_quality_status");
+  if (qualityStatus === "QUALITY_MANUAL_REVIEW") {
+    return `Chapter ${formatChapterIndex(no)} blocked: final_quality_status=${qualityStatus}. Please fix before export.`;
+  }
+
+  return "";
+}
+
+function selectReviewedChapterFile(no, originalFile) {
+  const idx = formatChapterIndex(no);
+  const reports = getReviewReports(no);
+  if (reports.publishReadyReport?.publish_status === "READY_TO_EXPORT") {
+    const reportedFile = typeof reports.publishReadyReport.final_candidate_file === "string"
+      ? reports.publishReadyReport.final_candidate_file
+      : "";
+    const candidates = [
+      path.join(chaptersReviewedDir, `${idx}_final.md`),
+      path.isAbsolute(reportedFile) ? reportedFile : "",
+      reportedFile ? path.join(bookDir, reportedFile) : "",
+      reportedFile ? path.join(path.dirname(path.dirname(bookDir)), reportedFile) : "",
+    ].filter(Boolean);
+    const finalFile = candidates.find((file) => fs.existsSync(file));
+    if (finalFile) return { file: finalFile };
+  }
+  const blocked = hasBlockingReviewedStatus(no, reports);
+  if (blocked) return { blocked };
+  const continuityDecisionReport = reports.finalReport || reports.report;
+  const finalStatusPass = isPassStatus(continuityDecisionReport);
+  const decisionSource = statusOf(reports.finalReport, "decision_source");
+  const salvageStatusPass = reports.finalReport
+    ? finalStatusPass && decisionSource === "salvage"
+    : (isPassStatus(reports.salvageReport) || finalStatusPass);
+
+  const polishedFile = pickHighestAttempt(
+    chaptersPolishedDir,
+    new RegExp(`^${idx}_polished_attempt(\\d+)\\.md$`, "i")
   );
+  if (polishedFile && statusOf(reports.qualityReport, "final_quality_status") === "QUALITY_PASS") {
+    return { file: polishedFile };
+  }
+
+  if (reports.finalReport && finalStatusPass && typeof reports.finalReport.used_file === "string") {
+    const usedFile = path.isAbsolute(reports.finalReport.used_file)
+      ? reports.finalReport.used_file
+      : path.join(bookDir, reports.finalReport.used_file);
+    if (fs.existsSync(usedFile)) return { file: usedFile };
+  }
+
+  const salvageLightfixFile = path.join(chaptersSalvagedDir, `${idx}_salvage_lightfix.md`);
+  if (fs.existsSync(salvageLightfixFile) && salvageStatusPass) {
+    return { file: salvageLightfixFile };
+  }
+
+  const salvageFile = path.join(chaptersSalvagedDir, `${idx}_salvage.md`);
+  if (fs.existsSync(salvageFile) && salvageStatusPass) {
+    return { file: salvageFile };
+  }
+
+  const fixedFile = pickHighestAttempt(
+    chaptersFixedDir,
+    new RegExp(`^${idx}_attempt(\\d+)\\.md$`, "i")
+  );
+  if (fixedFile && finalStatusPass) {
+    return { file: fixedFile };
+  }
+
+  return { file: originalFile };
 }
 
 function extractText(file) {
@@ -320,7 +579,6 @@ function stripTitlePrefix(text) {
 function normalizeTitleCandidate(text) {
   return stripTitlePrefix(text)
     .replace(/^["'“”‘’【】\[\]()（）]+|["'“”‘’【】\[\]()（）]+$/g, "")
-    .replace(/[：:]\s*.+$/u, "")
     .replace(/\s+/g, "")
     .trim();
 }
@@ -329,13 +587,74 @@ function countChineseChars(text) {
   return (text.match(/[\u3400-\u9fff]/g) || []).length;
 }
 
+function isNarrativeTitleFragment(text) {
+  const value = (text || "").trim();
+  if (!value) return false;
+  if (/^(?:楚夜|云岚|他|她|它|他们|此刻|这时|随后|突然|当|如果|因为|为了|然后|刚|正|便|就|又)/.test(value)) {
+    return true;
+  }
+  if (/(?:试图|伸手|开口|看向|盯着|发现|感到|站在|坐在|走到|走向|传来|浮现|变得|彻底|靠在|落在|按住|闭上|深吸|喘息)/.test(value)) {
+    return true;
+  }
+  return false;
+}
+
+function hasPollutedTitleShape(text) {
+  const raw = stripTitlePrefix(text)
+    .replace(/^["'“”‘’【】\[\]()（）]+|["'“”‘’【】\[\]()（）]+$/g, "")
+    .trim();
+  if (!raw) return false;
+  if (/\n/.test(raw)) return true;
+  const colonMatch = raw.match(/^[^：:]{1,18}[：:](.+)$/u);
+  if (!colonMatch) return false;
+  const suffix = colonMatch[1].trim();
+  if (!suffix) return true;
+  if (/[，。！？；,.!?;]/.test(suffix)) return true;
+  if (isNarrativeTitleFragment(suffix)) return true;
+  if (countChineseChars(suffix) >= 5) return true;
+  return false;
+}
+
 function isStructuralTitle(text) {
   return /PRE_WRITE_CHECK|Chapter\s*Content|Scene\s*\d+|Hook|Pressure|Attempt|Twist|Payoff|Pull|Act\s*\d+|MOMENT/i.test(text);
 }
 
+function isInvalidGeneratedTitle(title) {
+  const value = normalizeTitleCandidate(title);
+  if (!value) return true;
+  if (value === "未命名章节") return true;
+  if (countChineseChars(value) > 14 || [...value].length > 18) return true;
+  if (/[，。！？；：]/u.test(value)) return true;
+  if (/^(?:是|像是|这是|那是|这里|那里|不能|他|她|它|他们|楚夜|云岚|我|你|此刻|这时|随后|突然|当|如果|因为|为了|然后|刚|正|便|就|又)/u.test(value)) {
+    return true;
+  }
+  if (/^[“”"']|[“”"']$/u.test(value)) return true;
+  if (/(?:声音|传来|响起|看着|走进|抬头|低声|说道|问道|像是|正在|开口|看向|盯着|发现|感到|站在|坐在|走到|走向|浮现|变得|彻底|靠在|落在|按住|闭上|深吸|喘息|转动|打开什么)/u.test(value)) {
+    return true;
+  }
+  if (/^(?:.+的声音|.+的气息|.+的感觉|.+的味道)/u.test(value)) return true;
+  return false;
+}
+
+function isValidOriginalTitleCandidate(text) {
+  const value = normalizeOriginalMetadataTitle(text);
+  if (!value) return false;
+  if (value === "未命名章节") return false;
+  if (/\n/.test(value)) return false;
+  if (isStructuralTitle(value)) return false;
+  if (/[。！？；.!?;]/.test(value)) return false;
+  if (/[：:]/.test(value)) return false;
+  if (/[*|/\\]/.test(value)) return false;
+  if (/(?:说明|设定|机制|正文|修正|新增|摘要|大纲|预计增量|当前资源)/.test(value)) return false;
+  if (countChineseChars(value) > 14 || [...value].length > 18) return false;
+  return true;
+}
+
 function isValidTitleCandidate(text) {
   const value = normalizeTitleCandidate(text);
+  if (isInvalidGeneratedTitle(value)) return false;
   if (!value) return false;
+  if (hasPollutedTitleShape(text)) return false;
   if (/\n/.test(value)) return false;
   if (isStructuralTitle(value)) return false;
   if (/[。！？；.!?;]/.test(value)) return false;
@@ -345,8 +664,8 @@ function isValidTitleCandidate(text) {
   if (/(?:说明|设定|机制|正文|修正|新增|摘要|大纲|预计增量|当前资源)/.test(value)) return false;
   if (/^(?:他|她|它|他们|云岚|楚夜|此刻|随后|这时|就在|突然|当|如果|因为|为了|然后)/.test(value) && value.length >= 6) return false;
   if (/(?:说道|问道|开口|看向|盯着|发现|感到|站在|坐在|走进|突然|已经|继续|并未|开始|传来|浮现|变得|彻底)/.test(value)) return false;
-  if (value.length > 24) return false;
-  if (countChineseChars(value) > 18) return false;
+  if (value.length > 14) return false;
+  if (countChineseChars(value) > 14) return false;
   return true;
 }
 
@@ -409,6 +728,179 @@ function removeExistingTitle(text) {
   return stripLeadingMeta(lines.join("\n"));
 }
 
+function splitIntoSentences(paragraph) {
+  const text = (paragraph || "").replace(/\s+/g, "").trim();
+  if (!text) return [];
+
+  const sentences = [];
+  let current = "";
+  const chars = [...text];
+  const endPunctuation = new Set(["。", "！", "？", "!", "?", "；", ";"]);
+  const closingQuotes = new Set(["”", "\"", "」", "』"]);
+
+  for (let i = 0; i < chars.length; i += 1) {
+    const ch = chars[i];
+    const next = chars[i + 1] || "";
+    current += ch;
+
+    if (ch === "…" && next === "…") {
+      current += next;
+      i += 1;
+      while (closingQuotes.has(chars[i + 1] || "")) {
+        current += chars[i + 1];
+        i += 1;
+      }
+      sentences.push(current.trim());
+      current = "";
+      continue;
+    }
+
+    if (endPunctuation.has(ch)) {
+      while (closingQuotes.has(chars[i + 1] || "")) {
+        current += chars[i + 1];
+        i += 1;
+      }
+      sentences.push(current.trim());
+      current = "";
+      continue;
+    }
+
+    if (closingQuotes.has(ch) && endPunctuation.has(chars[i - 1] || "")) {
+      sentences.push(current.trim());
+      current = "";
+    }
+  }
+
+  if (current.trim()) sentences.push(current.trim());
+  return sentences.filter(Boolean);
+}
+
+function formatParagraphForWebNovel(paragraph) {
+  const raw = (paragraph || "").trim();
+  if (!raw) return [];
+  if (/^#{1,6}\s+/.test(raw)) {
+    return [raw];
+  }
+  if (countChars(raw) <= 120) {
+    return [raw];
+  }
+
+  const sentences = splitIntoSentences(raw);
+  if (!sentences.length) return [raw];
+
+  const paragraphs = [];
+  let current = "";
+
+  const flush = () => {
+    const value = current.trim();
+    if (value) paragraphs.push(value);
+    current = "";
+  };
+
+  for (const sentence of sentences) {
+    const value = sentence.trim();
+    if (!value) continue;
+    const sentenceLen = countChars(value);
+
+    if (!current) {
+      current = value;
+      if (sentenceLen >= 120 || /^[“"].+[”"]$/.test(value)) {
+        flush();
+      }
+      continue;
+    }
+
+    const next = `${current}${value}`;
+    const nextLen = countChars(next);
+    const currentLen = countChars(current);
+    const isDialogue = /^[“"].+[”"]$/.test(value);
+
+    if (
+      isDialogue
+      || nextLen > 120
+      || (currentLen >= 40 && sentenceLen >= 40)
+      || (currentLen >= 70 && sentenceLen >= 20)
+    ) {
+      flush();
+      current = value;
+      if (sentenceLen >= 120 || isDialogue) {
+        flush();
+      }
+      continue;
+    }
+
+    current = next;
+
+    if (countChars(current) >= 90) {
+      flush();
+    }
+  }
+
+  flush();
+  return paragraphs;
+}
+
+function normalizeSoftLineBreaks(text) {
+  const lines = (text || "").split("\n");
+  const paragraphs = [];
+  let current = [];
+
+  const flush = () => {
+    if (!current.length) return;
+    paragraphs.push(current.join("").trim());
+    current = [];
+  };
+
+  for (const line of lines) {
+    const value = line.trim();
+    if (!value) {
+      flush();
+      continue;
+    }
+
+    if (/^#{1,6}\s+/.test(value)) {
+      flush();
+      paragraphs.push(value);
+      continue;
+    }
+
+    current.push(value);
+  }
+
+  flush();
+  return paragraphs.join("\n\n").trim();
+}
+
+function validateParagraphBreaks(text) {
+  const warnings = [];
+  const value = (text || "").trim();
+  if (!value) return warnings;
+
+  if (/[\u4e00-\u9fa5]\n(?!\n)[\u4e00-\u9fa5]/u.test(value)) {
+    warnings.push("检测到中文词句被单换行截断。");
+  }
+  if (/(?:^|\n\n)[，。！？；：、”」』]/u.test(value)) {
+    warnings.push("检测到段首出现异常标点。");
+  }
+  if (/(?:迅|肌|未|腥涩|深)\n(?!\n)(?:速|肉|知|。|渊)/u.test(value)) {
+    warnings.push("检测到常见双字词或短语被错误断行。");
+  }
+  return warnings;
+}
+
+function rewriteToWebNovelStyle(text) {
+  const source = normalizeSoftLineBreaks(text);
+  if (!source) return "";
+
+  const rawParagraphs = source
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  const formatted = rawParagraphs.flatMap((paragraph) => formatParagraphForWebNovel(paragraph));
+  return formatted.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 function countChars(text) {
   return [...text.replace(/\s/g, "")].length;
 }
@@ -445,11 +937,98 @@ function makeTitle(no, text, sourceFile = "") {
   if (isValidTitleCandidate(markdownTitle)) {
     return `第${no}章 ${markdownTitle}`;
   }
-  const impact = pickImpactLine(text);
-  if (isValidTitleCandidate(impact)) {
-    return `第${no}章 ${impact}`;
+  return `第${no}章 未命名章节`;
+}
+
+function findTitleValueInObject(value) {
+  if (!value || typeof value !== "object") return "";
+  for (const key of ["chapter_title", "chapterTitle", "title"]) {
+    if (typeof value[key] === "string" && value[key].trim()) {
+      return normalizeTitleCandidate(value[key]);
+    }
   }
-  return `第${no}章 风波再起`;
+  for (const item of Object.values(value)) {
+    if (item && typeof item === "object") {
+      const found = findTitleValueInObject(item);
+      if (found) return found;
+    }
+  }
+  return "";
+}
+
+function getReportTitleCandidate(chapterIndex) {
+  const paths = reportPaths(chapterIndex);
+  for (const report of [readJsonIfExists(paths.finalReport), readJsonIfExists(paths.report)]) {
+    const title = findTitleValueInObject(report);
+    if (isValidOriginalTitleCandidate(title)) return title;
+  }
+  return "";
+}
+
+function resolveChapterTitle({
+  bookDir,
+  chapterIndex,
+  originalPath,
+  reviewedChapterPath,
+  reviewedText,
+  originalText,
+}) {
+  const originalChapterPath = originalPath || findOriginalChapterPath(bookDir, chapterIndex);
+  const loadedOriginalText = typeof originalText === "string"
+    ? originalText
+    : readIfExists(originalChapterPath || "");
+  const reviewedFirstLineTitle = extractTitleFromMarkdownFirstLine(reviewedText, chapterIndex);
+  const reviewedIsSeparate = originalChapterPath
+    && reviewedChapterPath
+    && path.resolve(reviewedChapterPath) !== path.resolve(originalChapterPath);
+  const reviewedFirstLineRaw = normalizeTitleCandidate(getFirstNonEmptyLine(reviewedText));
+  const ignoredReviewedTitle = reviewedIsSeparate
+    && reviewedFirstLineRaw
+    && !isValidTitleCandidate(reviewedFirstLineTitle || reviewedFirstLineRaw)
+    ? reviewedFirstLineRaw
+    : "";
+
+  const candidates = [
+    ["original_filename", extractTitleFromOriginalFilename(originalChapterPath, chapterIndex)],
+    ["original_heading", normalizeOriginalMetadataTitle(extractTitleFromMarkdownFirstLine(loadedOriginalText, chapterIndex))],
+  ];
+
+  if (reviewedIsSeparate) {
+    candidates.push(["reviewed_heading", reviewedFirstLineTitle]);
+  }
+
+  candidates.push(
+    ["continuity_report", getReportTitleCandidate(chapterIndex)],
+    ["body_heading", reviewedFirstLineTitle]
+  );
+
+  for (const [source, candidate] of candidates) {
+    const isOriginal = source.startsWith("original_");
+    const isMetadata = isOriginal || source === "continuity_report";
+    const isValid = isMetadata
+      ? isValidOriginalTitleCandidate(candidate)
+      : isValidTitleCandidate(candidate);
+    if (isValid) {
+      const titleText = isMetadata ? normalizeOriginalMetadataTitle(candidate) : normalizeTitleCandidate(candidate);
+      return {
+        titleText,
+        title: `第${chapterIndex}章 ${titleText}`,
+        source,
+        originalPathFound: Boolean(originalChapterPath),
+        originalTitleFound: isOriginal,
+        ignoredReviewedTitle,
+      };
+    }
+  }
+
+  return {
+    titleText: "未命名章节",
+    title: `第${chapterIndex}章 未命名章节`,
+    source: "fallback",
+    originalPathFound: Boolean(originalChapterPath),
+    originalTitleFound: false,
+    ignoredReviewedTitle,
+  };
 }
 
 function sixPartCheck(text) {
@@ -481,6 +1060,7 @@ function qualityWarnings(text) {
 
   if (/他意识到|他明白了|显然|这意味着/.test(text)) warnings.push("仍存在说明式内心表达。");
   if (/——/.test(text)) warnings.push("仍存在破折号，建议替换。");
+  warnings.push(...validateParagraphBreaks(text));
 
   return warnings;
 }
@@ -638,7 +1218,7 @@ if (incremental && fs.existsSync(markerFile)) {
 
 const chapterScanRoot = fs.existsSync(chaptersDirSource) ? chaptersDirSource : bookDir;
 
-const chapterFiles = walk(chapterScanRoot)
+const originalChapterFiles = walk(chapterScanRoot)
   .filter((f) => /\.(md|txt)$/i.test(f))
   .filter((f) => isChapterSourceFile(f))
   .map((file) => ({ file, no: getChapterNo(file) }))
@@ -647,10 +1227,32 @@ const chapterFiles = walk(chapterScanRoot)
   .filter((x) => !incremental || x.no > lastExport)
   .sort((a, b) => a.no - b.no);
 
+const blockedReviewedChapters = [];
+const chapterFiles = originalChapterFiles.map(({ file, no }) => {
+  const originalFile = findOriginalChapterPath(bookDir, no) || file;
+  if (!useReviewed) return { file, originalFile, no };
+  const selected = selectReviewedChapterFile(no, file);
+  if (selected.blocked) {
+    blockedReviewedChapters.push(selected.blocked);
+    return { file, originalFile, no, blocked: selected.blocked };
+  }
+  return { file: selected.file, originalFile, no };
+}).filter((x) => !x.blocked);
+
+if (blockedReviewedChapters.length) {
+  for (const message of blockedReviewedChapters) console.error(message);
+  process.exit(1);
+}
+
 if (!chapterFiles.length) {
   console.log("没有找到需要导出的章节。");
   if (incremental) console.log(`当前为增量模式，上次导出到第 ${lastExport} 章。`);
   process.exit(0);
+}
+
+console.log("[export-fanqie]");
+for (const { file, no } of chapterFiles) {
+  console.log(`${formatChapterIndex(no)} -> body: ${path.relative(bookDir, file)}`);
 }
 
 const exported = [];
@@ -658,39 +1260,64 @@ const report = [];
 const nonNovelMarkerChecks = [];
 const nonNovelMarkerFailures = [];
 
-for (const { file, no } of chapterFiles) {
+for (const { file, originalFile, no } of chapterFiles) {
   const raw = extractText(file);
+  const originalRaw = path.resolve(file) === path.resolve(originalFile) ? raw : extractText(originalFile);
   const rawIssues = detectNonNovelMarkers(raw, file);
 
   let text = cleanText(raw);
   text = removeExistingTitle(text);
   const cleanedIssues = detectNonNovelMarkers(text, file);
 
-  const sourceTitle = getChapterTitleFromFilename(file);
-  const title = isValidTitleCandidate(sourceTitle) ? `第${no}章 ${sourceTitle}` : makeTitle(no, text, file);
+  const titleInfo = resolveChapterTitle({
+    bookDir,
+    chapterIndex: no,
+    originalPath: originalFile,
+    reviewedChapterPath: file,
+    reviewedText: raw,
+    originalText: originalRaw,
+  });
+  const title = titleInfo.title;
+  if (!titleInfo.originalPathFound) {
+    console.log(`${formatChapterIndex(no)} original title not found`);
+    const debug = getOriginalChapterDebugInfo(bookDir, no);
+    console.log("[export-fanqie:title-debug]");
+    console.log(`chapter: ${formatChapterIndex(no)}`);
+    console.log(`chaptersDir: ${debug.chaptersDir}`);
+    console.log(`candidate md count: ${debug.candidateMdCount}`);
+    console.log(`matched candidates: ${JSON.stringify(debug.matchedCandidates)}`);
+    console.log("nearby files:");
+    for (const name of debug.nearbyFiles) console.log(`- ${name}`);
+  }
+  if (titleInfo.ignoredReviewedTitle) {
+    console.log(`${formatChapterIndex(no)} reviewed title invalid: ${titleInfo.ignoredReviewedTitle}`);
+  }
+  console.log(`${formatChapterIndex(no)} -> title: ${titleInfo.titleText} (source: ${titleInfo.source})`);
   nonNovelMarkerChecks.push({
     no,
     title,
     file,
+    originalFile,
     rawIssues,
     cleanedIssues,
   });
 
   if (cleanedIssues.issues.length) {
-    nonNovelMarkerFailures.push({ no, title, file, rawIssues, cleanedIssues });
+    nonNovelMarkerFailures.push({ no, title, file, originalFile, rawIssues, cleanedIssues });
     continue;
   }
 
   if (!text) continue;
 
-  const finalText = `${title}\n\n${text}\n`;
+  const rewrittenText = rewriteToWebNovelStyle(text);
+  const finalText = `${title}\n\n${rewrittenText}\n`;
 
   const check = sixPartCheck(finalText);
   const warnings = qualityWarnings(finalText);
 
   const outFile = path.join(chapterOutDir, `${String(no).padStart(4, "0")}.txt`);
 
-  exported.push({ no, title, chars: countChars(finalText), file, outFile, finalText, check, warnings });
+  exported.push({ no, title, chars: countChars(finalText), file, originalFile, outFile, finalText, check, warnings });
 
   report.push(`## ${title}
 

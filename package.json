@@ -22,7 +22,7 @@
   },
   "scripts": {
     "build": "pnpm -r build",
-    "dev": "pnpm -r --parallel dev",
+    "dev": "node scripts/dev-cli.mjs",
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",

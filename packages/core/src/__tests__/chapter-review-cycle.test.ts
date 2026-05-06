@@ -404,11 +404,14 @@ describe("runChapterReviewCycle", () => {
       .mockResolvedValue(createAuditResult());
     const reviseChapter = vi.fn().mockResolvedValue({
       revisedContent: [
-        "楚夜一刀逼退追兵，才和云岚退到断壁后。",
+        "[Scene1]",
+        "楚夜和云岚退到断壁后，先扎营疗伤，把火生小，慢慢分了热汤和干粮。",
         "",
-        "两人先扎营疗伤，又分了热汤和干粮，顺手把接下来的路途计划重新说透。",
+        "[Scene2]",
+        "两人低声把接下来的路途计划重新说透，云岚难得接了一句玩笑，气氛从先前的血腥里缓下来。",
         "",
-        "云岚难得接了一句玩笑，气氛总算从先前的血腥里缓下来。",
+        "[Scene3]",
+        "休整之后，他们才沿着断壁继续前推，只保留一点低强度警惕。",
       ].join("\n"),
       wordCount: 57,
       fixedIssues: ["inserted a breathing beat"],
@@ -420,11 +423,14 @@ describe("runChapterReviewCycle", () => {
     const normalizeDraftLengthIfNeeded = vi.fn()
       .mockResolvedValue({
         content: [
-          "楚夜一刀逼退追兵，才和云岚退到断壁后。",
+          "[Scene1]",
+          "楚夜和云岚退到断壁后，先扎营疗伤，把火生小，慢慢分了热汤和干粮。",
           "",
-          "两人先扎营疗伤，又分了热汤和干粮，顺手把接下来的路途计划重新说透。",
+          "[Scene2]",
+          "两人低声把接下来的路途计划重新说透，云岚难得接了一句玩笑，气氛从先前的血腥里缓下来。",
           "",
-          "云岚难得接了一句玩笑，气氛总算从先前的血腥里缓下来。",
+          "[Scene3]",
+          "休整之后，他们才沿着断壁继续前推，只保留一点低强度警惕。",
         ].join("\n"),
         wordCount: 57,
         applied: false,

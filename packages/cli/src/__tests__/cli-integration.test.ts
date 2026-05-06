@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,11 +30,12 @@ function buildTestEnv(overrides?: Record<string, string>) {
   };
 }
 
-function run(args: string[], options?: { env?: Record<string, string> }): string {
+function run(args: string[], options?: { env?: Record<string, string>; input?: string }): string {
   return execFileSync("node", [cliEntry, ...args], {
     cwd: projectDir,
     encoding: "utf-8",
     env: buildTestEnv(options?.env),
+    input: options?.input,
     timeout: 10_000,
   });
 }
@@ -201,6 +202,465 @@ describe("CLI integration", () => {
       const output = run(["config", "show"]);
       const config = JSON.parse(output);
       expect(config.llm.model).toBe("gpt-5");
+    });
+  });
+
+  describe("inkos short-story", () => {
+    it("prints a short-story chapter plan", () => {
+      const output = run(["short-story", "plan", "--theme", "雨夜复仇", "--target-words", "12000", "--json"]);
+      const plan = JSON.parse(output);
+
+      expect(plan.type).toBe("short_story");
+      expect(plan.chapterCount).toBe(8);
+      expect(plan.chapters.reduce((sum: number, chapter: { targetWords: number }) => sum + chapter.targetWords, 0)).toBe(12_000);
+      expect(plan.chapters[0].function).toBe("hook");
+      expect(plan.chapters.at(-1).function).toBe("resolution");
+      expect(plan.chapters.some((chapter: { function: string }) => chapter.function === "twist")).toBe(true);
+      expect(plan.chapters.some((chapter: { function: string }) => chapter.function === "climax")).toBe(true);
+    });
+
+    it("prints short-story structure functions in the text plan", () => {
+      const output = run(["short-story", "plan", "--theme", "雨夜复仇", "--target-words", "12000"]);
+
+      expect(output).toContain("[1] hook - 开局冲突");
+      expect(output).toContain("twist - 第一次反转");
+      expect(output).toContain("[8] resolution - 完整结局");
+      expect(output).toContain("林晚");
+      expect(output).toContain("顾沉");
+      expect(output).toContain("conflict: 顾沉冲上台抢夺话筒");
+      expect(output).toContain("endingHook: 林晚从手包里拿出亲子鉴定报告");
+    });
+
+    it("plans and writes thriller short stories without changing the command shape", async () => {
+      const storyDir = join(projectDir, "my-novel", "short-stories", "悬疑惊悚");
+      const planPath = join(storyDir, "plan.md");
+      const planOutput = run([
+        "short-story",
+        "plan",
+        "--theme",
+        "悬疑惊悚",
+        "--target-words",
+        "50000",
+        "--out",
+        planPath,
+      ]);
+      const markdown = await readFile(planPath, "utf-8");
+
+      expect(planOutput).toContain("# Short story plan: 悬疑惊悚");
+      expect(markdown).toContain("许念");
+      expect(markdown).toContain("停尸间");
+      expect(markdown).toContain("## [1] hook - 开局冲突");
+
+      const writeOutput = run([
+        "short-story",
+        "write",
+        "--theme",
+        "悬疑惊悚",
+        "--target-words",
+        "50000",
+        "--json",
+      ]);
+      const result = JSON.parse(writeOutput);
+      const firstChapter = await readFile(join(storyDir, "chapters", "001.md"), "utf-8");
+
+      expect(result.type).toBe("short_story");
+      expect(result.chapters.length).toBeGreaterThan(20);
+      expect(firstChapter).toContain("许念");
+      expect(firstChapter).toContain("停尸间");
+      expect(firstChapter).toContain("三号冷柜");
+    });
+
+    it("optimizes a thriller hook and writes publish titles", async () => {
+      const storyDir = join(projectDir, "my-novel", "short-stories", "悬疑惊悚");
+      const planPath = join(storyDir, "plan.md");
+      run([
+        "short-story",
+        "plan",
+        "--theme",
+        "悬疑惊悚",
+        "--target-words",
+        "50000",
+        "--out",
+        planPath,
+      ]);
+      run([
+        "short-story",
+        "write",
+        "--theme",
+        "悬疑惊悚",
+        "--target-words",
+        "50000",
+      ]);
+
+      const hookOutput = run(["short-story", "hook", "--theme", "悬疑惊悚"]);
+      const firstChapter = await readFile(join(storyDir, "chapters", "001.md"), "utf-8");
+      const compactOpening = firstChapter.replace(/^# 第1章\s*/, "").replace(/\s+/g, "").slice(0, 300);
+
+      expect(hookOutput).toContain("Short story hook optimized: 悬疑惊悚");
+      expect(compactOpening.slice(0, 50)).toMatch(/三号冷柜|许晴|电话/);
+      expect(compactOpening.slice(0, 150)).toMatch(/到底在哪|我在你身后|来电记录/);
+      expect(compactOpening).toMatch(/睁开眼|十三|监控/);
+
+      const titlesOutput = run(["short-story", "titles", "--theme", "悬疑惊悚"]);
+      const titles = await readFile(join(storyDir, "titles.md"), "utf-8");
+
+      expect(titlesOutput).toContain("# Short story titles: 悬疑惊悚");
+      expect(titles).toContain("姐姐");
+      expect(titles).toContain("停尸间");
+      expect(titles.split("\n").filter((line) => line.startsWith("- 《"))).toHaveLength(10);
+    });
+
+    it("exports short-story chapters into publish-ready files and book text", async () => {
+      const storyDir = join(projectDir, "my-novel", "short-stories", "悬疑惊悚");
+      const planPath = join(storyDir, "plan.md");
+      run([
+        "short-story",
+        "plan",
+        "--theme",
+        "悬疑惊悚",
+        "--target-words",
+        "50000",
+        "--out",
+        planPath,
+      ]);
+      run([
+        "short-story",
+        "write",
+        "--theme",
+        "悬疑惊悚",
+        "--target-words",
+        "50000",
+      ]);
+      run(["short-story", "titles", "--theme", "悬疑惊悚"]);
+
+      const output = run(["short-story", "export", "--theme", "悬疑惊悚"]);
+      const publishFiles = await readdir(join(storyDir, "publish"));
+      const firstChapterFile = publishFiles.find((fileName) => fileName.startsWith("001_") && fileName.endsWith(".md"));
+      expect(firstChapterFile).toBeDefined();
+      expect(publishFiles).not.toContain("001.md");
+      expect(firstChapterFile).not.toMatch(/[\/\\:*?"<>|]/);
+      const publishChapter = await readFile(join(storyDir, "publish", firstChapterFile ?? ""), "utf-8");
+      const bookText = await readFile(join(storyDir, "publish", "book.txt"), "utf-8");
+      const firstTitle = publishChapter.match(/^# (第1章 .+)$/m)?.[1];
+
+      expect(output).toContain("Short story exported: 悬疑惊悚");
+      expect(output).toContain("Chapters:");
+      expect(publishChapter).toMatch(/^# 第1章 .{8,16}$/m);
+      expect(publishChapter).not.toMatch(/\n{3,}/);
+      expect(bookText).toContain("《姐姐失踪三年后给我打电话，冷柜里的女尸睁眼了》");
+      expect(firstTitle).toBeDefined();
+      expect(bookText).toContain(firstTitle ?? "");
+      expect(bookText).toContain("第33章");
+      expect(bookText).not.toContain("# 第1章");
+    });
+
+    it("generates a short-video promotion script from the first chapter", async () => {
+      const storyDir = join(projectDir, "my-novel", "short-stories", "悬疑惊悚");
+      const planPath = join(storyDir, "plan.md");
+      run([
+        "short-story",
+        "plan",
+        "--theme",
+        "悬疑惊悚",
+        "--target-words",
+        "50000",
+        "--out",
+        planPath,
+      ]);
+      run([
+        "short-story",
+        "write",
+        "--theme",
+        "悬疑惊悚",
+        "--target-words",
+        "50000",
+      ]);
+
+      const output = run(["short-story", "script", "--theme", "悬疑惊悚"]);
+      const script = await readFile(join(storyDir, "scripts", "script.txt"), "utf-8");
+      const lines = script.split("\n").filter(Boolean);
+
+      expect(output).toContain("Short-video script written:");
+      expect(lines.length).toBeGreaterThanOrEqual(15);
+      expect(lines.length).toBeLessThanOrEqual(25);
+      expect(lines.every((line) => line.length >= 15 && line.length <= 30)).toBe(true);
+      expect(lines[2]).toContain("三号冷柜");
+      expect(lines[5]).toContain("诡异");
+      expect(lines.at(-1)).toContain("冷柜");
+    });
+
+    it("analyzes short-story publish potential into a markdown report", async () => {
+      const storyDir = join(projectDir, "my-novel", "short-stories", "悬疑惊悚");
+      const planPath = join(storyDir, "plan.md");
+      run([
+        "short-story",
+        "plan",
+        "--theme",
+        "悬疑惊悚",
+        "--target-words",
+        "50000",
+        "--out",
+        planPath,
+      ]);
+      run([
+        "short-story",
+        "write",
+        "--theme",
+        "悬疑惊悚",
+        "--target-words",
+        "50000",
+      ]);
+      run(["short-story", "titles", "--theme", "悬疑惊悚"]);
+
+      const output = run(["short-story", "analyze", "--theme", "悬疑惊悚"]);
+      const analysis = await readFile(join(storyDir, "analysis.md"), "utf-8");
+
+      expect(output).toContain("# Short story analysis: 悬疑惊悚");
+      expect(output).toContain("Analysis written:");
+      expect(analysis).toContain("标题点击率评分");
+      expect(analysis).toContain("前300字吸引力");
+      expect(analysis).toContain("节奏密度");
+      expect(analysis).toContain("中段拖沓检测");
+      expect(analysis).toContain("结尾钩子强度");
+      expect(analysis).toContain("## Recommendations");
+    });
+
+    it("runs short-story batch into isolated run directories", async () => {
+      const output = run([
+        "short-story",
+        "batch",
+        "--themes",
+        "出轨复仇,悬疑惊悚",
+        "--count",
+        "2",
+        "--target-words",
+        "12000",
+      ]);
+      const betrayalDir = join(projectDir, "my-novel", "short-stories", "出轨复仇");
+      const thrillerDir = join(projectDir, "my-novel", "short-stories", "悬疑惊悚");
+      const betrayalRuns = (await readdir(betrayalDir)).filter((name) => name.startsWith("run-")).sort();
+      const thrillerRuns = (await readdir(thrillerDir)).filter((name) => name.startsWith("run-")).sort();
+      const [betrayalRun, betrayalRun2] = betrayalRuns;
+      const [thrillerRun, thrillerRun2] = thrillerRuns;
+
+      expect(output).toContain("Short story batch completed");
+      expect(output).toContain("出轨复仇 #1");
+      expect(output).toContain("悬疑惊悚 #1");
+      expect(output).toContain("出轨复仇 #2");
+      expect(output).toContain("悬疑惊悚 #2");
+      expect(betrayalRun).toBeTruthy();
+      expect(thrillerRun).toBeTruthy();
+      expect(betrayalRun2).toBeTruthy();
+      expect(thrillerRun2).toBeTruthy();
+
+      const betrayalRunDir = join(betrayalDir, betrayalRun ?? "");
+      const thrillerRunDir = join(thrillerDir, thrillerRun ?? "");
+      const betrayalRunDir2 = join(betrayalDir, betrayalRun2 ?? "");
+      const thrillerRunDir2 = join(thrillerDir, thrillerRun2 ?? "");
+      const betrayalPlan = await readFile(join(betrayalRunDir, "plan.md"), "utf-8");
+      const thrillerPlan = await readFile(join(thrillerRunDir, "plan.md"), "utf-8");
+      const betrayalPlan2 = await readFile(join(betrayalRunDir2, "plan.md"), "utf-8");
+      const thrillerPlan2 = await readFile(join(thrillerRunDir2, "plan.md"), "utf-8");
+      const betrayalOpening = await readFile(join(betrayalRunDir, "chapters", "001.md"), "utf-8");
+      const betrayalOpening2 = await readFile(join(betrayalRunDir2, "chapters", "001.md"), "utf-8");
+      const thrillerOpening = await readFile(join(thrillerRunDir, "chapters", "001.md"), "utf-8");
+      const thrillerOpening2 = await readFile(join(thrillerRunDir2, "chapters", "001.md"), "utf-8");
+      const betrayalVariant = JSON.parse(await readFile(join(betrayalRunDir, "variant.json"), "utf-8"));
+      const thrillerVariant = JSON.parse(await readFile(join(thrillerRunDir, "variant.json"), "utf-8"));
+      const betrayalVariant2 = JSON.parse(await readFile(join(betrayalRunDir2, "variant.json"), "utf-8"));
+      const thrillerVariant2 = JSON.parse(await readFile(join(thrillerRunDir2, "variant.json"), "utf-8"));
+      const betrayalScript = await readFile(join(betrayalRunDir, "scripts", "script.txt"), "utf-8");
+      const thrillerBook = await readFile(join(thrillerRunDir, "publish", "book.txt"), "utf-8");
+
+      expect(betrayalPlan).toContain("# Short story plan: 出轨复仇");
+      expect(thrillerPlan).toContain("# Short story plan: 悬疑惊悚");
+      expect(betrayalPlan).not.toBe(betrayalPlan2);
+      expect(thrillerPlan).not.toBe(thrillerPlan2);
+      expect(betrayalOpening.slice(0, 300)).not.toBe(betrayalOpening2.slice(0, 300));
+      expect(thrillerOpening.slice(0, 300)).not.toBe(thrillerOpening2.slice(0, 300));
+      expect(betrayalVariant.baseWorld.protagonist).toBeTruthy();
+      expect(betrayalVariant.derived.mainThreat).toBeTruthy();
+      expect(betrayalVariant.writingMode).toMatch(/^(logic|emotion|conflict|weird)$/);
+      expect(new Set([betrayalVariant.writingMode, betrayalVariant2.writingMode]).size).toBeGreaterThanOrEqual(2);
+      expect([betrayalVariant.hookMode, betrayalVariant2.hookMode]).toEqual(["normal", "strong"]);
+      expect(thrillerVariant.baseWorld.protagonist).toBeTruthy();
+      expect(thrillerVariant.derived.premise).toBeTruthy();
+      expect(thrillerVariant.writingMode).toMatch(/^(logic|emotion|conflict|weird)$/);
+      expect(new Set([thrillerVariant.writingMode, thrillerVariant2.writingMode]).size).toBeGreaterThanOrEqual(2);
+      expect([thrillerVariant.hookMode, thrillerVariant2.hookMode]).toEqual(["normal", "strong"]);
+      expect(betrayalVariant.protagonist).toBeUndefined();
+      expect(thrillerVariant.premise).toBeUndefined();
+      expect(betrayalScript.length).toBeGreaterThan(0);
+      expect(thrillerBook).toContain("第1章");
+      expect(await readdir(join(betrayalRunDir, "chapters"))).toHaveLength(8);
+      expect(await readdir(join(thrillerRunDir, "chapters"))).toHaveLength(8);
+    });
+
+    it("collects manual metrics for a short-story run", async () => {
+      run([
+        "short-story",
+        "batch",
+        "--themes",
+        "数据测试",
+        "--count",
+        "1",
+        "--target-words",
+        "12000",
+      ]);
+      const themeDir = join(projectDir, "my-novel", "short-stories", "数据测试");
+      const runName = (await readdir(themeDir)).find((name) => name.startsWith("run-"));
+
+      expect(runName).toBeTruthy();
+
+      const output = run([
+        "short-story",
+        "collect",
+        "--theme",
+        "数据测试",
+        "--run",
+        runName ?? "",
+      ], {
+        input: "1000\n120\n0.68\n88\n12\n",
+      });
+      const metrics = JSON.parse(await readFile(join(themeDir, runName ?? "", "metrics.json"), "utf-8"));
+
+      expect(output).toContain("Short story metrics collected: 数据测试");
+      expect(metrics.views).toBe(1000);
+      expect(metrics.clicks).toBe(120);
+      expect(metrics.CTR).toBe(0.12);
+      expect(metrics.completion).toBe(0.68);
+      expect(metrics.likes).toBe(88);
+      expect(metrics.follows).toBe(12);
+    });
+
+    it("ranks short-story runs by CTR, completion, and like rate", async () => {
+      const themeDir = join(projectDir, "my-novel", "short-stories", "排名测试");
+      const firstRun = join(themeDir, "run-20260101-000001-01");
+      const secondRun = join(themeDir, "run-20260101-000001-02");
+      await mkdir(firstRun, { recursive: true });
+      await mkdir(secondRun, { recursive: true });
+      await writeFile(join(firstRun, "metrics.json"), JSON.stringify({
+        views: 1000,
+        clicks: 100,
+        CTR: 0.1,
+        completion: 0.7,
+        likes: 50,
+        follows: 8,
+      }), "utf-8");
+      await writeFile(join(secondRun, "metrics.json"), JSON.stringify({
+        views: 1000,
+        clicks: 180,
+        CTR: 0.18,
+        completion: 0.8,
+        likes: 90,
+        follows: 13,
+      }), "utf-8");
+
+      const output = run(["short-story", "rank", "--theme", "排名测试", "--json"]);
+      const ranked = JSON.parse(output);
+
+      expect(ranked.runs).toHaveLength(2);
+      expect(ranked.runs[0].run).toBe("run-20260101-000001-02");
+      expect(ranked.runs[0].like_rate).toBe(0.09);
+      expect(ranked.runs[0].score).toBe(0.348);
+      expect(ranked.runs[1].run).toBe("run-20260101-000001-01");
+    });
+
+    it("writes the short-story plan to a markdown file and keeps console output", async () => {
+      const outPath = join(projectDir, "my-novel", "short-stories", "出轨复仇", "plan.md");
+      const output = run([
+        "short-story",
+        "plan",
+        "--theme",
+        "出轨复仇",
+        "--target-words",
+        "12000",
+        "--out",
+        outPath,
+      ]);
+      const markdown = await readFile(outPath, "utf-8");
+
+      expect(output).toContain("# Short story plan: 出轨复仇");
+      expect(output).toContain("[1] hook - 开局冲突");
+      expect(markdown).toContain("# Short story plan: 出轨复仇");
+      expect(markdown).toContain("## [1] hook - 开局冲突");
+      expect(markdown).toContain("林晚");
+      expect(markdown).toContain("顾沉");
+      expect(markdown).toContain("- conflict: 顾沉冲上台抢夺话筒");
+      expect(markdown).toContain("- endingHook: 林晚从手包里拿出亲子鉴定报告");
+    });
+
+    it("writes short-story markdown chapters from an existing plan", async () => {
+      const storyDir = join(projectDir, "my-novel", "short-stories", "出轨复仇");
+      const planPath = join(storyDir, "plan.md");
+      run([
+        "short-story",
+        "plan",
+        "--theme",
+        "出轨复仇",
+        "--target-words",
+        "12000",
+        "--out",
+        planPath,
+      ]);
+      const before = await readFile(planPath, "utf-8");
+      const output = run([
+        "short-story",
+        "write",
+        "--theme",
+        "出轨复仇",
+        "--target-words",
+        "12000",
+        "--json",
+      ]);
+      const result = JSON.parse(output);
+      const after = await readFile(planPath, "utf-8");
+      const firstChapter = await readFile(join(storyDir, "chapters", "001.md"), "utf-8");
+
+      expect(result.type).toBe("short_story");
+      expect(result.chapters).toHaveLength(8);
+      expect(result.chapters[0].wordCount).toBeGreaterThanOrEqual(1_200);
+      expect(result.chapters[0].wordCount).toBeLessThanOrEqual(1_800);
+      expect(after).toBe(before);
+      expect(firstChapter).toContain("# 第1章");
+      expect(firstChapter).toContain("林晚");
+      expect(firstChapter).toContain("顾沉");
+      expect(firstChapter).toContain("林晚从手包里拿出亲子鉴定报告");
+    });
+
+    it("audits an existing book directory", async () => {
+      const bookDir = join(projectDir, "books", "shorty");
+      await mkdir(join(bookDir, "chapters"), { recursive: true });
+      const now = new Date().toISOString();
+      await writeFile(join(bookDir, "book.json"), JSON.stringify({
+        schemaVersion: 2,
+        type: "short_story",
+        id: "shorty",
+        title: "Shorty",
+        platform: "tomato",
+        genre: "urban",
+        status: "completed",
+        targetChapters: 6,
+        chapterWordCount: 1500,
+        language: "zh",
+        createdAt: now,
+        updatedAt: now,
+      }), "utf-8");
+      for (let i = 1; i <= 6; i += 1) {
+        await writeFile(
+          join(bookDir, "chapters", `${String(i).padStart(4, "0")}_测试.md`),
+          "我".repeat(1_500),
+          "utf-8",
+        );
+      }
+
+      const output = run(["short-story", "audit", "shorty", "--json"]);
+      const report = JSON.parse(output);
+
+      expect(report.passed).toBe(true);
+      expect(report.totalWords).toBe(9_000);
+      expect(report.chapterCount).toBe(6);
+      await rm(bookDir, { recursive: true, force: true });
     });
   });
 
@@ -432,7 +892,7 @@ describe("CLI integration", () => {
 
       const json = JSON.parse(run(["status", "degraded-status", "--json"]));
       expect(json.books[0]?.degraded).toBe(1);
-    });
+    }, 15_000);
 
     it("shows a migration hint for legacy pre-v0.6 books", async () => {
       const bookDir = join(projectDir, "books", "legacy-status-hint");

@@ -22,8 +22,12 @@ export type FanficMode = z.infer<typeof FanficModeSchema>;
 export const WebnovelTemplateSchema = z.enum(["xuanhuan"]);
 export type WebnovelTemplate = z.infer<typeof WebnovelTemplateSchema>;
 
+export const BookTypeSchema = z.enum(["novel", "short_story"]);
+export type BookType = z.infer<typeof BookTypeSchema>;
+
 export const BookConfigSchema = z.object({
   schemaVersion: z.literal(2).optional(),
+  type: BookTypeSchema.optional(),
   id: z.string().min(1),
   title: z.string().min(1),
   platform: PlatformSchema,
