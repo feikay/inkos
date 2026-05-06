@@ -365,6 +365,38 @@ describe("ProjectConfigSchema", () => {
     expect(result.inputGovernanceMode).toBe("v2");
   });
 
+  it("accepts legacy string model overrides", () => {
+    const result = ProjectConfigSchema.parse({
+      ...validProject,
+      modelOverrides: {
+        writer: "webnovel-model",
+      },
+    });
+    expect(result.modelOverrides?.writer).toBe("webnovel-model");
+  });
+
+  it("accepts object model overrides with generation defaults", () => {
+    const result = ProjectConfigSchema.parse({
+      ...validProject,
+      modelOverrides: {
+        writer: {
+          provider: "deepseek",
+          model: "webnovel-model",
+          temperature: 0.6,
+          maxTokens: 12000,
+          stream: false,
+        },
+      },
+    });
+    expect(result.modelOverrides?.writer).toEqual({
+      provider: "deepseek",
+      model: "webnovel-model",
+      temperature: 0.6,
+      maxTokens: 12000,
+      stream: false,
+    });
+  });
+
   it("rejects wrong version", () => {
     expect(() =>
       ProjectConfigSchema.parse({ ...validProject, version: "1.0.0" }),

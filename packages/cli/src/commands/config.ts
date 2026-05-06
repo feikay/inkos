@@ -160,7 +160,23 @@ configCommand
     }
   });
 
-const KNOWN_AGENTS = ["writer", "auditor", "reviser", "architect", "radar", "chapter-analyzer"] as const;
+const KNOWN_AGENTS = [
+  "architect",
+  "planner",
+  "composer",
+  "writer",
+  "auditor",
+  "reviser",
+  "chapter-analyzer",
+  "state-validator",
+  "foundation-reviewer",
+  "length-normalizer",
+  "radar",
+  "fanfic-canon-importer",
+  "fanqie-quality",
+  "fanqie-polish",
+  "publish-ready",
+] as const;
 const ENV_VAR_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function validateApiKeyEnvName(value: string): string | undefined {
@@ -171,28 +187,45 @@ function validateApiKeyEnvName(value: string): string | undefined {
   return `--api-key-env expects an environment variable name like PACKY_API_KEY. "${value}" is not a valid env var name.`;
 }
 
+function parseOptionalNumber(value: string | undefined, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    logError(`${label} must be a number.`);
+    process.exit(1);
+  }
+  return parsed;
+}
+
 configCommand
   .command("set-model")
   .description("Set model override for a specific agent (with optional provider routing)")
-  .argument("<agent>", `Agent name (${KNOWN_AGENTS.join(", ")})`)
+  .argument("<agent>", `Agent/task name (known: ${KNOWN_AGENTS.join(", ")}; custom names are allowed)`)
   .argument("<model>", "Model name")
   .option("--base-url <url>", "API base URL (for different provider)")
-  .option("--provider <provider>", "Provider type (openai / anthropic / custom)")
+  .option("--provider <provider>", "Provider/service name (openai / anthropic / custom / deepseek / etc.)")
   .option("--api-key-env <envVar>", "Env variable name for API key (e.g., PACKYAPI_KEY)")
   .option("--stream", "Enable streaming (default)")
   .option("--no-stream", "Disable streaming")
-  .action(async (agent: string, model: string, opts: { baseUrl?: string; provider?: string; apiKeyEnv?: string; stream?: boolean }) => {
-    if (!KNOWN_AGENTS.includes(agent as typeof KNOWN_AGENTS[number])) {
-      logError(`Unknown agent "${agent}". Valid agents: ${KNOWN_AGENTS.join(", ")}`);
-      process.exit(1);
-    }
-
+  .option("--temperature <number>", "Default temperature for this agent override")
+  .option("--max-tokens <number>", "Default max tokens for this agent override")
+  .action(async (agent: string, model: string, opts: { baseUrl?: string; provider?: string; apiKeyEnv?: string; stream?: boolean; temperature?: string; maxTokens?: string }) => {
     if (opts.apiKeyEnv) {
       const validationError = validateApiKeyEnvName(opts.apiKeyEnv);
       if (validationError) {
         logError(validationError);
         process.exit(1);
       }
+    }
+    const temperature = parseOptionalNumber(opts.temperature, "--temperature");
+    if (temperature !== undefined && (temperature < 0 || temperature > 2)) {
+      logError("--temperature must be between 0 and 2.");
+      process.exit(1);
+    }
+    const maxTokens = parseOptionalNumber(opts.maxTokens, "--max-tokens");
+    if (maxTokens !== undefined && (!Number.isInteger(maxTokens) || maxTokens < 1)) {
+      logError("--max-tokens must be a positive integer.");
+      process.exit(1);
     }
 
     const root = findProjectRoot();
@@ -203,13 +236,15 @@ configCommand
       const config = JSON.parse(raw);
       const overrides = config.modelOverrides ?? {};
 
-      const hasProviderOpts = opts.baseUrl || opts.provider || opts.apiKeyEnv || opts.stream === false;
+      const hasProviderOpts = opts.baseUrl || opts.provider || opts.apiKeyEnv || opts.stream === false || temperature !== undefined || maxTokens !== undefined;
       if (hasProviderOpts) {
         const override: Record<string, unknown> = { model };
         if (opts.baseUrl) override.baseUrl = opts.baseUrl;
         if (opts.provider) override.provider = opts.provider;
         if (opts.apiKeyEnv) override.apiKeyEnv = opts.apiKeyEnv;
         if (opts.stream === false) override.stream = false;
+        if (temperature !== undefined) override.temperature = temperature;
+        if (maxTokens !== undefined) override.maxTokens = maxTokens;
         config.modelOverrides = { ...overrides, [agent]: override };
       } else {
         config.modelOverrides = { ...overrides, [agent]: model };
@@ -281,7 +316,10 @@ configCommand
           const o = value as Record<string, unknown>;
           const parts = [o.model as string];
           if (o.baseUrl) parts.push(`@ ${o.baseUrl}`);
+          if (o.provider) parts.push(`[${o.provider}]`);
           if (o.stream === false) parts.push("[no-stream]");
+          if (o.temperature !== undefined) parts.push(`temp=${o.temperature}`);
+          if (o.maxTokens !== undefined) parts.push(`maxTokens=${o.maxTokens}`);
           log(`  ${agent} → ${parts.join(" ")}`);
         }
       }

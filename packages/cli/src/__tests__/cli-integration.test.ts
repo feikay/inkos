@@ -745,6 +745,40 @@ describe("CLI integration", () => {
       const config = JSON.parse(raw);
       expect(config.modelOverrides).toBeUndefined();
     });
+
+    it("accepts newly exposed pipeline agents with legacy string overrides", async () => {
+      run(["config", "set-model", "planner", "planner-test-model"]);
+
+      const raw = await readFile(join(projectDir, "inkos.json"), "utf-8");
+      const config = JSON.parse(raw);
+      expect(config.modelOverrides.planner).toBe("planner-test-model");
+    });
+
+    it("stores object overrides with generation defaults", async () => {
+      run([
+        "config",
+        "set-model",
+        "state-validator",
+        "validator-test-model",
+        "--provider",
+        "deepseek",
+        "--temperature",
+        "0.1",
+        "--max-tokens",
+        "4096",
+        "--no-stream",
+      ]);
+
+      const raw = await readFile(join(projectDir, "inkos.json"), "utf-8");
+      const config = JSON.parse(raw);
+      expect(config.modelOverrides["state-validator"]).toEqual({
+        model: "validator-test-model",
+        provider: "deepseek",
+        stream: false,
+        temperature: 0.1,
+        maxTokens: 4096,
+      });
+    });
   });
 
   describe("inkos book list", () => {

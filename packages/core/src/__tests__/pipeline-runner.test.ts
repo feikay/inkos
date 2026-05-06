@@ -293,6 +293,122 @@ describe("PipelineRunner", () => {
     }
   });
 
+  it("keeps the base client when no model override is configured", () => {
+    const baseClient = {
+      provider: "openai",
+      apiFormat: "chat",
+      stream: true,
+      defaults: {
+        temperature: 0.7,
+        maxTokens: 4096,
+        thinkingBudget: 0,
+        maxTokensCap: null,
+      },
+    } as ConstructorParameters<typeof PipelineRunner>[0]["client"];
+    const runner = new PipelineRunner({
+      client: baseClient,
+      model: "base-model",
+      projectRoot: process.cwd(),
+    });
+
+    const resolveOverride = (
+      runner as unknown as {
+        resolveOverride: (agent: string) => { model: string; client: unknown };
+      }
+    ).resolveOverride.bind(runner);
+
+    expect(resolveOverride("planner")).toEqual({ model: "base-model", client: baseClient });
+  });
+
+  it("resolves legacy string overrides for pipeline agents", () => {
+    const baseClient = {
+      provider: "openai",
+      apiFormat: "chat",
+      stream: true,
+      defaults: {
+        temperature: 0.7,
+        maxTokens: 4096,
+        thinkingBudget: 0,
+        maxTokensCap: null,
+      },
+    } as ConstructorParameters<typeof PipelineRunner>[0]["client"];
+    const runner = new PipelineRunner({
+      client: baseClient,
+      model: "base-model",
+      projectRoot: process.cwd(),
+      modelOverrides: {
+        planner: "planner-model",
+        composer: "composer-model",
+        "state-validator": "validator-model",
+      },
+    });
+
+    const resolveOverride = (
+      runner as unknown as {
+        resolveOverride: (agent: string) => { model: string; client: unknown };
+      }
+    ).resolveOverride.bind(runner);
+
+    expect(resolveOverride("planner")).toEqual({ model: "planner-model", client: baseClient });
+    expect(resolveOverride("composer")).toEqual({ model: "composer-model", client: baseClient });
+    expect(resolveOverride("state-validator")).toEqual({ model: "validator-model", client: baseClient });
+  });
+
+  it("resolves object overrides with temperature and maxTokens for pipeline agents", () => {
+    const runner = new PipelineRunner({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: true,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0,
+          maxTokensCap: null,
+        },
+      } as ConstructorParameters<typeof PipelineRunner>[0]["client"],
+      model: "base-model",
+      projectRoot: process.cwd(),
+      defaultLLMConfig: {
+        provider: "custom",
+        service: "custom",
+        configSource: "env",
+        baseUrl: "https://base.example/v1",
+        apiKey: "base-key",
+        model: "base-model",
+        temperature: 0.7,
+        maxTokens: 4096,
+        thinkingBudget: 0,
+        apiFormat: "chat",
+        stream: true,
+      },
+      modelOverrides: {
+        planner: { model: "planner-model", temperature: 0.25, maxTokens: 12000 },
+        composer: { model: "composer-model", temperature: 0.3 },
+        "state-validator": { model: "validator-model", temperature: 0.1, stream: false },
+      },
+    });
+
+    const resolveOverride = (
+      runner as unknown as {
+        resolveOverride: (agent: string) => { model: string; client: ConstructorParameters<typeof PipelineRunner>[0]["client"] };
+      }
+    ).resolveOverride.bind(runner);
+
+    const planner = resolveOverride("planner");
+    const composer = resolveOverride("composer");
+    const validator = resolveOverride("state-validator");
+
+    expect(planner.model).toBe("planner-model");
+    expect(planner.client.defaults.temperature).toBe(0.25);
+    expect(planner.client.defaults.maxTokens).toBe(12000);
+    expect(composer.model).toBe("composer-model");
+    expect(composer.client.defaults.temperature).toBe(0.3);
+    expect(validator.model).toBe("validator-model");
+    expect(validator.client.defaults.temperature).toBe(0.1);
+    expect(validator.client.stream).toBe(false);
+  });
+
   it("initializes control documents during book creation", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-init-book-test-"));
     const bookId = "bootstrap-book";

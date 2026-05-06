@@ -1,5 +1,6 @@
 import type { LLMClient, OnStreamProgress } from "../llm/provider.js";
 import { chatCompletion, createLLMClient } from "../llm/provider.js";
+import { resolveServiceProviderFamily } from "../llm/service-presets.js";
 import type { Logger } from "../utils/logger.js";
 import type { BookConfig, FanficMode } from "../models/book.js";
 import type { ChapterMeta } from "../models/chapter.js";
@@ -368,23 +369,49 @@ export class PipelineRunner {
     if (typeof override === "string") {
       return { model: override, client: this.config.client };
     }
-    // Full override — needs its own client if baseUrl differs
-    if (!override.baseUrl) {
+
+    const needsDedicatedClient = Boolean(
+      override.baseUrl
+      || override.provider
+      || override.apiKeyEnv
+      || override.stream !== undefined
+      || override.temperature !== undefined
+      || override.maxTokens !== undefined,
+    );
+    if (!needsDedicatedClient) {
       return { model: override.model, client: this.config.client };
     }
+
     const base = this.config.defaultLLMConfig;
-    const provider = override.provider ?? base?.provider ?? "custom";
+    const overrideProvider = override.provider;
+    const providerIsService = overrideProvider !== undefined && !["openai", "anthropic", "custom"].includes(overrideProvider);
+    const service = providerIsService
+      ? overrideProvider
+      : base?.service ?? "custom";
+    const provider = (
+      overrideProvider === "openai"
+      || overrideProvider === "anthropic"
+      || overrideProvider === "custom"
+        ? overrideProvider
+        : resolveServiceProviderFamily(service) ?? base?.provider ?? "custom"
+    ) as "openai" | "anthropic" | "custom";
     const apiKeySource = override.apiKeyEnv
       ? `env:${override.apiKeyEnv}`
       : `base:${base?.apiKey ?? ""}`;
     const stream = override.stream ?? base?.stream ?? true;
     const apiFormat = base?.apiFormat ?? "chat";
+    const temperature = override.temperature ?? base?.temperature ?? 0.7;
+    const maxTokens = override.maxTokens ?? base?.maxTokens ?? 8192;
+    const baseUrl = override.baseUrl ?? (providerIsService ? "" : base?.baseUrl ?? "");
     const cacheKey = [
       provider,
-      override.baseUrl,
+      service,
+      baseUrl,
       apiKeySource,
       `stream:${stream}`,
       `format:${apiFormat}`,
+      `temperature:${temperature}`,
+      `maxTokens:${maxTokens}`,
     ].join("|");
     let client = this.agentClients.get(cacheKey);
     if (!client) {
@@ -393,13 +420,13 @@ export class PipelineRunner {
         : base?.apiKey ?? "";
       client = createLLMClient({
         provider,
-        service: base?.service ?? "custom",
+        service,
         configSource: base?.configSource ?? "env",
-        baseUrl: override.baseUrl,
+        baseUrl,
         apiKey,
         model: override.model,
-        temperature: base?.temperature ?? 0.7,
-        maxTokens: base?.maxTokens ?? 8192,
+        temperature,
+        maxTokens,
         thinkingBudget: base?.thinkingBudget ?? 0,
         apiFormat,
         stream,
