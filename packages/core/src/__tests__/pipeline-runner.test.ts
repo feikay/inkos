@@ -1277,6 +1277,106 @@ describe("PipelineRunner", () => {
     }
   });
 
+  it("skips state settlement when the writer returns a chapter below the whole-chapter minimum", async () => {
+    const { logger, warnings } = createCaptureLogger();
+    const { root, runner, state, bookId } = await createRunnerFixture({ logger });
+    const shortDraft = "短稿".repeat(200);
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
+      createWriterOutput({
+        chapterNumber: 1,
+        content: shortDraft,
+        wordCount: shortDraft.length,
+        postWriteErrors: [{
+          rule: "payoff-missing",
+          description: "本章 promised payoff 完全未发生：门被强行打开。",
+          suggestion: "补足 payoff",
+          severity: "error",
+        }],
+      }),
+    );
+    const auditChapter = vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(
+      createAuditResult({ passed: true }),
+    );
+
+    try {
+      const result = await runner.writeNextChapter(bookId);
+
+      expect(result.status).toBe("audit-failed");
+      expect(result.auditResult.issues[0]?.category).toBe("failed-write-under-min-length");
+      expect(auditChapter).not.toHaveBeenCalled();
+      await expect(state.loadChapterIndex(bookId)).resolves.toEqual([]);
+      expect(warnings.join("\n")).toContain("Chapter 0001 is under minimum length after rewrite. State update skipped.");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("skips state settlement when a promised payoff is still missing after review", async () => {
+    const { logger, warnings } = createCaptureLogger();
+    const { root, runner, state, bookId } = await createRunnerFixture({ logger });
+    const longDraft = "完整章节内容".repeat(260);
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
+      createWriterOutput({
+        chapterNumber: 1,
+        content: longDraft,
+        wordCount: longDraft.length,
+        postWriteErrors: [{
+          rule: "payoff-missing",
+          description: "本章 promised payoff 完全未发生：门被强行打开。",
+          suggestion: "补足 payoff",
+          severity: "error",
+        }],
+      }),
+    );
+    vi.spyOn(ReviserAgent.prototype, "reviseChapter").mockResolvedValue(
+      createReviseOutput({
+        revisedContent: longDraft,
+        wordCount: longDraft.length,
+      }),
+    );
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(
+      createAuditResult({ passed: true }),
+    );
+
+    try {
+      const result = await runner.writeNextChapter(bookId);
+
+      expect(result.status).toBe("audit-failed");
+      expect(result.auditResult.issues[0]?.category).toBe("failed-write-payoff-missing");
+      await expect(state.loadChapterIndex(bookId)).resolves.toEqual([]);
+      expect(warnings.join("\n")).toContain("payoff still missing");
+      expect(warnings.join("\n")).toContain("rejectedReason=unchanged-candidate");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps normal full-length chapters on the existing state settlement path", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const longDraft = "完整章节内容".repeat(260);
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
+      createWriterOutput({
+        chapterNumber: 1,
+        content: longDraft,
+        wordCount: longDraft.length,
+      }),
+    );
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(
+      createAuditResult({ passed: true }),
+    );
+
+    try {
+      const result = await runner.writeNextChapter(bookId);
+
+      expect(result.status).toBe("ready-for-review");
+      const index = await state.loadChapterIndex(bookId);
+      expect(index).toHaveLength(1);
+      expect(index[0]?.number).toBe(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("routes writeNextChapter through planner and composer in v2 mode", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture({
       inputGovernanceMode: "v2",

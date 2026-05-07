@@ -470,6 +470,13 @@ reviewCommand
             fixAttempt: attempt,
             maxFixAttempts,
           });
+          const formalCurrentFinalReport = markManualReview(initial.report, "", {
+            decisionSource: "current_body_check",
+            usedFile: relative(book.dir, initial.sourceFile),
+            bodySource: initial.bodySource,
+            fixAttempt: initial.report.fix_attempt ?? 0,
+            maxFixAttempts,
+          });
           await writeContinuityReportFiles(
             finalReport,
             join(reportDir, `${prefix}.final-report.json`),
@@ -549,42 +556,47 @@ reviewCommand
                 minChapterWords,
               });
               salvage = { ...salvage, finalReport: afterLightFix };
-              finalStatus = isContinuityPublishPass(afterLightFix.report) ? "PASS" : "DROP";
-              finalReport = finalStatus === "PASS"
-                ? makeContinuityDecisionReport({ ...afterLightFix.report, rewrite_strategy: "salvage_rewrite" }, {
-                    finalStatus: "PASS",
-                    decisionSource: "salvage",
-                    usedFile: relative(book.dir, lightFixed.fixedChapterPath),
-                    bodySource: "salvaged",
-                    fixAttempt: afterLightFix.report.fix_attempt,
-                    maxFixAttempts,
-                  })
-                : markDrop(afterLightFix.report, "salvage_rewrite plus one light_fix still failed to reach PASS.", {
-                    decisionSource: "salvage_failed",
-                    usedFile: relative(book.dir, lightFixed.fixedChapterPath),
-                    bodySource: "salvaged",
-                    fixAttempt: afterLightFix.report.fix_attempt,
-                    maxFixAttempts,
-                  });
-              await writeContinuityReportFiles(finalReport, afterLightFix.reportJsonPath, afterLightFix.reportMarkdownPath, chapter, afterLightFix.chapterTitle);
-              if (!opts.json) log(`final result: ${finalStatus}${finalStatus === "PASS" ? " (salvaged)" : ""}`);
+              if (isContinuityPublishPass(afterLightFix.report)) {
+                finalStatus = "PASS";
+                finalReport = makeContinuityDecisionReport({ ...afterLightFix.report, rewrite_strategy: "salvage_rewrite" }, {
+                  finalStatus: "PASS",
+                  decisionSource: "salvage",
+                  usedFile: relative(book.dir, lightFixed.fixedChapterPath),
+                  bodySource: "salvaged",
+                  fixAttempt: afterLightFix.report.fix_attempt,
+                  maxFixAttempts,
+                });
+                await writeContinuityReportFiles(finalReport, afterLightFix.reportJsonPath, afterLightFix.reportMarkdownPath, chapter, afterLightFix.chapterTitle);
+                if (!opts.json) log("final result: PASS (salvaged)");
+              } else {
+                finalStatus = "MANUAL_REVIEW";
+                finalReport = retainNonSalvageFinalAfterSalvageFailure(
+                  formalCurrentFinalReport,
+                  "auto-salvage plus light_fix did not produce a PASS candidate; retained the formal current-body continuity diagnosis.",
+                );
+                await writeContinuityReportFiles(
+                  finalReport,
+                  join(reportDir, `${prefix}.final-report.json`),
+                  join(reportDir, `${prefix}.final-report.md`),
+                  chapter,
+                  initial.chapterTitle,
+                );
+                if (!opts.json) log("final result: MANUAL_REVIEW (salvage rejected)");
+              }
             } else {
-              finalStatus = "DROP";
-              finalReport = markDrop(salvage.report?.report ?? finalReport, "salvage_rewrite failed below usable score.", {
-                decisionSource: "salvage_failed",
-                usedFile: relative(book.dir, salvage.salvageChapterPath),
-                bodySource: "salvaged",
-                fixAttempt: salvage.report?.report.fix_attempt ?? attempt,
-                maxFixAttempts,
-              });
+              finalStatus = "MANUAL_REVIEW";
+              finalReport = retainNonSalvageFinalAfterSalvageFailure(
+                formalCurrentFinalReport,
+                "auto-salvage failed below usable score; retained the formal current-body continuity diagnosis.",
+              );
               await writeContinuityReportFiles(
                 finalReport,
                 join(reportDir, `${prefix}.final-report.json`),
                 join(reportDir, `${prefix}.final-report.md`),
                 chapter,
-                salvage.report?.chapterTitle ?? current.chapterTitle,
+                initial.chapterTitle,
               );
-              if (!opts.json) log("final result: DROP");
+              if (!opts.json) log("final result: MANUAL_REVIEW (salvage rejected)");
             }
           } else if (!opts.json) {
             log("warning: auto-salvage skipped because LLM config is unavailable.");
@@ -693,6 +705,7 @@ reviewCommand
   .option("--quality-pass-threshold <number>", "Ideal quality score threshold", "85")
   .option("--quality-accept-threshold <number>", "Minimum accepted quality score threshold", "75")
   .option("--min-chapter-words <number>", "Minimum effective chapter word count", "1000")
+  .option("--accept-manual-continuity", "Allow explicit publish-ready processing for MANUAL_REVIEW continuity")
   .option("--json", "Output JSON")
   .action(async (opts) => {
     try {
@@ -729,6 +742,7 @@ reviewCommand
           qualityPassThreshold,
           qualityAcceptThreshold,
           minChapterWords,
+          acceptManualContinuity: Boolean(opts.acceptManualContinuity),
           json: Boolean(opts.json),
         });
         results.push(result);
@@ -1020,11 +1034,26 @@ interface PublishReadyResult {
   readonly quality_pass_threshold?: number;
   readonly quality_accept_threshold?: number;
   readonly accepted_reason?: string;
+  readonly manualContinuityAccepted?: boolean;
+  readonly manualContinuityAcceptedReason?: string;
+  readonly continuityStatusBeforeManualAccept?: string;
+  readonly continuityScoreBeforeManualAccept?: number;
+  readonly acceptedContinuityFile?: string;
+  readonly reviewedFinalExists?: boolean;
   readonly source_file?: string;
   readonly word_count?: number;
   readonly min_chapter_words: number;
   readonly report_json_path: string;
   readonly report_markdown_path: string;
+}
+
+interface PublishReadyManualContinuityAcceptance {
+  readonly manualContinuityAccepted: true;
+  readonly manualContinuityAcceptedReason: string;
+  readonly continuityStatusBeforeManualAccept: string;
+  readonly continuityScoreBeforeManualAccept?: number;
+  readonly acceptedContinuityFile: string;
+  readonly reviewedFinalExists: boolean;
 }
 
 interface QualityAutoFixResult {
@@ -1056,13 +1085,21 @@ async function runPublishReadyChapter(params: {
   readonly qualityPassThreshold: number;
   readonly qualityAcceptThreshold: number;
   readonly minChapterWords: number;
+  readonly acceptManualContinuity: boolean;
   readonly json: boolean;
 }): Promise<PublishReadyResult> {
   const sourceChain = new Set<string>();
   const original = await findChapterFile(params.bookDir, params.chapter);
   sourceChain.add(relative(params.bookDir, original.file));
+  const reviewedFinal = await findReviewedFinalChapterFile(params.bookDir, params.chapter);
+  const reviewedFinalExists = Boolean(reviewedFinal);
 
-  let candidateOverride: string | undefined = await resolvePublishReadyStartingCandidate(params.bookDir, params.chapter, original.file);
+  let candidateOverride: string | undefined = await resolvePublishReadyStartingCandidate(
+    params.bookDir,
+    params.chapter,
+    original.file,
+    params.acceptManualContinuity,
+  );
   if (candidateOverride === original.file) candidateOverride = undefined;
   const existingReady = await tryWriteAcceptedExistingCandidate(params, candidateOverride ?? original.file, sourceChain);
   if (existingReady) return existingReady;
@@ -1070,6 +1107,7 @@ async function runPublishReadyChapter(params: {
   let continuityReport: ContinuityReport | undefined;
   let quality: FanqieQualityCommandResult | undefined;
   let qualityStatus: "QUALITY_PASS" | "QUALITY_MANUAL_REVIEW" | undefined;
+  let manualContinuityAcceptance: PublishReadyManualContinuityAcceptance | undefined;
 
   for (let loop = 1; loop <= 2; loop += 1) {
     if (!params.json) {
@@ -1087,19 +1125,30 @@ async function runPublishReadyChapter(params: {
     }
 
     if (continuityReport.final_status !== "PASS") {
-      return writePublishReadyReport(params.bookDir, {
-        book: params.bookId,
-        chapter_index: params.chapter,
-        publish_status: "BLOCKED_BY_CONTINUITY",
-        final_candidate_file: "",
-        source_chain: [...sourceChain],
-        continuity: { final_status: continuityReport.final_status, score: continuityReport.score },
-        quality: {},
-        word_count: continuityReport.word_count,
-        min_chapter_words: params.minChapterWords,
-        report_json_path: "",
-        report_markdown_path: "",
+      manualContinuityAcceptance = makeManualContinuityAcceptance({
+        acceptManualContinuity: params.acceptManualContinuity,
+        report: continuityReport,
+        sourceFile: continuity.sourceFile,
+        bookDir: params.bookDir,
+        reviewedFinalExists,
       });
+      if (manualContinuityAcceptance) {
+        sourceChain.add(manualContinuityAcceptance.acceptedContinuityFile);
+      } else {
+        return writePublishReadyReport(params.bookDir, {
+          book: params.bookId,
+          chapter_index: params.chapter,
+          publish_status: "BLOCKED_BY_CONTINUITY",
+          final_candidate_file: "",
+          source_chain: [...sourceChain],
+          continuity: { final_status: continuityReport.final_status, score: continuityReport.score },
+          quality: {},
+          word_count: continuityReport.word_count,
+          min_chapter_words: params.minChapterWords,
+          report_json_path: "",
+          report_markdown_path: "",
+        });
+      }
     }
 
     if (!params.json) {
@@ -1129,7 +1178,7 @@ async function runPublishReadyChapter(params: {
       return writePublishReadyReport(params.bookDir, {
         book: params.bookId,
         chapter_index: params.chapter,
-        publish_status: isReadyToExport(continuityReport, immediateQualityDecision, finalFile, params.minChapterWords)
+        publish_status: isReadyToExport(continuityReport, immediateQualityDecision, finalFile, params.minChapterWords, Boolean(manualContinuityAcceptance))
           ? "READY_TO_EXPORT"
           : "MANUAL_REVIEW",
         final_candidate_file: relative(params.bookDir, finalFile),
@@ -1141,6 +1190,7 @@ async function runPublishReadyChapter(params: {
         quality_pass_threshold: params.qualityPassThreshold,
         quality_accept_threshold: params.qualityAcceptThreshold,
         accepted_reason: immediateQualityDecision === "QUALITY_ACCEPTED" ? "quality score is below ideal but accepted by threshold" : undefined,
+        ...manualContinuityAcceptance,
         source_file: relative(params.bookDir, continuity.sourceFile),
         word_count: continuityReport.word_count,
         min_chapter_words: params.minChapterWords,
@@ -1183,6 +1233,7 @@ async function runPublishReadyChapter(params: {
           source_chain: [...sourceChain],
           continuity: { final_status: continuityReport.final_status, score: continuityReport.score },
           quality: { final_quality_status: polished.finalQualityStatus, score: polished.finalScore },
+          ...manualContinuityAcceptance,
           word_count: continuityReport.word_count,
           min_chapter_words: params.minChapterWords,
           report_json_path: "",
@@ -1204,6 +1255,7 @@ async function runPublishReadyChapter(params: {
             quality_score: finalQualityScore,
             quality_pass_threshold: params.qualityPassThreshold,
             quality_accept_threshold: params.qualityAcceptThreshold,
+            ...manualContinuityAcceptance,
             report_json_path: "",
             report_markdown_path: "",
           });
@@ -1257,19 +1309,30 @@ async function runPublishReadyChapter(params: {
     }
 
     if (continuityReport.final_status !== "PASS") {
-      return writePublishReadyReport(params.bookDir, {
-        book: params.bookId,
-        chapter_index: params.chapter,
-        publish_status: "BLOCKED_BY_CONTINUITY",
-        final_candidate_file: "",
-        source_chain: [...sourceChain],
-        continuity: { final_status: continuityReport.final_status, score: continuityReport.score },
-        quality: { final_quality_status: qualityStatus, score: quality.report.quality_score },
-        word_count: continuityReport.word_count,
-        min_chapter_words: params.minChapterWords,
-        report_json_path: "",
-        report_markdown_path: "",
+      manualContinuityAcceptance = makeManualContinuityAcceptance({
+        acceptManualContinuity: params.acceptManualContinuity,
+        report: continuityReport,
+        sourceFile: continuity.sourceFile,
+        bookDir: params.bookDir,
+        reviewedFinalExists,
       });
+      if (manualContinuityAcceptance) {
+        sourceChain.add(manualContinuityAcceptance.acceptedContinuityFile);
+      } else {
+        return writePublishReadyReport(params.bookDir, {
+          book: params.bookId,
+          chapter_index: params.chapter,
+          publish_status: "BLOCKED_BY_CONTINUITY",
+          final_candidate_file: "",
+          source_chain: [...sourceChain],
+          continuity: { final_status: continuityReport.final_status, score: continuityReport.score },
+          quality: { final_quality_status: qualityStatus, score: quality.report.quality_score },
+          word_count: continuityReport.word_count,
+          min_chapter_words: params.minChapterWords,
+          report_json_path: "",
+          report_markdown_path: "",
+        });
+      }
     }
 
     if (continuity.sourceFile === qualityCandidate) {
@@ -1280,7 +1343,7 @@ async function runPublishReadyChapter(params: {
       return writePublishReadyReport(params.bookDir, {
         book: params.bookId,
         chapter_index: params.chapter,
-        publish_status: isReadyToExport(continuityReport, qualityDecision, finalFile, params.minChapterWords)
+        publish_status: isReadyToExport(continuityReport, qualityDecision, finalFile, params.minChapterWords, Boolean(manualContinuityAcceptance))
           ? "READY_TO_EXPORT"
           : qualityDecision === "NEED_REWRITE" ? "NEED_REWRITE" : "MANUAL_REVIEW",
         final_candidate_file: relative(params.bookDir, finalFile),
@@ -1292,6 +1355,7 @@ async function runPublishReadyChapter(params: {
         quality_pass_threshold: params.qualityPassThreshold,
         quality_accept_threshold: params.qualityAcceptThreshold,
         accepted_reason: qualityDecision === "QUALITY_ACCEPTED" ? "quality score is below ideal but accepted by threshold" : undefined,
+        ...manualContinuityAcceptance,
         source_file: relative(params.bookDir, continuity.sourceFile),
         word_count: continuityReport.word_count,
         min_chapter_words: params.minChapterWords,
@@ -1311,6 +1375,7 @@ async function runPublishReadyChapter(params: {
     source_chain: [...sourceChain],
     continuity: { final_status: continuityReport?.final_status, score: continuityReport?.score },
     quality: { final_quality_status: qualityStatus, score: quality?.report.quality_score },
+    ...manualContinuityAcceptance,
     word_count: continuityReport?.word_count,
     min_chapter_words: params.minChapterWords,
     report_json_path: "",
@@ -1328,6 +1393,7 @@ async function runContinuityPublishPass(
     readonly model: string;
     readonly maxFixAttempts: number;
     readonly minChapterWords: number;
+    readonly acceptManualContinuity?: boolean;
   },
   currentOverridePath: string | undefined,
   sourceChain: Set<string>,
@@ -1351,6 +1417,9 @@ async function runContinuityPublishPass(
     });
     sourceChain.add(relative(params.bookDir, current.sourceFile));
     if (isContinuityPublishPass(current.report)) break;
+    const currentFinalStatus = (current.report as { final_status?: string }).final_status;
+    if (currentFinalStatus === "DROP") break;
+    if (params.acceptManualContinuity && currentFinalStatus !== "DROP") break;
     if (attempt >= params.maxFixAttempts || current.report.rewrite_mode === "none") break;
     const nextAttempt = attempt + 1;
     const fixed = await fixContinuityChapter({
@@ -1372,7 +1441,9 @@ async function runContinuityPublishPass(
   if (!current) throw new Error(`Publish-ready continuity step failed for chapter ${params.chapter}`);
   const reportDir = join(params.bookDir, "reviews", "continuity");
   const prefix = chapterNumberPrefix(params.chapter);
-  const finalStatus = isContinuityPublishPass(current.report) ? "PASS" : "MANUAL_REVIEW";
+  const finalStatus = isContinuityPublishPass(current.report)
+    ? "PASS"
+    : (current.report as { final_status?: string }).final_status === "DROP" ? "DROP" : "MANUAL_REVIEW";
   const report = finalStatus === "PASS"
     ? makeContinuityDecisionReport(current.report, {
         finalStatus: "PASS",
@@ -1382,6 +1453,14 @@ async function runContinuityPublishPass(
         fixAttempt: attempt,
         maxFixAttempts: params.maxFixAttempts,
       })
+    : finalStatus === "DROP"
+      ? markDrop(current.report, "publish-ready continuity source is DROP.", {
+          decisionSource: currentOverridePath ? "publish_ready_recheck_failed" : "publish_ready_initial_failed",
+          usedFile: relative(params.bookDir, current.sourceFile),
+          bodySource: current.bodySource,
+          fixAttempt: attempt,
+          maxFixAttempts: params.maxFixAttempts,
+        })
     : markManualReview(current.report, "publish-ready continuity loop did not reach PASS.", {
         decisionSource: currentOverridePath ? "publish_ready_recheck_failed" : "publish_ready_initial_failed",
         usedFile: relative(params.bookDir, current.sourceFile),
@@ -1402,12 +1481,23 @@ async function runContinuityPublishPass(
 async function writeReviewedFinalChapter(bookDir: string, chapter: number, sourceFile: string): Promise<string> {
   const outDir = join(bookDir, "chapters-reviewed");
   const outFile = join(outDir, `${chapterNumberPrefix(chapter)}_final.md`);
+  if (resolve(sourceFile) === resolve(outFile)) return outFile;
   await mkdir(outDir, { recursive: true });
   await copyFile(sourceFile, outFile);
   return outFile;
 }
 
-async function resolvePublishReadyStartingCandidate(bookDir: string, chapter: number, originalFile: string): Promise<string> {
+export async function resolvePublishReadyStartingCandidate(
+  bookDir: string,
+  chapter: number,
+  originalFile: string,
+  preferReviewedFinal = false,
+): Promise<string> {
+  if (preferReviewedFinal) {
+    const reviewedFinal = await findReviewedFinalChapterFile(bookDir, chapter);
+    if (reviewedFinal) return reviewedFinal;
+  }
+
   const publishReady = await readPublishReadyReportIfExists(bookDir, chapter);
   if (publishReady?.publish_status === "READY_TO_EXPORT" && typeof publishReady.final_candidate_file === "string") {
     const reviewed = resolveUsedFilePath(bookDir, publishReady.final_candidate_file);
@@ -1427,6 +1517,38 @@ async function resolvePublishReadyStartingCandidate(bookDir: string, chapter: nu
   }
 
   return originalFile;
+}
+
+export async function findReviewedFinalChapterFile(bookDir: string, chapter: number): Promise<string | null> {
+  const reviewedFinal = join(bookDir, "chapters-reviewed", `${chapterNumberPrefix(chapter)}_final.md`);
+  return await fileExists(reviewedFinal) ? reviewedFinal : null;
+}
+
+export function canAcceptManualContinuity(
+  status: string | undefined,
+  acceptManualContinuity: boolean,
+): boolean {
+  return acceptManualContinuity && status === "MANUAL_REVIEW";
+}
+
+export function makeManualContinuityAcceptance(params: {
+  readonly acceptManualContinuity: boolean;
+  readonly report: ContinuityReport;
+  readonly sourceFile: string;
+  readonly bookDir: string;
+  readonly reviewedFinalExists: boolean;
+}): PublishReadyManualContinuityAcceptance | undefined {
+  if (!canAcceptManualContinuity(params.report.final_status, params.acceptManualContinuity)) {
+    return undefined;
+  }
+  return {
+    manualContinuityAccepted: true,
+    manualContinuityAcceptedReason: "MANUAL_REVIEW accepted by explicit CLI flag",
+    continuityStatusBeforeManualAccept: "MANUAL_REVIEW",
+    continuityScoreBeforeManualAccept: params.report.score,
+    acceptedContinuityFile: relative(params.bookDir, params.sourceFile),
+    reviewedFinalExists: params.reviewedFinalExists,
+  };
 }
 
 async function tryWriteAcceptedExistingCandidate(
@@ -1484,8 +1606,9 @@ function isReadyToExport(
   qualityDecision: string | undefined,
   finalFile: string,
   minChapterWords: number,
+  manualContinuityAccepted = false,
 ): boolean {
-  return continuity.final_status === "PASS"
+  return (continuity.final_status === "PASS" || manualContinuityAccepted && continuity.final_status === "MANUAL_REVIEW")
     && (qualityDecision === "QUALITY_PASS" || qualityDecision === "QUALITY_ACCEPTED")
     && (continuity.word_count ?? 0) >= minChapterWords
     && existsSync(finalFile);
@@ -1533,7 +1656,13 @@ function renderPublishReadyMarkdown(report: PublishReadyResult): string {
 - quality_score: ${report.quality_score ?? "n/a"}
 - quality_pass_threshold: ${report.quality_pass_threshold ?? "n/a"}
 - quality_accept_threshold: ${report.quality_accept_threshold ?? "n/a"}
-${report.accepted_reason ? `- accepted_reason: ${report.accepted_reason}\n` : ""}${report.source_file ? `- source_file: ${report.source_file}\n` : ""}- word_count: ${report.word_count ?? "n/a"}/${report.min_chapter_words}
+${report.accepted_reason ? `- accepted_reason: ${report.accepted_reason}\n` : ""}${report.manualContinuityAccepted ? `- manualContinuityAccepted: true
+- manualContinuityAcceptedReason: ${report.manualContinuityAcceptedReason}
+- continuityStatusBeforeManualAccept: ${report.continuityStatusBeforeManualAccept}
+- continuityScoreBeforeManualAccept: ${report.continuityScoreBeforeManualAccept ?? "n/a"}
+- acceptedContinuityFile: ${report.acceptedContinuityFile}
+- reviewedFinalExists: ${report.reviewedFinalExists ? "true" : "false"}
+` : ""}${report.source_file ? `- source_file: ${report.source_file}\n` : ""}- word_count: ${report.word_count ?? "n/a"}/${report.min_chapter_words}
 
 ## Source Chain
 
@@ -2784,6 +2913,55 @@ function markDrop(
   } as ContinuityReport;
 }
 
+export function retainNonSalvageFinalAfterSalvageFailure(
+  report: ContinuityReport,
+  reason: string,
+): ContinuityReport {
+  const normalized = removeStaleRepeatedInfoBlockers(report);
+  const note = reason.trim();
+  const summary = note && !normalized.summary.includes(note)
+    ? `${normalized.summary}\n\n${note}`
+    : normalized.summary;
+  return {
+    ...normalized,
+    summary,
+    final_status: normalized.final_status === "PASS" ? "PASS" : "MANUAL_REVIEW",
+  } as ContinuityReport;
+}
+
+export function removeStaleRepeatedInfoBlockers(report: ContinuityReport): ContinuityReport {
+  const repeated = (report.repeated_info_check as { repeated_paragraphs?: unknown[] } | undefined)?.repeated_paragraphs;
+  if (!Array.isArray(repeated) || repeated.length > 0) return report;
+
+  const staleRepeated = (value: unknown): boolean => {
+    if (!value || typeof value !== "object") return false;
+    const text = JSON.stringify(value);
+    return text.includes("重复解释")
+      || text.includes("真名剥离")
+      || text.includes("葬渊反噬");
+  };
+  const staleRepeatedText = (value: unknown): boolean => {
+    if (typeof value !== "string") return false;
+    return value.includes("重复解释")
+      || value.includes("真名剥离")
+      || value.includes("葬渊反噬");
+  };
+  const summary = report.summary
+    .replace(/开头仍有少量重复解释，?/g, "")
+    .replace(/当前章节.*?重复解释.*?。/g, "")
+    .trim();
+
+  return {
+    ...report,
+    summary: summary || report.summary,
+    issues: report.issues.filter((issue) => !staleRepeated(issue)),
+    fix_suggestions: report.fix_suggestions.filter((suggestion) => !staleRepeatedText(suggestion)),
+    publish_blockers: report.publish_blockers.filter((blocker) => !staleRepeated(blocker)),
+    rewrite_prompt: "",
+    manual_fix_prompt: "",
+  } as ContinuityReport;
+}
+
 async function writeContinuityReportFiles(
   report: ContinuityReport,
   jsonPath: string,
@@ -2974,6 +3152,7 @@ async function findChapterFile(bookDir: string, chapter: number): Promise<Contin
     const files = await listFiles(root).catch(() => []);
     const found = files
       .filter((file) => /\.(md|txt)$/i.test(file))
+      .filter((file) => !isContinuityBackupChapterFile(file))
       .filter((file) => getChapterNumberFromFile(file) === chapter)
       .sort()[0];
     if (found) {
@@ -2981,6 +3160,10 @@ async function findChapterFile(bookDir: string, chapter: number): Promise<Contin
     }
   }
   throw new Error(`Chapter ${chapter} not found under ${bookDir}/chapters`);
+}
+
+export function isContinuityBackupChapterFile(file: string): boolean {
+  return /\.before-continuity-fix\.(md|txt)$/i.test(file);
 }
 
 async function findFixedChapterFile(bookDir: string, chapter: number): Promise<string> {

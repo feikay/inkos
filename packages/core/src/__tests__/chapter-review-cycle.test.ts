@@ -97,6 +97,79 @@ describe("runChapterReviewCycle", () => {
     expect(result.revised).toBe(true);
   });
 
+  it("rejects a short spot-fix candidate instead of treating it as a whole chapter", async () => {
+    const originalDraft = "原稿".repeat(120);
+    const partialPatch = "PATCH: 只替换一小段";
+    const auditChapter = vi.fn()
+      .mockResolvedValue(createAuditResult());
+    const reviseChapter = vi.fn().mockResolvedValue({
+      revisedContent: partialPatch,
+      wordCount: partialPatch.length,
+      fixedIssues: [],
+      updatedState: "",
+      updatedLedger: "",
+      updatedHooks: "",
+      tokenUsage: ZERO_USAGE,
+    });
+    const normalizeDraftLengthIfNeeded = vi.fn(async (content: string) => ({
+      content,
+      wordCount: content.length,
+      applied: false,
+      tokenUsage: ZERO_USAGE,
+    }));
+    const rewriteDecisions: string[] = [];
+
+    const result = await runChapterReviewCycle({
+      book: { genre: "xuanhuan" },
+      bookDir: "/tmp/book",
+      chapterNumber: 1,
+      initialOutput: {
+        content: originalDraft,
+        wordCount: originalDraft.length,
+        postWriteErrors: [{
+          rule: "payoff-missing",
+          description: "missing promised payoff",
+          suggestion: "target the payoff beat",
+          severity: "error",
+        }],
+        postWriteWarnings: [],
+      },
+      lengthSpec: LENGTH_SPEC,
+      reducedControlInput: undefined,
+      initialUsage: ZERO_USAGE,
+      createReviser: () => ({ reviseChapter }),
+      auditor: { auditChapter },
+      normalizeDraftLengthIfNeeded,
+      assertChapterContentNotEmpty: () => undefined,
+      addUsage: (left, right) => ({
+        promptTokens: left.promptTokens + (right?.promptTokens ?? 0),
+        completionTokens: left.completionTokens + (right?.completionTokens ?? 0),
+        totalTokens: left.totalTokens + (right?.totalTokens ?? 0),
+      }),
+      restoreLostAuditIssues: (_previous, next) => next,
+      analyzeAITells: () => ({ issues: [] as AuditIssue[] }),
+      analyzeSensitiveWords: () => ({ found: [] as Array<{ severity: "warn" | "block" }>, issues: [] as AuditIssue[] }),
+      logWarn: () => undefined,
+      logStage: () => undefined,
+      minWholeChapterWords: 100,
+      logRewriteDecision: (message) => {
+        rewriteDecisions.push(message.en);
+      },
+    });
+
+    expect(result.finalContent).toBe(originalDraft);
+    expect(result.revised).toBe(false);
+    expect(auditChapter).toHaveBeenCalledWith(
+      "/tmp/book",
+      originalDraft,
+      1,
+      "xuanhuan",
+      undefined,
+    );
+    expect(rewriteDecisions.join("\n")).toContain("accepted=false");
+    expect(rewriteDecisions.join("\n")).toContain("rejectedReason=");
+  });
+
   it("drops auto-revision when it increases AI tells and re-audits the original draft", async () => {
     const failingAudit = createAuditResult({
       passed: false,

@@ -27,6 +27,69 @@ export interface ChapterReviewCycleResult {
   readonly normalizeApplied: boolean;
 }
 
+export interface RewriteCandidateDecision {
+  readonly beforeWords: number;
+  readonly afterWords: number;
+  readonly accepted: boolean;
+  readonly rejectedReason?: string;
+}
+
+export function evaluateRewriteCandidate(params: {
+  readonly beforeContent: string;
+  readonly afterContent: string;
+  readonly beforeWords: number;
+  readonly afterWords: number;
+  readonly minWholeChapterWords?: number;
+  readonly minRetainRatio?: number;
+}): RewriteCandidateDecision {
+  const minRetainRatio = params.minRetainRatio ?? 0.8;
+  if (params.afterContent.trim().length === 0) {
+    return {
+      beforeWords: params.beforeWords,
+      afterWords: params.afterWords,
+      accepted: false,
+      rejectedReason: "empty-candidate",
+    };
+  }
+  if (params.afterContent === params.beforeContent) {
+    return {
+      beforeWords: params.beforeWords,
+      afterWords: params.afterWords,
+      accepted: false,
+      rejectedReason: "unchanged-candidate",
+    };
+  }
+  const enforceWholeChapterGuard = typeof params.minWholeChapterWords === "number"
+    && params.minWholeChapterWords > 1
+    && params.beforeWords >= params.minWholeChapterWords;
+  if (enforceWholeChapterGuard && params.afterWords < Math.ceil(params.beforeWords * minRetainRatio)) {
+    return {
+      beforeWords: params.beforeWords,
+      afterWords: params.afterWords,
+      accepted: false,
+      rejectedReason: `below-${Math.round(minRetainRatio * 100)}%-of-original`,
+    };
+  }
+  if (
+    typeof params.minWholeChapterWords === "number"
+    && params.minWholeChapterWords > 1
+    && params.beforeWords >= params.minWholeChapterWords
+    && params.afterWords < params.minWholeChapterWords
+  ) {
+    return {
+      beforeWords: params.beforeWords,
+      afterWords: params.afterWords,
+      accepted: false,
+      rejectedReason: `below-minimum-length-${params.minWholeChapterWords}`,
+    };
+  }
+  return {
+    beforeWords: params.beforeWords,
+    afterWords: params.afterWords,
+    accepted: true,
+  };
+}
+
 export async function runChapterReviewCycle(params: {
   readonly book: Pick<{ genre: string }, "genre">;
   readonly bookDir: string;
@@ -84,6 +147,12 @@ export async function runChapterReviewCycle(params: {
   };
   readonly logWarn: (message: { zh: string; en: string }) => void;
   readonly logStage: (message: { zh: string; en: string }) => void;
+  readonly minWholeChapterWords?: number;
+  readonly logRewriteDecision?: (message: {
+    zh: string;
+    en: string;
+    decision: RewriteCandidateDecision;
+  }) => void;
 }): Promise<ChapterReviewCycleResult> {
   let totalUsage = params.initialUsage;
   let postReviseCount = 0;
@@ -91,6 +160,17 @@ export async function runChapterReviewCycle(params: {
   let finalContent = params.initialOutput.content;
   let finalWordCount = params.initialOutput.wordCount;
   let revised = false;
+
+  const logRewriteDecision = (
+    stage: string,
+    decision: RewriteCandidateDecision,
+  ) => {
+    params.logRewriteDecision?.({
+      zh: `rewrite decision [${stage}]: beforeWords=${decision.beforeWords}, afterWords=${decision.afterWords}, accepted=${decision.accepted}, rejectedReason=${decision.rejectedReason ?? "none"}`,
+      en: `rewrite decision [${stage}]: beforeWords=${decision.beforeWords}, afterWords=${decision.afterWords}, accepted=${decision.accepted}, rejectedReason=${decision.rejectedReason ?? "none"}`,
+      decision,
+    });
+  };
 
   const cadenceSpotFixWarnings = params.initialOutput.postWriteWarnings
     .filter((warning) =>
@@ -131,7 +211,15 @@ export async function runChapterReviewCycle(params: {
       },
     );
     totalUsage = params.addUsage(totalUsage, fixResult.tokenUsage);
-    if (fixResult.revisedContent.length > 0) {
+    const decision = evaluateRewriteCandidate({
+      beforeContent: finalContent,
+      afterContent: fixResult.revisedContent,
+      beforeWords: finalWordCount,
+      afterWords: fixResult.wordCount,
+      minWholeChapterWords: params.minWholeChapterWords,
+    });
+    logRewriteDecision("pre-audit-spot-fix", decision);
+    if (decision.accepted) {
       finalContent = fixResult.revisedContent;
       finalWordCount = fixResult.wordCount;
       revised = true;
@@ -198,7 +286,16 @@ export async function runChapterReviewCycle(params: {
       );
       totalUsage = params.addUsage(totalUsage, reviseOutput.tokenUsage);
 
-      if (reviseOutput.revisedContent.length > 0) {
+      const reviseWordCount = reviseOutput.wordCount;
+      const reviseDecision = evaluateRewriteCandidate({
+        beforeContent: finalContent,
+        afterContent: reviseOutput.revisedContent,
+        beforeWords: finalWordCount,
+        afterWords: reviseWordCount,
+        minWholeChapterWords: params.minWholeChapterWords,
+      });
+      logRewriteDecision("critical-spot-fix", reviseDecision);
+      if (reviseDecision.accepted) {
         const normalizedRevision = await params.normalizeDraftLengthIfNeeded(reviseOutput.revisedContent);
         totalUsage = params.addUsage(totalUsage, normalizedRevision.tokenUsage);
         postReviseCount = normalizedRevision.wordCount;

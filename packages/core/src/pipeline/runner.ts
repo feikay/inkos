@@ -235,6 +235,94 @@ export class PipelineRunner {
     this.config.logger?.warn(this.localize(language, message));
   }
 
+  private minimumWholeChapterWords(lengthSpec: LengthSpec): number {
+    if (lengthSpec.target < 1000) {
+      return 1;
+    }
+    return Math.max(1, Math.min(1000, lengthSpec.hardMin));
+  }
+
+  private buildFailedWriteResult(params: {
+    readonly chapterNumber: number;
+    readonly title: string;
+    readonly wordCount: number;
+    readonly issue: AuditIssue;
+    readonly revised: boolean;
+    readonly tokenUsage: TokenUsageSummary;
+    readonly lengthSpec: LengthSpec;
+    readonly writerCount: number;
+    readonly postWriterNormalizeCount?: number;
+    readonly postReviseCount?: number;
+    readonly normalizeApplied?: boolean;
+  }): ChapterPipelineResult {
+    const lengthWarnings = this.buildLengthWarnings(
+      params.chapterNumber,
+      params.wordCount,
+      params.lengthSpec,
+    );
+    return {
+      chapterNumber: params.chapterNumber,
+      title: params.title,
+      wordCount: params.wordCount,
+      revised: params.revised,
+      status: "audit-failed",
+      auditResult: {
+        passed: false,
+        issues: [params.issue],
+        summary: params.issue.description,
+      },
+      lengthWarnings,
+      lengthTelemetry: this.buildLengthTelemetry({
+        lengthSpec: params.lengthSpec,
+        writerCount: params.writerCount,
+        postWriterNormalizeCount: params.postWriterNormalizeCount ?? params.writerCount,
+        postReviseCount: params.postReviseCount ?? 0,
+        finalCount: params.wordCount,
+        normalizeApplied: params.normalizeApplied ?? false,
+        lengthWarning: lengthWarnings.length > 0,
+      }),
+      tokenUsage: params.tokenUsage,
+    };
+  }
+
+  private buildStateSettlementBlocker(params: {
+    readonly chapterNumber: number;
+    readonly wordCount: number;
+    readonly minWholeChapterWords: number;
+    readonly postWriteErrors?: WriteChapterOutput["postWriteErrors"];
+    readonly enforceLength?: boolean;
+    readonly language: LengthLanguage;
+  }): AuditIssue | null {
+    if (params.enforceLength && params.wordCount < params.minWholeChapterWords) {
+      this.logWarn(params.language, {
+        zh: `Chapter ${String(params.chapterNumber).padStart(4, "0")} is under minimum length after rewrite. State update skipped.`,
+        en: `Chapter ${String(params.chapterNumber).padStart(4, "0")} is under minimum length after rewrite. State update skipped.`,
+      });
+      return {
+        severity: "critical",
+        category: "failed-write-under-min-length",
+        description: `Chapter ${String(params.chapterNumber).padStart(4, "0")} has only ${params.wordCount} effective words/chars after rewrite; state update skipped.`,
+        suggestion: "Regenerate or manually repair the chapter before running state settlement.",
+      };
+    }
+
+    const payoffError = params.postWriteErrors?.find((violation) => violation.rule === "payoff-missing");
+    if (payoffError) {
+      this.logWarn(params.language, {
+        zh: `Chapter ${String(params.chapterNumber).padStart(4, "0")} payoff still missing: ${payoffError.description}. State update skipped.`,
+        en: `Chapter ${String(params.chapterNumber).padStart(4, "0")} payoff still missing: ${payoffError.description}. State update skipped.`,
+      });
+      return {
+        severity: "critical",
+        category: "failed-write-payoff-missing",
+        description: `Chapter ${String(params.chapterNumber).padStart(4, "0")} payoff still missing: ${payoffError.description}. State update skipped.`,
+        suggestion: payoffError.suggestion || "Apply a targeted payoff patch or mark for manual review before state settlement.",
+      };
+    }
+
+    return null;
+  }
+
   private async tryGenerateStyleGuide(
     bookId: string,
     referenceText: string,
@@ -1249,9 +1337,31 @@ export class PipelineRunner {
       ...(temperatureOverride ? { temperatureOverride } : {}),
     });
     const writerCount = countChapterLength(output.content, lengthSpec.countingMode);
+    const minWholeChapterWords = this.minimumWholeChapterWords(lengthSpec);
 
     // Token usage accumulator
     let totalUsage: TokenUsageSummary = output.tokenUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    const initialLengthBlocker = this.buildStateSettlementBlocker({
+      chapterNumber,
+      wordCount: writerCount,
+      minWholeChapterWords,
+      postWriteErrors: [],
+      enforceLength: writerCount >= 100 && (output.postWriteErrors.length > 0 || output.postWriteWarnings.length > 0),
+      language: pipelineLang,
+    });
+    if (initialLengthBlocker) {
+      return this.buildFailedWriteResult({
+        chapterNumber,
+        title: output.title,
+        wordCount: writerCount,
+        issue: initialLengthBlocker,
+        revised: false,
+        tokenUsage: totalUsage,
+        lengthSpec,
+        writerCount,
+      });
+    }
+
     const auditor = new ContinuityAuditor(this.agentCtxFor("auditor", bookId));
     const reviewResult = await runChapterReviewCycle({
       book: { genre: book.genre },
@@ -1278,6 +1388,11 @@ export class PipelineRunner {
       analyzeSensitiveWords,
       logWarn: (message) => this.logWarn(pipelineLang, message),
       logStage: (message) => this.logStage(stageLanguage, message),
+      minWholeChapterWords,
+      logRewriteDecision: (message) => {
+        const log = message.decision.accepted ? this.logInfo.bind(this) : this.logWarn.bind(this);
+        log(pipelineLang, { zh: message.zh, en: message.en });
+      },
     });
     totalUsage = reviewResult.totalUsage;
     let finalContent = reviewResult.finalContent;
@@ -1286,6 +1401,29 @@ export class PipelineRunner {
     let auditResult = reviewResult.auditResult;
     const postReviseCount = reviewResult.postReviseCount;
     const normalizeApplied = reviewResult.normalizeApplied;
+    const settlementBlocker = this.buildStateSettlementBlocker({
+      chapterNumber,
+      wordCount: finalWordCount,
+      minWholeChapterWords,
+      postWriteErrors: output.postWriteErrors,
+      enforceLength: finalWordCount >= 100 && (output.postWriteErrors.length > 0 || output.postWriteWarnings.length > 0),
+      language: pipelineLang,
+    });
+    if (settlementBlocker) {
+      return this.buildFailedWriteResult({
+        chapterNumber,
+        title: output.title,
+        wordCount: finalWordCount,
+        issue: settlementBlocker,
+        revised,
+        tokenUsage: totalUsage,
+        lengthSpec,
+        writerCount,
+        postWriterNormalizeCount: reviewResult.preAuditNormalizedWordCount,
+        postReviseCount,
+        normalizeApplied,
+      });
+    }
 
     // 4. Save the final chapter and truth files from a single persistence source
     this.logStage(stageLanguage, { zh: "落盘最终章节", en: "persisting final chapter" });

@@ -5392,7 +5392,7 @@ describe("WriterAgent", () => {
     expect(block).toContain("禁止直接写“他获得了……”或“信息出现在脑海”。");
   });
 
-  it("forces a standard moment anchor after two failed payoff rewrites", async () => {
+  it("stops full payoff rewrites after two failed attempts", async () => {
     const agent = new WriterAgent({
       client: {
         provider: "openai",
@@ -5492,14 +5492,9 @@ describe("WriterAgent", () => {
         onUsage: () => {},
       });
 
-      expect(chatSpy).toHaveBeenCalledTimes(3);
-      expect((chatSpy.mock.calls[2]?.[0] as Array<{ content: string }>)[0]?.content ?? "").toContain("FORCED MOMENT ANCHOR MODE");
-      expect((chatSpy.mock.calls[2]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("Forced Moment Anchor 已激活");
-      expect((chatSpy.mock.calls[2]?.[0] as Array<{ content: string }>)[0]?.content ?? "").toContain("那一刻，他看懂了这份契约。");
-      expect(rewritten.content).toContain("那一刻，他看懂了这份契约。");
-      expect(rewritten.content).toContain("隐去的那一层意思，终于在这一句里锁死成了真相。");
-      expect(rewritten.content).toContain("代价也随着这道认知一起压下来");
-      expect(rewritten.preWriteCheck).toContain("forced moment anchor inserted");
+      expect(chatSpy).toHaveBeenCalledTimes(2);
+      expect(rewritten.preWriteCheck).toContain("rewrite 2");
+      expect(rewritten.content).not.toContain("那一刻，他看懂了这份契约。");
     } finally {
       chatSpy.mockRestore();
     }

@@ -21,12 +21,20 @@ node ../packages/cli/dist/index.js review fanqie-polish --book 葬渊魔经 --fr
 # 综合输出（单章） 包含 continuity-auto -> fanqie-quality -> fanqie-polish -> continuity-auto
 node ../packages/cli/dist/index.js review publish-ready --book 葬渊魔经 --chapter 84
 # 综合输出（批量） 包含 continuity-auto -> fanqie-quality -> fanqie-polish -> continuity-auto
-node ../packages/cli/dist/index.js review publish-ready --book 葬渊魔经 --from 2 --to 200
+node ../packages/cli/dist/index.js review publish-ready --book 葬渊魔经 \
+  --from 2 --to 200 \
+  --max-fix-attempts 2 \
+  --max-polish-attempts 1 \
+  --max-quality-fix-attempts 1 \
+  --quality-pass-threshold 85 \
+  --quality-accept-threshold 75 \
+  --quality-fix-threshold 75 \
+  --min-chapter-words 1000
 
 cd ..
 
 # 导出番茄
-node scripts/fanqie/export-fanqie.mjs 葬渊魔经 --incremental --title "气血为0，我却能撬动规则"
+node scripts/fanqie/export-fanqie.mjs 葬渊魔经 --incremental --use-reviewed --title "气血为0，我却能撬动规则"
 
 # 6段节奏修复（6段检查Hook / Pressure / Attempt / Twist / Payoff / Pull）
 node scripts/fanqie/repair-fanqie.mjs 葬渊魔经 --apply
@@ -35,7 +43,7 @@ cd my-novel
 
 # 6段修复后再查连续性 --max-fix-attempts不带时默认2 
 # --max-fix-attempts 0 时强制自动重写salvage
-node ../packages/cli/dist/index.js review continuity-auto --book 葬渊魔经 --from 2 --to 200 --max-fix-attempts 2
+node ../packages/cli/dist/index.js review continuity-auto --book 葬渊魔经 --from 2 --to 200 --max-fix-attempts 2 
 
 cd ..
 

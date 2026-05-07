@@ -151,6 +151,58 @@ export class WriterAgent extends BaseAgent {
     this.ctx.logger?.warn(this.localize(language, messages));
   }
 
+  private minimumWholeChapterWords(lengthSpec: LengthSpec): number {
+    if (lengthSpec.target < 1000) {
+      return 1;
+    }
+    return Math.max(1, Math.min(1000, lengthSpec.hardMin));
+  }
+
+  private acceptWholeChapterRewrite(params: {
+    readonly language: "zh" | "en";
+    readonly chapterNumber: number;
+    readonly stage: string;
+    readonly beforeContent: string;
+    readonly afterContent: string;
+    readonly countingMode: LengthSpec["countingMode"];
+    readonly minWholeChapterWords?: number;
+  }): {
+    readonly accepted: boolean;
+    readonly beforeWords: number;
+    readonly afterWords: number;
+    readonly rejectedReason?: string;
+  } {
+    const beforeWords = countChapterLength(params.beforeContent, params.countingMode);
+    const afterWords = countChapterLength(params.afterContent, params.countingMode);
+    let rejectedReason: string | undefined;
+    const enforceWholeChapterGuard = typeof params.minWholeChapterWords === "number"
+      && params.minWholeChapterWords > 1
+      && beforeWords >= params.minWholeChapterWords;
+    if (params.afterContent.trim().length === 0) {
+      rejectedReason = "empty-candidate";
+    } else if (enforceWholeChapterGuard && afterWords < Math.ceil(beforeWords * 0.8)) {
+      rejectedReason = "below-80%-of-original";
+    } else if (
+      typeof params.minWholeChapterWords === "number"
+      && params.minWholeChapterWords > 1
+      && beforeWords >= params.minWholeChapterWords
+      && afterWords < params.minWholeChapterWords
+    ) {
+      rejectedReason = `below-minimum-length-${params.minWholeChapterWords}`;
+    }
+    const accepted = !rejectedReason;
+    const message = {
+      zh: `rewrite decision [${params.stage}]: beforeWords=${beforeWords}, afterWords=${afterWords}, accepted=${accepted}, rejectedReason=${rejectedReason ?? "none"}`,
+      en: `rewrite decision [${params.stage}]: beforeWords=${beforeWords}, afterWords=${afterWords}, accepted=${accepted}, rejectedReason=${rejectedReason ?? "none"}`,
+    };
+    if (accepted) {
+      this.logInfo(params.language, message);
+    } else {
+      this.logWarn(params.language, message);
+    }
+    return { accepted, beforeWords, afterWords, rejectedReason };
+  }
+
   async writeChapter(input: WriteChapterInput): Promise<WriteChapterOutput> {
     const { book, bookDir, chapterNumber } = input;
 
@@ -401,6 +453,7 @@ export class WriterAgent extends BaseAgent {
       maxTokens: creativeMaxTokens,
       titleCandidates,
       countingMode: resolvedLengthSpec.countingMode,
+      minWholeChapterWords: this.minimumWholeChapterWords(resolvedLengthSpec),
       onUsage: (usage) => {
         creativeUsage = {
           promptTokens: creativeUsage.promptTokens + usage.promptTokens,
@@ -418,6 +471,7 @@ export class WriterAgent extends BaseAgent {
       maxTokens: creativeMaxTokens,
       titleCandidates,
       countingMode: resolvedLengthSpec.countingMode,
+      minWholeChapterWords: this.minimumWholeChapterWords(resolvedLengthSpec),
       onUsage: (usage) => {
         creativeUsage = {
           promptTokens: creativeUsage.promptTokens + usage.promptTokens,
@@ -450,11 +504,20 @@ export class WriterAgent extends BaseAgent {
         completionTokens: creativeUsage.completionTokens + rewrite.usage.completionTokens,
         totalTokens: creativeUsage.totalTokens + rewrite.usage.totalTokens,
       };
-      if (rewrite.content.trim().length > 0) {
+      const rewriteDecision = this.acceptWholeChapterRewrite({
+        language: resolvedLanguage,
+        chapterNumber,
+        stage: "style-guard",
+        beforeContent: creative.content,
+        afterContent: rewrite.content,
+        countingMode: resolvedLengthSpec.countingMode,
+        minWholeChapterWords: this.minimumWholeChapterWords(resolvedLengthSpec),
+      });
+      if (rewriteDecision.accepted) {
         creative = {
           ...creative,
           content: rewrite.content,
-          wordCount: countChapterLength(rewrite.content, resolvedLengthSpec.countingMode),
+          wordCount: rewriteDecision.afterWords,
         };
         creative = this.applyLockedScene1ToCreative(creative, lockedScene1, resolvedLengthSpec.countingMode);
       }
@@ -474,11 +537,20 @@ export class WriterAgent extends BaseAgent {
           completionTokens: creativeUsage.completionTokens + secondRewrite.usage.completionTokens,
           totalTokens: creativeUsage.totalTokens + secondRewrite.usage.totalTokens,
         };
-        if (secondRewrite.content.trim().length > 0) {
+        const secondRewriteDecision = this.acceptWholeChapterRewrite({
+          language: resolvedLanguage,
+          chapterNumber,
+          stage: "consistency-guard",
+          beforeContent: creative.content,
+          afterContent: secondRewrite.content,
+          countingMode: resolvedLengthSpec.countingMode,
+          minWholeChapterWords: this.minimumWholeChapterWords(resolvedLengthSpec),
+        });
+        if (secondRewriteDecision.accepted) {
           creative = {
             ...creative,
             content: secondRewrite.content,
-            wordCount: countChapterLength(secondRewrite.content, resolvedLengthSpec.countingMode),
+            wordCount: secondRewriteDecision.afterWords,
           };
           creative = this.applyLockedScene1ToCreative(creative, lockedScene1, resolvedLengthSpec.countingMode);
         }
@@ -2033,6 +2105,7 @@ ${lengthRequirementBlock}
     maxTokens: number;
     titleCandidates: ReadonlyArray<{ title: string }>;
     countingMode: LengthSpec["countingMode"];
+    minWholeChapterWords?: number;
     onUsage: (usage: TokenUsage) => void;
   }): Promise<{
     title: string;
@@ -2076,7 +2149,20 @@ ${lengthRequirementBlock}
         { maxTokens: params.maxTokens, temperature: 0.45 },
       );
       params.onUsage(response.usage);
-      currentCreative = parseCreativeOutput(params.chapterNumber, response.content, params.countingMode);
+      const candidate = parseCreativeOutput(params.chapterNumber, response.content, params.countingMode);
+      const decision = this.acceptWholeChapterRewrite({
+        language: params.language,
+        chapterNumber: params.chapterNumber,
+        stage: `ending-type-attempt-${attempt}`,
+        beforeContent: currentCreative.content,
+        afterContent: candidate.content,
+        countingMode: params.countingMode,
+        minWholeChapterWords: params.minWholeChapterWords,
+      });
+      if (!decision.accepted) {
+        break;
+      }
+      currentCreative = candidate;
       check = evaluateEndingTypeCompliance(currentCreative.content, params.chapterIntent) ?? check;
     }
 
@@ -2660,6 +2746,7 @@ ${lengthRequirementBlock}
     maxTokens: number;
     titleCandidates: ReadonlyArray<{ title: string }>;
     countingMode: LengthSpec["countingMode"];
+    minWholeChapterWords?: number;
     onUsage: (usage: TokenUsage) => void;
   }): Promise<{
     title: string;
@@ -2686,10 +2773,10 @@ ${lengthRequirementBlock}
 
     for (
       let attempt = 1;
-      attempt <= 3 && (!checks.payoffCheck.matched || (impactCheck ? !impactCheck.matched : false));
+      attempt <= 2 && (!checks.payoffCheck.matched || (impactCheck ? !impactCheck.matched : false));
       attempt += 1
     ) {
-      const forceMomentAnchor = attempt >= 3;
+      const forceMomentAnchor = false;
       this.logWarn(params.language, {
         zh: `Writer PAYOFF MODE：第${params.chapterNumber}章 rewrite attempt ${attempt}，payoff ${checks.payoffCheck.matched ? "冲击层缺失" : "尚未真正兑现"}`,
         en: `Writer PAYOFF MODE: chapter ${params.chapterNumber} rewrite attempt ${attempt}, payoff ${checks.payoffCheck.matched ? "impact layers missing" : "still not materialized"}`,
@@ -2718,10 +2805,23 @@ ${lengthRequirementBlock}
         { maxTokens: params.maxTokens, temperature: 0.5 },
       );
       params.onUsage(response.usage);
-      currentCreative = parseCreativeOutput(params.chapterNumber, response.content, params.countingMode);
+      let candidate = parseCreativeOutput(params.chapterNumber, response.content, params.countingMode);
       if (forceMomentAnchor) {
-        currentCreative = this.applyForcedMomentAnchor(currentCreative, chapterGoal, params.language, params.countingMode);
+        candidate = this.applyForcedMomentAnchor(candidate, chapterGoal, params.language, params.countingMode);
       }
+      const decision = this.acceptWholeChapterRewrite({
+        language: params.language,
+        chapterNumber: params.chapterNumber,
+        stage: `payoff-rewrite-attempt-${attempt}`,
+        beforeContent: currentCreative.content,
+        afterContent: candidate.content,
+        countingMode: params.countingMode,
+        minWholeChapterWords: params.minWholeChapterWords,
+      });
+      if (!decision.accepted) {
+        break;
+      }
+      currentCreative = candidate;
       checks = evaluateChapterGoalDiscipline(currentCreative.content, chapterGoal);
       impactCheck = evaluatePayoffImpact(currentCreative.content, chapterGoal);
     }
@@ -3248,6 +3348,7 @@ ${lengthRequirementBlock}
     maxTokens: number;
     titleCandidates: ReadonlyArray<{ title: string }>;
     countingMode: LengthSpec["countingMode"];
+    minWholeChapterWords?: number;
     onUsage: (usage: TokenUsage) => void;
   }): Promise<{
     title: string;
@@ -3316,7 +3417,20 @@ ${lengthRequirementBlock}
       );
       params.onUsage(rewriteResponse.usage);
 
-      currentCreative = parseCreativeOutput(chapterNumber, rewriteResponse.content, countingMode);
+      const candidate = parseCreativeOutput(chapterNumber, rewriteResponse.content, countingMode);
+      const decision = this.acceptWholeChapterRewrite({
+        language,
+        chapterNumber,
+        stage: `mood-rewrite-attempt-${attempt}`,
+        beforeContent: currentCreative.content,
+        afterContent: candidate.content,
+        countingMode,
+        minWholeChapterWords: params.minWholeChapterWords,
+      });
+      if (!decision.accepted) {
+        break;
+      }
+      currentCreative = candidate;
       structureCheck = this.evaluateBreathSceneStructure(currentCreative.content, moodDirective);
       hookPhaseCheck = this.evaluateHookExecutionPhaseInBreathScenes(currentCreative.content, params.hookEmergenceDirective);
       moodCheck = evaluateMoodCadenceCompliance(currentCreative.content, chapterIntent);
