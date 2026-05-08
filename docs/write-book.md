@@ -29,6 +29,7 @@ node ../packages/cli/dist/index.js review publish-ready --book 葬渊魔经 \
   --quality-pass-threshold 85 \
   --quality-accept-threshold 75 \
   --quality-fix-threshold 75 \
+  --accept-manual-continuity \ # 如果接受人工
   --min-chapter-words 1000
 
 cd ..

@@ -137,6 +137,14 @@ describe("BookConfigSchema", () => {
     const result = BookConfigSchema.parse({ ...validBook, type: "short_story" });
     expect(result.type).toBe("short_story");
   });
+
+  it("keeps optional writing rules for generation governance", () => {
+    const result = BookConfigSchema.parse({
+      ...validBook,
+      writingRules: { numericExpressionMode: "immersive" },
+    });
+    expect(result.writingRules?.numericExpressionMode).toBe("immersive");
+  });
 });
 
 describe("PlatformSchema", () => {

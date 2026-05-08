@@ -14,6 +14,7 @@ import {
   mergeTableMarkdownByKey,
 } from "../utils/governed-working-set.js";
 import { applySpotFixPatches, parseSpotFixPatches } from "../utils/spot-fix-patches.js";
+import { buildNumericExpressionGuidance, readBookNumericExpressionMode } from "../utils/numeric-expression-mode.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -135,6 +136,11 @@ export class ReviserAgent extends BaseAgent {
 16. 必要时允许扩大插入块，并替换部分战斗段来降低 combat density，但不得推翻章节事实或结局。`
       : "";
     const resolvedLanguage = isEnglish ? "en" : "zh";
+    const numericExpressionGuidance = buildNumericExpressionGuidance(
+      await readBookNumericExpressionMode(bookDir, gp),
+      resolvedLanguage,
+      "reviser",
+    );
     const langPrefix = isEnglish
       ? mode === "spot-fix"
         ? `【LANGUAGE OVERRIDE】ALL output (FIXED_ISSUES, PATCHES, UPDATED_STATE, UPDATED_HOOKS) MUST be in English. Every TARGET_TEXT and REPLACEMENT_TEXT must be written entirely in English.\n\n`
@@ -204,6 +210,8 @@ ${gp.numericalSystem ? "\n=== UPDATED_LEDGER ===\n(更新后的完整资源账�
 7. 修改后同步更新状态卡${gp.numericalSystem ? "、账本" : ""}、伏笔池
 ${lengthGuardrail}
 ${mode === "spot-fix" ? "\n9. spot-fix 只能输出局部补丁，禁止输出整章改写；TARGET_TEXT 必须能在原文中唯一命中\n10. 如果需要大面积改写，说明无法安全 spot-fix，并让 PATCHES 留空" : ""}${moodInsertionModeBlock}
+
+${numericExpressionGuidance}
 
 输出格式：
 

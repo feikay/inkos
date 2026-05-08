@@ -10,8 +10,10 @@ import {
   readGenreProfile,
   renderContinuityMarkdown,
   renderFanqieQualityMarkdown,
+  buildNumericExpressionGuidance,
   runFanqieQualityCheck,
   resolveLengthCountingMode,
+  readBookNumericExpressionMode,
   runLocalFanqieQualityCheck,
   runLocalChapterContinuityCheck,
   runChapterContinuityCheck,
@@ -1918,6 +1920,11 @@ async function writeQualityFixedChapter(params: {
   readonly currentText: string;
   readonly qualityReport: Partial<FanqieQualityReport>;
 }): Promise<string> {
+  const numericExpressionGuidance = buildNumericExpressionGuidance(
+    await readBookNumericExpressionMode(params.bookDir),
+    "zh",
+    "polish",
+  );
   const response = await chatCompletion(params.client, params.model, [
     {
       role: "system",
@@ -1925,6 +1932,7 @@ async function writeQualityFixedChapter(params: {
         "你是番茄网文章节定向增强编辑。",
         "只输出修复后的完整章节正文。",
         "不要输出说明、报告、JSON、Markdown 代码块。",
+        numericExpressionGuidance,
       ].join("\n"),
     },
     { role: "user", content: buildQualityAutoFixPrompt(params.currentText, params.qualityReport) },
@@ -2513,6 +2521,11 @@ async function writeFanqiePolishedChapter(params: {
   readonly model: string;
   readonly polishPrompt: string;
 }): Promise<string> {
+  const numericExpressionGuidance = buildNumericExpressionGuidance(
+    await readBookNumericExpressionMode(params.bookDir),
+    "zh",
+    "polish",
+  );
   const response = await chatCompletion(params.client, params.model, [
     {
       role: "system",
@@ -2520,6 +2533,7 @@ async function writeFanqiePolishedChapter(params: {
         "你是番茄网文章节优化编辑。",
         "只输出优化后的完整章节正文。",
         "不要输出说明、报告、JSON、Markdown 代码块。",
+        numericExpressionGuidance,
       ].join("\n"),
     },
     { role: "user", content: params.polishPrompt },

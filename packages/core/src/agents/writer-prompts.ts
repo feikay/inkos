@@ -5,6 +5,7 @@ import type { LengthSpec } from "../models/length-governance.js";
 import { buildFanficCanonSection, buildCharacterVoiceProfiles, buildFanficModeInstructions } from "./fanfic-prompt-sections.js";
 import { buildEnglishCoreRules, buildEnglishAntiAIRules, buildEnglishCharacterMethod, buildEnglishPreWriteChecklist, buildEnglishGenreIntro } from "./en-prompt-sections.js";
 import { buildLengthSpec } from "../utils/length-metrics.js";
+import { buildNumericExpressionGuidanceForBook } from "../utils/numeric-expression-mode.js";
 
 export interface FanficContext {
   readonly fanficCanon: string;
@@ -34,6 +35,12 @@ export function buildWriterSystemPrompt(
   const isEnglish = (languageOverride ?? genreProfile.language) === "en";
   const governed = inputProfile === "governed";
   const resolvedLengthSpec = lengthSpec ?? buildLengthSpec(book.chapterWordCount, isEnglish ? "en" : "zh");
+  const numericExpressionGuidance = buildNumericExpressionGuidanceForBook(
+    book,
+    genreProfile,
+    isEnglish ? "en" : "zh",
+    "writer",
+  );
 
   const outputSection = mode === "creative"
     ? buildCreativeOutputFormat(book, genreProfile, resolvedLengthSpec)
@@ -46,6 +53,7 @@ export function buildWriterSystemPrompt(
         buildAntiTemplateStructureRules("en"),
         buildGovernedInputContract("en", governed),
         buildLengthGuidance(resolvedLengthSpec, "en"),
+        numericExpressionGuidance,
         !governed ? buildEnglishAntiAIRules() : "",
         !governed ? buildEnglishCharacterMethod() : "",
         buildGenreRules(genreProfile, genreBody),
@@ -65,6 +73,7 @@ export function buildWriterSystemPrompt(
         buildAntiTemplateStructureRules("zh"),
         buildGovernedInputContract("zh", governed),
         buildLengthGuidance(resolvedLengthSpec, "zh"),
+        numericExpressionGuidance,
         !governed ? buildAntiAIExamples() : "",
         !governed ? buildCharacterPsychologyMethod() : "",
         !governed ? buildSupportingCharacterMethod() : "",

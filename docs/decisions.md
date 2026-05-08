@@ -80,3 +80,26 @@ open chapters-salvaged/0019_salvage.md
 # 4. 再检测
 node ../packages/cli/dist/index.js review continuity-auto --chapter 19
 ```
+
+# --accept-manual-continuity流程风险
+```bash
+你要注意：--accept-manual-continuity 不能常态化使用。
+
+这次可以接受，是因为报告里没有实质性连续性错误，只是“防虚高”拦了一下。
+但以后如果报告指出：
+
+-------------------
+开头断裂
+上一章危机被跳过
+关键伏笔忽略
+人物状态不一致
+行动目标模糊
+危机停滞
+--------------------
+
+那就不要用 --accept-manual-continuity 放行。
+
+你可以把它当成这个规则：
+
+只有当 MANUAL_REVIEW 的原因是“低风险审慎拦截”，且报告无实质剧情错误时，才允许人工接受。
+```
