@@ -108,8 +108,9 @@ function buildChineseGuidance(
   return `## 数值化表达治理（numericExpressionMode=immersive，source=${resolution.source}）
 
 - 本书不是系统流/游戏面板流。${prefix}正文时，内部 state/facts/ledger/review report 可以保留精确数字，但正文必须转为沉浸式玄幻感官表达。
-- 正文禁止出现：气血xx%、气血值xx%、气血条、0.x滴精血、收益xx、基础值、性价比、打八折、状态条式资源结算。
-- 不要全局禁止自然数字；三息、一炷香、七副玉棺、千年、半尺、聚气九层、化灵门槛、第七容器等可以保留。
+- 禁止阿拉伯数字状态面板和账本口吻：气血xx%、气血值xx%、+7%、气血条、0.x滴精血、收益、基础值、性价比、打八折、状态条式资源结算。
+- 允许中文玄幻语感表达：几成、几分、大半、小半、半数、一线、半滴、三息、一炷香、七副玉棺、千年、半尺、聚气九层、化灵门槛、第七容器等可以保留。
+- 中文成数不要一刀切禁用；只有和收益、基础值、数值提升、战力打折等账本/结算词绑在一起时，才需要改成更沉浸的代价表达。
 - 示例：“气血涨到76%” → “枯竭的气血重新漫过四肢”。
 - 示例：“0.3滴精血” → “一线本命精血”。
 - 示例：“性价比极低” → “付出的代价远比能换回的气血更多”。`;
@@ -135,7 +136,7 @@ function buildEnglishGuidance(
   return `## Numeric Expression Governance (numericExpressionMode=immersive, source=${resolution.source})
 
 - This book is not system/game/panel fiction. While ${action}, keep exact numbers in internal state or reports only; prose must use immersive sensory expression.
-- Forbidden in chapter prose: blood/health percentages, health bars, fractional drops of essence blood, reward/efficiency/base-value language, discount multipliers, and status-bar settlement.
-- Do not ban natural numbers globally; concrete time, distance, age, rank, object counts, and cultivation tiers may remain.
+- Forbidden in chapter prose: Arabic-number status panels, blood/health percentages, health bars, fractional decimal drops of essence blood, reward/efficiency/base-value language, discount multipliers, and status-bar settlement.
+- Do not ban natural or idiomatic fractions globally; Chinese-style proportions such as several-tenths, a few degrees, most of it, a thread, or half a drop may remain when they read as immersive martial/xuanhuan prose.
 - Rewrite panel-like expressions as bodily sensation, cost, breath, meridians, pain, recovery, or visible consequence.`;
 }

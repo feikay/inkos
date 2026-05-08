@@ -216,9 +216,10 @@ describe("buildWriterSystemPrompt", () => {
     );
 
     expect(prompt).toContain("numericExpressionMode=immersive");
-    expect(prompt).toContain("正文禁止出现：气血xx%");
+    expect(prompt).toContain("禁止阿拉伯数字状态面板");
     expect(prompt).toContain("0.x滴精血");
     expect(prompt).toContain("性价比");
+    expect(prompt).toContain("允许中文玄幻语感表达：几成、几分、大半");
     expect(prompt).toContain("枯竭的气血重新漫过四肢");
     expect(prompt).toContain("三息、一炷香、七副玉棺、千年、半尺、聚气九层、化灵门槛、第七容器");
   });
@@ -244,7 +245,7 @@ describe("buildWriterSystemPrompt", () => {
 
     expect(prompt).toContain("numericExpressionMode=system");
     expect(prompt).toContain("正文允许出现面板、百分比、经验、属性、技能、收益");
-    expect(prompt).not.toContain("正文禁止出现：气血xx%");
+    expect(prompt).not.toContain("禁止阿拉伯数字状态面板");
     expect(prompt).not.toContain("0.x滴精血");
   });
 

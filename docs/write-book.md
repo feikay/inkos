@@ -33,6 +33,9 @@ node ../packages/cli/dist/index.js review publish-ready --book 葬渊魔经 \
   --min-chapter-words 1000
 
 cd ..
+# 
+node scripts/fanqie/check-numeric-expression.mjs 葬渊魔经 --from 84 --to 86 --final-only
+node scripts/fanqie/check-numeric-expression.mjs 葬渊魔经 --chapter 87 --final-only
 
 # 导出番茄
 node scripts/fanqie/export-fanqie.mjs 葬渊魔经 --incremental --use-reviewed --title "气血为0，我却能撬动规则"
