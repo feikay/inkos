@@ -137,6 +137,7 @@ writeCommand
             revised: result.revised,
             status: result.status,
             issues: result.auditResult.issues,
+            writeRetryHint: result.writeRetryHint,
           })) {
             log(line);
           }

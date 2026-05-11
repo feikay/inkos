@@ -29,6 +29,7 @@ import {
   enforceFinalTitleAnchorGuard,
   extractTitleCoreAnchor,
   hasInvalidTitleIntegrity,
+  normalizeRepeatedTitleShell,
 } from "../utils/chapter-title-engine.js";
 
 const baseProfile: GenreProfile = {
@@ -433,6 +434,15 @@ describe("validatePostWrite", () => {
     });
 
     expect(finalTitle).toBe("未知强敌威胁逼近之时");
+  });
+
+  it("compresses repeated title shells without damaging normal colon titles", () => {
+    expect(normalizeRepeatedTitleShell("线索背后的代价：线索背后的代价")).toBe("线索背后的代价");
+    expect(normalizeRepeatedTitleShell("线索背后的代价:线索背后的代价")).toBe("线索背后的代价");
+    expect(normalizeRepeatedTitleShell("  线索背后的代价 - 线索背后的代价  ")).toBe("线索背后的代价");
+    expect(normalizeRepeatedTitleShell("线索背后的代价｜线索背后的代价")).toBe("线索背后的代价");
+    expect(normalizeRepeatedTitleShell("线索背后的代价 | 线索背后的代价")).toBe("线索背后的代价");
+    expect(normalizeRepeatedTitleShell("血债：旧案重启")).toBe("血债：旧案重启");
   });
 
   it("allows a replacement when the current title is weak and the regenerated title is more usable", () => {

@@ -3,8 +3,8 @@ import { dirname } from "node:path";
 import { chatCompletion, type LLMClient } from "../llm/provider.js";
 
 export type FanqieQualityLevel = "优秀" | "可发但建议优化" | "不建议发布";
-export type FanqieQualityStatus = "QUALITY_PASS" | "QUALITY_NEED_POLISH" | "QUALITY_FAIL";
-export type FanqieFinalQualityStatus = "QUALITY_PASS" | "QUALITY_MANUAL_REVIEW";
+export type FanqieQualityStatus = "QUALITY_PASS" | "QUALITY_WARN_POLISH_OPTIONAL" | "QUALITY_FAIL";
+export type FanqieFinalQualityStatus = "QUALITY_PASS" | "QUALITY_WARN_POLISH_OPTIONAL" | "QUALITY_MANUAL_REVIEW";
 export type FanqieQualitySeverity = "低" | "中" | "高";
 
 export interface FanqieQualityIssue {
@@ -108,7 +108,7 @@ export function renderFanqieQualityMarkdown(report: FanqieQualityReport): string
     ? "连续性未通过，发布前必须先处理 continuity。"
     : report.status === "QUALITY_PASS"
       ? "可发布。"
-      : report.status === "QUALITY_NEED_POLISH"
+      : report.status === "QUALITY_WARN_POLISH_OPTIONAL"
         ? "可发但建议先做轻量优化。"
         : "不建议发布，建议强优化后复检。";
 
@@ -157,13 +157,13 @@ ${suggestions}
 
 export function resolveFanqieQualityStatus(score: number): FanqieQualityStatus {
   if (score >= 85) return "QUALITY_PASS";
-  if (score >= 70) return "QUALITY_NEED_POLISH";
+  if (score >= 80) return "QUALITY_WARN_POLISH_OPTIONAL";
   return "QUALITY_FAIL";
 }
 
 export function resolveFanqieQualityLevel(score: number): FanqieQualityLevel {
   if (score >= 85) return "优秀";
-  if (score >= 70) return "可发但建议优化";
+  if (score >= 80) return "可发但建议优化";
   return "不建议发布";
 }
 
@@ -176,7 +176,7 @@ export function buildFanqiePolishPrompt(params: {
   const issues = typeof params.issues === "string"
     ? params.issues
     : params.issues.map((issue) => `[${issue.severity}] ${issue.type}: ${issue.detail}`).join("\n");
-  return params.qualityScore >= 70
+  return params.qualityScore >= 80
     ? buildLightPolishPrompt(params.chapterText, issues)
     : buildStrongPolishPrompt(params.chapterText, issues);
 }
@@ -214,7 +214,7 @@ ${input.nextOutline || "未提供"}
   "chapter_title": "${escapeJsonString(input.chapterTitle || "")}",
   "quality_score": 82,
   "level": "优秀 | 可发但建议优化 | 不建议发布",
-  "status": "QUALITY_PASS | QUALITY_NEED_POLISH | QUALITY_FAIL",
+  "status": "QUALITY_PASS | QUALITY_WARN_POLISH_OPTIONAL | QUALITY_FAIL",
   "scores": {
     "hook_payoff": 22,
     "pacing": 20,
@@ -232,8 +232,8 @@ ${input.nextOutline || "未提供"}
 注意：
 - quality_score 必须等于五项 scores 相加。
 - quality_score >= 85 时 polish_prompt 必须为空字符串。
-- 70 <= quality_score < 85 时 polish_prompt 由系统生成，你可以留空。
-- quality_score < 70 时 polish_prompt 由系统生成，你可以留空。`;
+- 80 <= quality_score < 85 时 polish_prompt 由系统生成，你可以留空。
+- quality_score < 80 时 polish_prompt 由系统生成，你可以留空。`;
 }
 
 function buildLocalFanqieQualityReport(input: Omit<RunFanqieQualityCheckInput, "client" | "model">): FanqieQualityReport {

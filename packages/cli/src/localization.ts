@@ -17,6 +17,10 @@ type WriteResultShape = {
   readonly issues: ReadonlyArray<WriteIssue>;
   readonly auditPassed?: boolean;
   readonly passedAudit?: boolean;
+  readonly writeRetryHint?: {
+    readonly path: string;
+    readonly consumed: boolean;
+  };
 };
 
 type ImportResultShape = {
@@ -118,6 +122,13 @@ export function formatWriteNextResultLines(
     zh: `  状态：${result.status}`,
     en: `  Status: ${result.status}`,
   }));
+
+  if (result.writeRetryHint) {
+    lines.push(localize(language, {
+      zh: `  重试提示：${result.writeRetryHint.path} consumed=${result.writeRetryHint.consumed ? "true" : "false"}`,
+      en: `  Retry hint: ${result.writeRetryHint.path} consumed=${result.writeRetryHint.consumed ? "true" : "false"}`,
+    }));
+  }
 
   if (result.issues.length > 0) {
     lines.push(localize(language, {

@@ -10,6 +10,7 @@ import {
   removeStaleRepeatedInfoBlockers,
   retainNonSalvageFinalAfterSalvageFailure,
   resolvePublishReadyStartingCandidate,
+  decidePublishQuality,
 } from "../commands/review.js";
 
 function makeReport(overrides: Partial<ContinuityReport> = {}): ContinuityReport {
@@ -154,6 +155,13 @@ describe("continuity-auto verdict helpers", () => {
       acceptedContinuityFile: "chapters-reviewed/0085_final.md",
       reviewedFinalExists: true,
     });
+  });
+
+  it("maps publish-ready quality scores to pass, warning, and blocked decisions", () => {
+    expect(decidePublishQuality(85, 85, 75)).toBe("QUALITY_PASS");
+    expect(decidePublishQuality(84, 85, 75)).toBe("QUALITY_WARN_POLISH_OPTIONAL");
+    expect(decidePublishQuality(80, 85, 75)).toBe("QUALITY_WARN_POLISH_OPTIONAL");
+    expect(decidePublishQuality(79, 85, 75)).toBe("NEED_REWRITE");
   });
 
   it("prefers chapters-reviewed final as publish-ready starting candidate when manual continuity is accepted", async () => {

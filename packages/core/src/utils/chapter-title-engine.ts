@@ -679,13 +679,14 @@ export function enforceFinalTitleAnchorGuard(params: {
   readonly fallbackTitle?: string;
   readonly recentTitles: ReadonlyArray<string>;
 }): string {
+  const normalizedFinalTitle = normalizeRepeatedTitleShell(params.finalTitle);
   const finalCollapsedAnchor = detectCollapsedTitleAnchor(
-    params.finalTitle,
+    normalizedFinalTitle,
     params.recentTitles,
     params.language,
   );
   if (!finalCollapsedAnchor) {
-    return params.finalTitle;
+    return normalizedFinalTitle;
   }
 
   const fallback = params.fallbackTitle?.trim();
@@ -698,7 +699,24 @@ export function enforceFinalTitleAnchorGuard(params: {
     params.recentTitles,
     params.language,
   );
-  return fallbackCollapsedAnchor ? params.finalTitle : fallback;
+  return fallbackCollapsedAnchor ? normalizedFinalTitle : normalizeRepeatedTitleShell(fallback);
+}
+
+export function normalizeRepeatedTitleShell(title: string): string {
+  const trimmed = title.trim();
+  const match = trimmed.match(/^(.+?)\s*(：|:|｜|\||-)\s*(.+)$/u);
+  if (!match) return trimmed;
+
+  const left = match[1]?.trim() ?? "";
+  const right = match[3]?.trim() ?? "";
+  if (!left || !right) return trimmed;
+
+  const normalizeSide = (value: string) => value
+    .normalize("NFKC")
+    .trim()
+    .replace(/\s+/gu, " ");
+
+  return normalizeSide(left) === normalizeSide(right) ? left : trimmed;
 }
 
 export function assertFinalTitleAllowed(params: {

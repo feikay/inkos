@@ -79,6 +79,12 @@ export interface TokenUsageSummary {
   readonly totalTokens: number;
 }
 
+export interface WriteRetryHintConsumption {
+  readonly chapter: string;
+  readonly path: string;
+  readonly consumed: boolean;
+}
+
 export interface ChapterPipelineResult {
   readonly chapterNumber: number;
   readonly title: string;
@@ -89,6 +95,7 @@ export interface ChapterPipelineResult {
   readonly lengthWarnings?: ReadonlyArray<string>;
   readonly lengthTelemetry?: LengthTelemetry;
   readonly tokenUsage?: TokenUsageSummary;
+  readonly writeRetryHint?: WriteRetryHintConsumption;
 }
 
 // Atomic operation results
@@ -254,6 +261,7 @@ export class PipelineRunner {
     readonly postWriterNormalizeCount?: number;
     readonly postReviseCount?: number;
     readonly normalizeApplied?: boolean;
+    readonly writeRetryHint?: WriteRetryHintConsumption;
   }): ChapterPipelineResult {
     const lengthWarnings = this.buildLengthWarnings(
       params.chapterNumber,
@@ -282,6 +290,7 @@ export class PipelineRunner {
         lengthWarning: lengthWarnings.length > 0,
       }),
       tokenUsage: params.tokenUsage,
+      ...(params.writeRetryHint ? { writeRetryHint: params.writeRetryHint } : {}),
     };
   }
 
@@ -1304,7 +1313,14 @@ export class PipelineRunner {
     const bookDir = this.state.bookDir(bookId);
     await this.assertNoPendingStateRepair(bookId);
     const chapterNumber = await this.state.getNextChapterNumber(bookId);
+    const retryHint = await this.readWriteRetryHint(bookDir, chapterNumber);
     const stageLanguage = await this.resolveBookLanguage(book);
+    if (retryHint) {
+      this.logStage(stageLanguage, {
+        zh: `读取章节重试提示：${retryHint.report.path}`,
+        en: `loaded chapter retry hint: ${retryHint.report.path}`,
+      });
+    }
     this.logStage(stageLanguage, { zh: "准备章节输入", en: "preparing chapter inputs" });
     const writeInput = await this.prepareWriteInput(
       book,
@@ -1334,6 +1350,7 @@ export class PipelineRunner {
       bookDir,
       chapterNumber,
       ...writeInput,
+      ...(retryHint ? { retryHint: retryHint.content, retryHintPath: retryHint.report.path } : {}),
       lengthSpec,
       ...(wordCount ? { wordCountOverride: wordCount } : {}),
       ...(temperatureOverride ? { temperatureOverride } : {}),
@@ -1361,6 +1378,7 @@ export class PipelineRunner {
         tokenUsage: totalUsage,
         lengthSpec,
         writerCount,
+        ...(retryHint ? { writeRetryHint: retryHint.report } : {}),
       });
     }
 
@@ -1424,6 +1442,7 @@ export class PipelineRunner {
         postWriterNormalizeCount: reviewResult.preAuditNormalizedWordCount,
         postReviseCount,
         normalizeApplied,
+        ...(retryHint ? { writeRetryHint: retryHint.report } : {}),
       });
     }
 
@@ -1685,6 +1704,7 @@ export class PipelineRunner {
       lengthWarnings,
       lengthTelemetry,
       tokenUsage: totalUsage,
+      ...(retryHint ? { writeRetryHint: { ...retryHint.report, consumed: true } } : {}),
     };
   }
 
@@ -2446,6 +2466,25 @@ ${matrix}`,
       contextPackage: composed.contextPackage,
       ruleStack: composed.ruleStack,
       trace: composed.trace,
+    };
+  }
+
+  private async readWriteRetryHint(
+    bookDir: string,
+    chapterNumber: number,
+  ): Promise<{ readonly content: string; readonly report: WriteRetryHintConsumption } | undefined> {
+    const chapter = String(chapterNumber).padStart(4, "0");
+    const hintFile = join(bookDir, "reviews", "write-retry-hints", `${chapter}.md`);
+    const content = await readFile(hintFile, "utf-8").catch(() => "");
+    if (!content.trim()) return undefined;
+
+    return {
+      content,
+      report: {
+        chapter,
+        path: relativeToBookDir(bookDir, hintFile),
+        consumed: false,
+      },
     };
   }
 

@@ -19,6 +19,7 @@ import {
   runChapterContinuityCheck,
   runChapterContinuityFix,
   type ContinuityReport,
+  type FanqieFinalQualityStatus,
   type FanqieQualityReport,
 } from "@actalk/inkos-core";
 import { existsSync } from "node:fs";
@@ -207,7 +208,7 @@ reviewCommand
           if (result.input_file) log(`input: ${result.input_file}`);
           if (result.output_file) log(`output: ${result.output_file}`);
           log(`result: ${result.publish_status}`);
-          if (result.publish_status !== "READY_TO_EXPORT") {
+          if (!isExportablePublishStatus(result.publish_status)) {
             log(`Chapter ${chapterNumberPrefix(chapter)} still blocked by quality after targeted fix.`);
           }
         }
@@ -757,7 +758,7 @@ reviewCommand
           log(`report: ${result.report_json_path}`);
         }
 
-        if (isBatchMode && result.publish_status !== "READY_TO_EXPORT") {
+        if (isBatchMode && !isExportablePublishStatus(result.publish_status)) {
           const message = `Chapter ${chapterNumberPrefix(chapter)} is ${result.publish_status}. Batch stopped to avoid downstream pollution.`;
           const instruction = `Fix chapter ${chapterNumberPrefix(chapter)}, then resume from chapter ${chapter + 1}.`;
           if (!opts.json) {
@@ -962,7 +963,7 @@ interface FanqiePolishCommandResult {
   readonly chapter: number;
   readonly initialScore: number;
   readonly finalScore: number;
-  readonly finalQualityStatus: "QUALITY_PASS" | "QUALITY_MANUAL_REVIEW";
+  readonly finalQualityStatus: FanqieFinalQualityStatus;
   readonly attempts: number;
   readonly inputFile: string;
   readonly usedPolishedFile: string;
@@ -1003,8 +1004,8 @@ interface ContinuityBatchStop {
 
 type ContinuityBodySource = "fixed" | "salvaged" | "polished" | "original";
 
-type PublishReadyStatus = "READY_TO_EXPORT" | "BLOCKED_BY_CONTINUITY" | "BLOCKED_BY_QUALITY" | "QUALITY_MANUAL_REVIEW" | "NEED_REWRITE" | "MANUAL_REVIEW";
-type PublishQualityDecision = "QUALITY_PASS" | "QUALITY_ACCEPTED" | "QUALITY_MANUAL_REVIEW" | "NEED_REWRITE";
+type PublishReadyStatus = "READY_TO_EXPORT" | "READY_WITH_WARNINGS" | "BLOCKED_BY_CONTINUITY" | "BLOCKED_BY_QUALITY" | "QUALITY_MANUAL_REVIEW" | "NEED_REWRITE" | "MANUAL_REVIEW";
+export type PublishQualityDecision = "QUALITY_PASS" | "QUALITY_WARN_POLISH_OPTIONAL" | "QUALITY_MANUAL_REVIEW" | "NEED_REWRITE";
 
 interface ReviewedChapterSource {
   readonly path: string;
@@ -1012,7 +1013,7 @@ interface ReviewedChapterSource {
   readonly body_source: ContinuityBodySource;
   readonly decision_source: string;
   readonly continuity_final_status?: "PASS" | "MANUAL_REVIEW" | "DROP";
-  readonly quality_final_status?: "QUALITY_PASS" | "QUALITY_MANUAL_REVIEW";
+  readonly quality_final_status?: FanqieFinalQualityStatus;
   readonly publish_blocked_by_continuity: boolean;
   readonly warnings?: ReadonlyArray<string>;
 }
@@ -1036,6 +1037,7 @@ interface PublishReadyResult {
   readonly quality_pass_threshold?: number;
   readonly quality_accept_threshold?: number;
   readonly accepted_reason?: string;
+  readonly warnings?: ReadonlyArray<string>;
   readonly manualContinuityAccepted?: boolean;
   readonly manualContinuityAcceptedReason?: string;
   readonly continuityStatusBeforeManualAccept?: string;
@@ -1108,7 +1110,7 @@ async function runPublishReadyChapter(params: {
   let continuity: ContinuityCommandResult | undefined;
   let continuityReport: ContinuityReport | undefined;
   let quality: FanqieQualityCommandResult | undefined;
-  let qualityStatus: "QUALITY_PASS" | "QUALITY_MANUAL_REVIEW" | undefined;
+  let qualityStatus: "QUALITY_PASS" | "QUALITY_WARN_POLISH_OPTIONAL" | "QUALITY_MANUAL_REVIEW" | undefined;
   let manualContinuityAcceptance: PublishReadyManualContinuityAcceptance | undefined;
 
   for (let loop = 1; loop <= 2; loop += 1) {
@@ -1172,17 +1174,16 @@ async function runPublishReadyChapter(params: {
     }
 
     let qualityCandidate = quality.sourceFile;
-    qualityStatus = quality.report.quality_score >= params.qualityPassThreshold ? "QUALITY_PASS" : "QUALITY_MANUAL_REVIEW";
     const immediateQualityDecision = decidePublishQuality(quality.report.quality_score, params.qualityPassThreshold, params.qualityAcceptThreshold);
-    if (immediateQualityDecision === "QUALITY_PASS" || immediateQualityDecision === "QUALITY_ACCEPTED") {
+    qualityStatus = qualityFinalStatusFromDecision(immediateQualityDecision);
+    if (immediateQualityDecision === "QUALITY_PASS" || immediateQualityDecision === "QUALITY_WARN_POLISH_OPTIONAL") {
       const finalFile = await writeReviewedFinalChapter(params.bookDir, params.chapter, continuity.sourceFile);
       sourceChain.add(relative(params.bookDir, finalFile));
+      const readyToExport = isReadyToExport(continuityReport, immediateQualityDecision, finalFile, params.minChapterWords, Boolean(manualContinuityAcceptance));
       return writePublishReadyReport(params.bookDir, {
         book: params.bookId,
         chapter_index: params.chapter,
-        publish_status: isReadyToExport(continuityReport, immediateQualityDecision, finalFile, params.minChapterWords, Boolean(manualContinuityAcceptance))
-          ? "READY_TO_EXPORT"
-          : "MANUAL_REVIEW",
+        publish_status: readyToExport ? publishStatusForQualityDecision(immediateQualityDecision) : "MANUAL_REVIEW",
         final_candidate_file: relative(params.bookDir, finalFile),
         source_chain: [...sourceChain],
         continuity: { final_status: continuityReport.final_status, score: continuityReport.score },
@@ -1191,7 +1192,8 @@ async function runPublishReadyChapter(params: {
         quality_score: quality.report.quality_score,
         quality_pass_threshold: params.qualityPassThreshold,
         quality_accept_threshold: params.qualityAcceptThreshold,
-        accepted_reason: immediateQualityDecision === "QUALITY_ACCEPTED" ? "quality score is below ideal but accepted by threshold" : undefined,
+        accepted_reason: immediateQualityDecision === "QUALITY_WARN_POLISH_OPTIONAL" ? "quality score is publishable with optional polish" : undefined,
+        warnings: qualityWarnings(immediateQualityDecision, quality.report.quality_score, params.qualityPassThreshold),
         ...manualContinuityAcceptance,
         source_file: relative(params.bookDir, continuity.sourceFile),
         word_count: continuityReport.word_count,
@@ -1342,11 +1344,13 @@ async function runPublishReadyChapter(params: {
       sourceChain.add(relative(params.bookDir, finalFile));
       const qualityScore = quality.report.quality_score;
       const qualityDecision = decidePublishQuality(qualityScore, params.qualityPassThreshold, params.qualityAcceptThreshold);
+      qualityStatus = qualityFinalStatusFromDecision(qualityDecision);
+      const readyToExport = isReadyToExport(continuityReport, qualityDecision, finalFile, params.minChapterWords, Boolean(manualContinuityAcceptance));
       return writePublishReadyReport(params.bookDir, {
         book: params.bookId,
         chapter_index: params.chapter,
-        publish_status: isReadyToExport(continuityReport, qualityDecision, finalFile, params.minChapterWords, Boolean(manualContinuityAcceptance))
-          ? "READY_TO_EXPORT"
+        publish_status: readyToExport
+          ? publishStatusForQualityDecision(qualityDecision)
           : qualityDecision === "NEED_REWRITE" ? "NEED_REWRITE" : "MANUAL_REVIEW",
         final_candidate_file: relative(params.bookDir, finalFile),
         source_chain: [...sourceChain],
@@ -1356,7 +1360,8 @@ async function runPublishReadyChapter(params: {
         quality_score: qualityScore,
         quality_pass_threshold: params.qualityPassThreshold,
         quality_accept_threshold: params.qualityAcceptThreshold,
-        accepted_reason: qualityDecision === "QUALITY_ACCEPTED" ? "quality score is below ideal but accepted by threshold" : undefined,
+        accepted_reason: qualityDecision === "QUALITY_WARN_POLISH_OPTIONAL" ? "quality score is publishable with optional polish" : undefined,
+        warnings: qualityWarnings(qualityDecision, qualityScore, params.qualityPassThreshold),
         ...manualContinuityAcceptance,
         source_file: relative(params.bookDir, continuity.sourceFile),
         word_count: continuityReport.word_count,
@@ -1501,7 +1506,7 @@ export async function resolvePublishReadyStartingCandidate(
   }
 
   const publishReady = await readPublishReadyReportIfExists(bookDir, chapter);
-  if (publishReady?.publish_status === "READY_TO_EXPORT" && typeof publishReady.final_candidate_file === "string") {
+  if (publishReady && isExportablePublishStatus(String(publishReady.publish_status ?? "")) && typeof publishReady.final_candidate_file === "string") {
     const reviewed = resolveUsedFilePath(bookDir, publishReady.final_candidate_file);
     if (reviewed) return reviewed;
   }
@@ -1576,7 +1581,7 @@ async function tryWriteAcceptedExistingCandidate(
 
   if (continuityStatus !== "PASS") return null;
   if (!Number.isFinite(wordCount) || wordCount < params.minChapterWords) return null;
-  if (qualityDecision !== "QUALITY_PASS" && qualityDecision !== "QUALITY_ACCEPTED") return null;
+  if (qualityDecision !== "QUALITY_PASS" && qualityDecision !== "QUALITY_WARN_POLISH_OPTIONAL") return null;
   if (!existsSync(candidateFile)) return null;
 
   sourceChain.add(relative(params.bookDir, candidateFile));
@@ -1585,16 +1590,17 @@ async function tryWriteAcceptedExistingCandidate(
   return writePublishReadyReport(params.bookDir, {
     book: params.bookId,
     chapter_index: params.chapter,
-    publish_status: "READY_TO_EXPORT",
+    publish_status: publishStatusForQualityDecision(qualityDecision),
     final_candidate_file: relative(params.bookDir, finalFile),
     source_chain: [...sourceChain],
     continuity: { final_status: "PASS", score: publishReport?.continuity?.score ?? continuityReport?.score },
-    quality: { final_quality_status: qualityReport?.final_quality_status ?? publishReport?.quality?.final_quality_status, score: qualityScore },
+    quality: { final_quality_status: qualityReport?.final_quality_status ?? publishReport?.quality?.final_quality_status ?? qualityFinalStatusFromDecision(qualityDecision), score: qualityScore },
     quality_decision: qualityDecision,
     quality_score: qualityScore,
     quality_pass_threshold: params.qualityPassThreshold,
     quality_accept_threshold: params.qualityAcceptThreshold,
-    accepted_reason: qualityDecision === "QUALITY_ACCEPTED" ? "quality score is below ideal but accepted by threshold" : undefined,
+    accepted_reason: qualityDecision === "QUALITY_WARN_POLISH_OPTIONAL" ? "quality score is publishable with optional polish" : undefined,
+    warnings: qualityWarnings(qualityDecision, qualityScore, params.qualityPassThreshold),
     source_file: relative(params.bookDir, candidateFile),
     word_count: wordCount,
     min_chapter_words: params.minChapterWords,
@@ -1611,15 +1617,35 @@ function isReadyToExport(
   manualContinuityAccepted = false,
 ): boolean {
   return (continuity.final_status === "PASS" || manualContinuityAccepted && continuity.final_status === "MANUAL_REVIEW")
-    && (qualityDecision === "QUALITY_PASS" || qualityDecision === "QUALITY_ACCEPTED")
+    && (qualityDecision === "QUALITY_PASS" || qualityDecision === "QUALITY_WARN_POLISH_OPTIONAL")
     && (continuity.word_count ?? 0) >= minChapterWords
     && existsSync(finalFile);
 }
 
-function decidePublishQuality(score: number, passThreshold: number, acceptThreshold: number): PublishQualityDecision {
+export function decidePublishQuality(score: number, passThreshold: number, acceptThreshold: number): PublishQualityDecision {
   if (score >= passThreshold) return "QUALITY_PASS";
-  if (score >= acceptThreshold) return "QUALITY_ACCEPTED";
+  if (score >= Math.max(80, acceptThreshold)) return "QUALITY_WARN_POLISH_OPTIONAL";
   return "NEED_REWRITE";
+}
+
+function qualityFinalStatusFromDecision(decision: PublishQualityDecision): FanqieFinalQualityStatus {
+  if (decision === "QUALITY_PASS") return "QUALITY_PASS";
+  if (decision === "QUALITY_WARN_POLISH_OPTIONAL") return "QUALITY_WARN_POLISH_OPTIONAL";
+  return "QUALITY_MANUAL_REVIEW";
+}
+
+function publishStatusForQualityDecision(decision: PublishQualityDecision): "READY_TO_EXPORT" | "READY_WITH_WARNINGS" {
+  return decision === "QUALITY_WARN_POLISH_OPTIONAL" ? "READY_WITH_WARNINGS" : "READY_TO_EXPORT";
+}
+
+function isExportablePublishStatus(status: PublishReadyStatus | string): boolean {
+  return status === "READY_TO_EXPORT" || status === "READY_WITH_WARNINGS";
+}
+
+function qualityWarnings(decision: PublishQualityDecision, score: number, passThreshold: number): ReadonlyArray<string> | undefined {
+  return decision === "QUALITY_WARN_POLISH_OPTIONAL"
+    ? [`quality_score ${score} is below ideal ${passThreshold}; polish is optional before export.`]
+    : undefined;
 }
 
 async function writePublishReadyReport(bookDir: string, report: PublishReadyResult): Promise<PublishReadyResult> {
@@ -1664,7 +1690,7 @@ ${report.accepted_reason ? `- accepted_reason: ${report.accepted_reason}\n` : ""
 - continuityScoreBeforeManualAccept: ${report.continuityScoreBeforeManualAccept ?? "n/a"}
 - acceptedContinuityFile: ${report.acceptedContinuityFile}
 - reviewedFinalExists: ${report.reviewedFinalExists ? "true" : "false"}
-` : ""}${report.source_file ? `- source_file: ${report.source_file}\n` : ""}- word_count: ${report.word_count ?? "n/a"}/${report.min_chapter_words}
+` : ""}${report.warnings?.length ? `- warnings:\n${report.warnings.map((warning) => `  - ${warning}`).join("\n")}\n` : ""}${report.source_file ? `- source_file: ${report.source_file}\n` : ""}- word_count: ${report.word_count ?? "n/a"}/${report.min_chapter_words}
 
 ## Source Chain
 
@@ -1753,7 +1779,8 @@ async function runQualityAutoFixChapter(params: {
       finalQualityStatus: undefined,
       usedPolishedFile: relative(params.bookDir, outputFile),
     });
-    const finalQualityStatus = qualityAfter.report.quality_score >= 85 ? "QUALITY_PASS" : "QUALITY_MANUAL_REVIEW";
+    const qualityDecision = decidePublishQuality(qualityAfter.report.quality_score, params.qualityPassThreshold, params.qualityAcceptThreshold);
+    const finalQualityStatus = qualityFinalStatusFromDecision(qualityDecision);
     const finalQualityReport = markFinalFanqieQualityReport(qualityAfter.report, {
       polishAttempt: 0,
       maxPolishAttempts: 0,
@@ -1770,15 +1797,15 @@ async function runQualityAutoFixChapter(params: {
     continuityAfter = await runContinuityPublishPass(params, outputFile, sourceChain);
     sourceChain.add(relative(params.bookDir, continuityAfter.final.sourceFile));
 
-    const qualityDecision = decidePublishQuality(qualityAfter.report.quality_score, params.qualityPassThreshold, params.qualityAcceptThreshold);
-    if ((qualityDecision === "QUALITY_PASS" || qualityDecision === "QUALITY_ACCEPTED") && continuityAfter.report.final_status === "PASS") {
+    if ((qualityDecision === "QUALITY_PASS" || qualityDecision === "QUALITY_WARN_POLISH_OPTIONAL") && continuityAfter.report.final_status === "PASS") {
       const finalFile = await writeReviewedFinalChapter(params.bookDir, params.chapter, continuityAfter.final.sourceFile);
       sourceChain.add(relative(params.bookDir, finalFile));
+      const readyToExport = isReadyToExport(continuityAfter.report, qualityDecision, finalFile, params.minChapterWords);
       const publish = await writePublishReadyReport(params.bookDir, {
         book: params.bookId,
         chapter_index: params.chapter,
-        publish_status: isReadyToExport(continuityAfter.report, qualityDecision, finalFile, params.minChapterWords)
-          ? "READY_TO_EXPORT"
+        publish_status: readyToExport
+          ? publishStatusForQualityDecision(qualityDecision)
           : "MANUAL_REVIEW",
         final_candidate_file: relative(params.bookDir, finalFile),
         source_chain: [...sourceChain],
@@ -1788,7 +1815,8 @@ async function runQualityAutoFixChapter(params: {
         quality_score: qualityAfter.report.quality_score,
         quality_pass_threshold: params.qualityPassThreshold,
         quality_accept_threshold: params.qualityAcceptThreshold,
-        accepted_reason: qualityDecision === "QUALITY_ACCEPTED" ? "quality score is below ideal but accepted by threshold" : undefined,
+        accepted_reason: qualityDecision === "QUALITY_WARN_POLISH_OPTIONAL" ? "quality score is publishable with optional polish" : undefined,
+        warnings: qualityWarnings(qualityDecision, qualityAfter.report.quality_score, params.qualityPassThreshold),
         source_file: relative(params.bookDir, continuityAfter.final.sourceFile),
         word_count: continuityAfter.report.word_count,
         min_chapter_words: params.minChapterWords,
@@ -1879,13 +1907,13 @@ async function resolveQualityAutoFixContext(bookDir: string, chapter: number, mi
   if (qualityScore < qualityFixThreshold) {
     return { eligible: false, reason: `quality_score ${qualityScore} < ${qualityFixThreshold}`, publishStatus: "NEED_REWRITE", inputFile, qualityScore, publishReport, qualityReport, sourceChain };
   }
-  if (qualityScore >= 85) {
-    return { eligible: false, reason: `quality_score ${qualityScore} already passes`, publishStatus: "READY_TO_EXPORT", inputFile, qualityScore, publishReport, qualityReport, sourceChain };
+  if (qualityScore >= 80) {
+    return { eligible: false, reason: `quality_score ${qualityScore} already passes`, publishStatus: qualityScore >= 85 ? "READY_TO_EXPORT" : "READY_WITH_WARNINGS", inputFile, qualityScore, publishReport, qualityReport, sourceChain };
   }
   if (publishStatus && publishStatus !== "BLOCKED_BY_QUALITY" && publishStatus !== "QUALITY_MANUAL_REVIEW") {
     return { eligible: false, reason: `publish_status is ${publishStatus}`, publishStatus: publishStatus as PublishReadyStatus, inputFile, qualityScore, publishReport, qualityReport, sourceChain };
   }
-  if (qualityStatus && !["QUALITY_MANUAL_REVIEW", "QUALITY_NEED_POLISH", "QUALITY_FAIL"].includes(String(qualityStatus))) {
+  if (qualityStatus && !["QUALITY_MANUAL_REVIEW", "QUALITY_WARN_POLISH_OPTIONAL", "QUALITY_NEED_POLISH", "QUALITY_FAIL"].includes(String(qualityStatus))) {
     return { eligible: false, reason: `quality status is ${qualityStatus}`, publishStatus: "MANUAL_REVIEW", inputFile, qualityScore, publishReport, qualityReport, sourceChain };
   }
   if (!inputFile || !existsSync(inputFile)) {
@@ -2246,7 +2274,7 @@ async function checkFanqieQualityChapter(params: {
   readonly polishAttempt?: number;
   readonly maxPolishAttempts?: number;
   readonly finalQualityScore?: number;
-  readonly finalQualityStatus?: "QUALITY_PASS" | "QUALITY_MANUAL_REVIEW";
+  readonly finalQualityStatus?: FanqieFinalQualityStatus;
   readonly usedPolishedFile?: string;
 }): Promise<FanqieQualityCommandResult> {
   const originalCurrent = await findChapterFile(params.bookDir, params.chapter);
@@ -2372,7 +2400,7 @@ async function polishFanqieQualityChapter(params: {
   let attempts = 0;
   let usedPolishedFile = "";
   let finalScore = initialScore;
-  let finalStatus: "QUALITY_PASS" | "QUALITY_MANUAL_REVIEW" = initialScore >= 85 ? "QUALITY_PASS" : "QUALITY_MANUAL_REVIEW";
+  let finalStatus: FanqieFinalQualityStatus = initialScore >= 85 ? "QUALITY_PASS" : initialScore >= 80 ? "QUALITY_WARN_POLISH_OPTIONAL" : "QUALITY_MANUAL_REVIEW";
 
   if (quality.report.publish_blocked_by_continuity) {
     const finalReport = markFinalFanqieQualityReport(quality.report, {
@@ -2403,7 +2431,7 @@ async function polishFanqieQualityChapter(params: {
       polishAttempt: 0,
       maxPolishAttempts: params.maxPolishAttempts,
       finalQualityScore: initialScore,
-      finalQualityStatus: initialScore >= 85 ? "QUALITY_PASS" : "QUALITY_MANUAL_REVIEW",
+      finalQualityStatus: initialScore >= 85 ? "QUALITY_PASS" : initialScore >= 80 ? "QUALITY_WARN_POLISH_OPTIONAL" : "QUALITY_MANUAL_REVIEW",
       usedPolishedFile: "",
     });
     const paths = fanqieFinalReportPaths(params.bookDir, params.chapter);
@@ -2456,7 +2484,7 @@ async function polishFanqieQualityChapter(params: {
     }
   }
 
-  finalStatus = finalScore >= 85 ? "QUALITY_PASS" : "QUALITY_MANUAL_REVIEW";
+  finalStatus = finalScore >= 85 ? "QUALITY_PASS" : finalScore >= 80 ? "QUALITY_WARN_POLISH_OPTIONAL" : "QUALITY_MANUAL_REVIEW";
   const finalReport = markFinalFanqieQualityReport(quality.report, {
     polishAttempt: attempts,
     maxPolishAttempts: params.maxPolishAttempts,
@@ -2551,7 +2579,7 @@ function markFinalFanqieQualityReport(report: FanqieQualityReport, params: {
   readonly polishAttempt: number;
   readonly maxPolishAttempts: number;
   readonly finalQualityScore: number;
-  readonly finalQualityStatus: "QUALITY_PASS" | "QUALITY_MANUAL_REVIEW";
+  readonly finalQualityStatus: FanqieFinalQualityStatus;
   readonly usedPolishedFile: string;
 }): FanqieQualityReport {
   return {
@@ -2992,7 +3020,7 @@ async function resolveReviewedChapterForContinuity(bookDir: string, chapter: num
   const original = await findChapterFile(bookDir, chapter);
   const warnings: string[] = [];
   const publishReady = await readPublishReadyReportIfExists(bookDir, chapter);
-  if (publishReady?.publish_status === "READY_TO_EXPORT" && typeof publishReady.final_candidate_file === "string") {
+  if (publishReady && isExportablePublishStatus(String(publishReady.publish_status ?? "")) && typeof publishReady.final_candidate_file === "string") {
     const reviewedPath = resolveUsedFilePath(bookDir, publishReady.final_candidate_file);
     if (reviewedPath) {
       return {
@@ -3004,7 +3032,7 @@ async function resolveReviewedChapterForContinuity(bookDir: string, chapter: num
         warnings,
       };
     }
-    warnings.push(`READY_TO_EXPORT publish-ready final_candidate_file is missing: ${publishReady.final_candidate_file}; falling back to continuity candidates.`);
+    warnings.push(`${publishReady.publish_status} publish-ready final_candidate_file is missing: ${publishReady.final_candidate_file}; falling back to continuity candidates.`);
   }
   const finalReport = await readContinuityReportIfExists(bookDir, chapter, "final-report");
 
@@ -3074,7 +3102,7 @@ async function resolveReviewedChapterSource(
   const original = await findChapterFile(bookDir, chapter);
   const warnings: string[] = [];
   const publishReady = await readPublishReadyReportIfExists(bookDir, chapter);
-  if (publishReady?.publish_status === "READY_TO_EXPORT" && typeof publishReady.final_candidate_file === "string") {
+  if (publishReady && isExportablePublishStatus(String(publishReady.publish_status ?? "")) && typeof publishReady.final_candidate_file === "string") {
     const reviewedPath = resolveUsedFilePath(bookDir, publishReady.final_candidate_file);
     if (reviewedPath) {
       const qualityFinalStatus = normalizeQualityFinalStatus(publishReady.quality?.final_quality_status);
@@ -3089,7 +3117,7 @@ async function resolveReviewedChapterSource(
         warnings,
       };
     }
-    warnings.push(`READY_TO_EXPORT publish-ready final_candidate_file is missing: ${publishReady.final_candidate_file}; falling back to continuity/original.`);
+    warnings.push(`${publishReady.publish_status} publish-ready final_candidate_file is missing: ${publishReady.final_candidate_file}; falling back to continuity/original.`);
   }
   const finalReport = await readContinuityReportIfExists(bookDir, chapter, "final-report");
   const continuityFinalStatus = normalizeContinuityFinalStatus(finalReport?.final_status ?? finalReport?.status);
@@ -3299,8 +3327,8 @@ function normalizeContinuityFinalStatus(value: unknown): "PASS" | "MANUAL_REVIEW
   return value === "PASS" || value === "MANUAL_REVIEW" || value === "DROP" ? value : undefined;
 }
 
-function normalizeQualityFinalStatus(value: unknown): "QUALITY_PASS" | "QUALITY_MANUAL_REVIEW" | undefined {
-  return value === "QUALITY_PASS" || value === "QUALITY_MANUAL_REVIEW" ? value : undefined;
+function normalizeQualityFinalStatus(value: unknown): FanqieFinalQualityStatus | undefined {
+  return value === "QUALITY_PASS" || value === "QUALITY_WARN_POLISH_OPTIONAL" || value === "QUALITY_MANUAL_REVIEW" ? value : undefined;
 }
 
 function normalizeBodySourceValue(value: unknown): ContinuityBodySource | undefined {

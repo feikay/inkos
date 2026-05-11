@@ -20,6 +20,7 @@ const DEFAULTS = {
 
 const FINAL_STATUS = {
   ready: "READY_TO_PUBLISH",
+  writeAudit: "STOPPED_BY_WRITE_AUDIT",
   continuity: "STOPPED_BY_CONTINUITY",
   quality: "STOPPED_BY_QUALITY",
   numeric: "STOPPED_BY_NUMERIC",
@@ -104,6 +105,13 @@ function latestChapter(bookDir) {
   return chapters.length ? Math.max(...chapters) : 0;
 }
 
+function findChapterFile(bookDir, chapter) {
+  const chaptersDir = path.join(bookDir, "chapters");
+  return walk(chaptersDir)
+    .filter((file) => chapterNoFromFile(file) === chapter)
+    .sort((a, b) => path.basename(a).localeCompare(path.basename(b)))[0] || null;
+}
+
 function readJsonIfExists(file) {
   if (!fs.existsSync(file)) return null;
   try {
@@ -121,6 +129,82 @@ function stdoutSummary(text, limit = 1600) {
     .slice(-24)
     .join("\n");
   return compact.length > limit ? `${compact.slice(0, limit)}...` : compact;
+}
+
+const WRITE_AUDIT_SIGNALS = [
+  "audit-failed",
+  "payoff-missing",
+  "ending-type-mismatch",
+  "mood-cadence-violation",
+  "scene-semantic-failure",
+  "State update skipped",
+  "did not create a chapter file",
+];
+
+const WRITE_AUDIT_REASON_CODES = [
+  "payoff-missing",
+  "ending-type-mismatch",
+  "mood-cadence-violation",
+  "scene-semantic-failure",
+];
+
+function hasWriteAuditFailureSignal(text) {
+  return WRITE_AUDIT_SIGNALS.some((signal) => text.includes(signal));
+}
+
+function uniq(values) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function extractWriteAuditFailure(chapter, text) {
+  const reasons = uniq(WRITE_AUDIT_REASON_CODES.filter((reason) => text.includes(reason)));
+  const promisedPayoff = text.match(/payoff-missing:[^\n]*?[:：]\s*([^。\n]+)(?:。|\n|$)/u)?.[1]?.trim() || "";
+  const expectedEndingType = text.match(/endingType[:：]\s*([A-Za-z0-9_-]+)/u)?.[1]?.trim() || "";
+
+  return {
+    chapter: chapterPrefix(chapter),
+    reasons,
+    promisedPayoff,
+    expectedEndingType,
+    suggestedAction: "Add chapter retry hint and rerun write next.",
+  };
+}
+
+function renderRetryHint(failure) {
+  const payoff = failure.promisedPayoff || "promised payoff";
+  const endingType = failure.expectedEndingType || "resolution_end";
+  return `# Chapter ${failure.chapter} Retry Hint
+
+本章必须是 breath / ${endingType} 章节，不是高压战斗章。
+
+必须兑现 promised payoff：
+“${payoff}”。
+
+正文中必须明确出现：
+
+1. 伤势为什么危险；
+2. 谁出手或什么方法暂时压住伤势；
+3. 暂时稳住后的具体表现；
+4. 稳住之后留下的隐患或代价；
+5. 主角或关键人物对这次暂稳的反应；
+6. 章尾必须阶段性收束，不能再爆发新危机。
+
+禁止：
+
+1. 继续升级战斗；
+2. 引入新敌人强压；
+3. 只写“撑住了”但没有疗伤过程；
+4. 章尾写成 cliffhanger；
+5. 忽略“${payoff}”这个 payoff。
+`;
+}
+
+function writeRetryHint(bookDir, failure) {
+  const dir = path.join(bookDir, "reviews", "write-retry-hints");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${failure.chapter}.md`);
+  fs.writeFileSync(file, renderRetryHint(failure), "utf8");
+  return file;
 }
 
 function commandToString(command, args) {
@@ -221,7 +305,7 @@ function classifyPublishReady(report, step) {
   const corpus = reportCorpus(report, step);
   const lower = corpus.toLowerCase();
 
-  if (status === "READY_TO_EXPORT" || status === "PASS") return { kind: "pass", status };
+  if (status === "READY_TO_EXPORT" || status === "READY_WITH_WARNINGS" || status === "PASS") return { kind: "pass", status };
   if (/DROP/u.test(corpus) || status.includes("DROP")) return { kind: "drop", status };
 
   if (/SIX_PART_FAIL|六段|6段|hook|payoff|pull|钩子|回收|追读|承压|反转/iu.test(corpus)) {
@@ -287,9 +371,22 @@ function renderMarkdown(report) {
     `- finalStatus: ${report.finalStatus}`,
     `- exported: ${report.exported ? "true" : "false"}`,
     "",
-    "## Chapters",
-    "",
   ];
+
+  if (report.writeAuditFailure) {
+    lines.push("## Write Audit Failure");
+    lines.push("");
+    lines.push(`- chapter: ${report.writeAuditFailure.chapter}`);
+    lines.push(`- reasons: ${report.writeAuditFailure.reasons.length ? report.writeAuditFailure.reasons.join(", ") : "n/a"}`);
+    lines.push(`- promisedPayoff: ${report.writeAuditFailure.promisedPayoff || "n/a"}`);
+    lines.push(`- expectedEndingType: ${report.writeAuditFailure.expectedEndingType || "n/a"}`);
+    lines.push(`- suggestedAction: ${report.writeAuditFailure.suggestedAction}`);
+    lines.push(`- retryHint: ${report.writeAuditFailure.retryHintPath || "n/a"}`);
+    lines.push("");
+  }
+
+  lines.push("## Chapters");
+  lines.push("");
 
   for (const chapter of report.chapters) {
     lines.push(`### ${chapterPrefix(chapter.chapter)}`);
@@ -300,6 +397,12 @@ function renderMarkdown(report) {
     lines.push(`- continuity-auto: ${chapter.didContinuityAuto ? "true" : "false"}`);
     lines.push(`- fanqie-polish: ${chapter.didFanqiePolish ? "true" : "false"}`);
     lines.push(`- repair-fanqie: ${chapter.didRepairFanqie ? "true" : "false"}`);
+    if (chapter.writeAuditFailure) {
+      lines.push(`- writeAuditFailure reasons: ${chapter.writeAuditFailure.reasons.length ? chapter.writeAuditFailure.reasons.join(", ") : "n/a"}`);
+      lines.push(`- promisedPayoff: ${chapter.writeAuditFailure.promisedPayoff || "n/a"}`);
+      lines.push(`- expectedEndingType: ${chapter.writeAuditFailure.expectedEndingType || "n/a"}`);
+      lines.push(`- retryHint: ${chapter.writeAuditFailure.retryHintPath || "n/a"}`);
+    }
     lines.push("");
     lines.push("| Step | Exit | Command | Summary |");
     lines.push("| --- | ---: | --- | --- |");
@@ -392,6 +495,7 @@ function makeChapterRun(chapter) {
     didContinuityAuto: false,
     didFanqiePolish: false,
     didRepairFanqie: false,
+    writeAuditFailure: null,
     exported: false,
     finalStatus: "UNKNOWN_ERROR",
   };
@@ -431,6 +535,7 @@ async function main() {
     exportStep: null,
     finalStatus: FINAL_STATUS.unknown,
     stopReason: "",
+    writeAuditFailure: null,
   };
 
   const cli = path.join("..", "packages", "cli", "dist", "index.js");
@@ -463,6 +568,25 @@ async function main() {
       const after = opts.dryRun ? before + 1 : latestChapter(bookDir);
       chapter = after > before ? after : before + 1;
       chapterRun.chapter = chapter;
+
+      if (!opts.dryRun && !findChapterFile(bookDir, chapter)) {
+        const writeOutput = `${writeStep.stdout}\n${writeStep.stderr}`;
+        if (after <= before && hasWriteAuditFailureSignal(writeOutput)) {
+          const failure = extractWriteAuditFailure(chapter, writeOutput);
+          const retryHintFile = writeRetryHint(bookDir, failure);
+          failure.retryHintPath = rel(retryHintFile);
+          chapterRun.writeAuditFailure = failure;
+          report.writeAuditFailure = failure;
+          chapterRun.finalStatus = FINAL_STATUS.writeAudit;
+          report.stopReason = `write next produced write-audit failure for chapter ${chapterPrefix(chapter)}. No chapter file was created. Retry hint generated at ${failure.retryHintPath}.`;
+        } else {
+          chapterRun.finalStatus = FINAL_STATUS.unknown;
+          report.stopReason = `write next did not create chapter file ${chapterPrefix(chapter)}.`;
+        }
+        report.chapters.push(chapterRun);
+        hardStop = true;
+        break;
+      }
     }
 
     report.processedChapters.push(chapter);

@@ -71,6 +71,8 @@ export interface WriteChapterInput {
   readonly bookDir: string;
   readonly chapterNumber: number;
   readonly externalContext?: string;
+  readonly retryHint?: string;
+  readonly retryHintPath?: string;
   readonly chapterIntent?: string;
   readonly contextPackage?: ContextPackage;
   readonly ruleStack?: RuleStack;
@@ -316,6 +318,8 @@ export class WriterAgent extends BaseAgent {
           selectedEvidenceBlock: this.joinGovernedEvidenceBlocks(governedMemoryBlocks),
           titleCandidates,
           patternBreakerDirective: patternBreaker.directive,
+          retryHint: input.retryHint,
+          retryHintPath: input.retryHintPath,
         })
       : (() => {
           // Smart context filtering: inject only relevant parts of truth files
@@ -357,6 +361,8 @@ export class WriterAgent extends BaseAgent {
             chapterGoal,
             hookEmergenceDirective,
             patternBreakerDirective: patternBreaker.directive,
+            retryHint: input.retryHint,
+            retryHintPath: input.retryHintPath,
           });
         })();
 
@@ -1408,10 +1414,13 @@ ${chapter}`;
       readonly targetHookNotes?: string;
     };
     readonly patternBreakerDirective?: string;
+    readonly retryHint?: string;
+    readonly retryHintPath?: string;
   }): string {
     const contextBlock = params.externalContext
       ? `\n## 外部指令\n以下是来自外部系统的创作指令，请在本章中融入：\n\n${params.externalContext}\n`
       : "";
+    const retryHintBlock = this.buildRetryHintBlock(params.retryHint, params.retryHintPath, params.language ?? "zh");
 
     const ledgerBlock = params.ledger
       ? `\n## 资源账本\n${params.ledger}\n`
@@ -1463,6 +1472,7 @@ ${params.parentCanon}\n`
     if (params.language === "en") {
       return `Write chapter ${params.chapterNumber}.
 ${modeLockBlock}
+${retryHintBlock}
 ${contextBlock}
 ## Current State
 ${params.currentState}
@@ -1498,6 +1508,7 @@ ${lengthRequirementBlock}
 
     return `请续写第${params.chapterNumber}章。
 ${modeLockBlock}
+${retryHintBlock}
 ${contextBlock}
 ## 当前状态卡
 ${params.currentState}
@@ -1853,6 +1864,37 @@ ${lengthRequirementBlock}
     return `${lockedBlock}\n\n[Scene2]\n${normalized}`.trim();
   }
 
+  private buildRetryHintBlock(
+    retryHint: string | undefined,
+    retryHintPath: string | undefined,
+    language: "zh" | "en",
+  ): string {
+    const hint = retryHint?.trim();
+    if (!hint) return "";
+
+    if (language === "en") {
+      return `\n## Chapter Retry Hint (Hard Constraints for This Chapter Only)
+Source: ${retryHintPath ?? "reviews/write-retry-hints"}
+
+These constraints have higher priority than ordinary style advice, soft constraints, and aesthetic preferences.
+Apply them only to this chapter.
+Do not use them to overwrite canon, continuity facts, worldbuilding, character identity, or the main plot setup. If any line conflicts with canon or established continuity, preserve canon and satisfy the non-conflicting parts.
+
+${hint}
+`;
+    }
+
+    return `\n## 章节重试提示（本章专属硬约束）
+来源：${retryHintPath ?? "reviews/write-retry-hints"}
+
+以下约束优先级高于普通风格建议、软约束和审美偏好。
+只作用于本章，不得外溢到其他章节。
+不得用它覆盖正典、连续性事实、世界观、人设身份或主线设定；如果提示与既有硬设定冲突，保留硬设定，并执行不冲突的部分。
+
+${hint}
+`;
+  }
+
   private buildGovernedUserPrompt(params: {
     readonly chapterNumber: number;
     readonly chapterIntent: string;
@@ -1865,6 +1907,8 @@ ${lengthRequirementBlock}
     readonly selectedEvidenceBlock?: string;
     readonly titleCandidates?: ReadonlyArray<{ readonly style: string; readonly title: string }>;
     readonly patternBreakerDirective?: string;
+    readonly retryHint?: string;
+    readonly retryHintPath?: string;
   }): string {
     const sanitizedChapterIntent = this.stripLegacyEndingHookDirective(params.chapterIntent);
     const contextSections = params.contextPackage.selectedContext
@@ -1898,6 +1942,7 @@ ${lengthRequirementBlock}
     const patternBreakerBlock = params.patternBreakerDirective
       ? `\n${params.patternBreakerDirective}\n`
       : "";
+    const retryHintBlock = this.buildRetryHintBlock(params.retryHint, params.retryHintPath, params.language ?? "zh");
     const moodDirective = this.extractMoodDirectiveFromIntentMarkdown(sanitizedChapterIntent);
     const modeLockBlock = this.buildFirstPassModeLockBlock(moodDirective, params.language ?? "zh");
     const moodDirectiveBlock = this.buildMoodDirectiveBlock(moodDirective, params.language ?? "zh");
@@ -1919,6 +1964,7 @@ ${lengthRequirementBlock}
     if (params.language === "en") {
       return `Write chapter ${params.chapterNumber}.
 ${modeLockBlock}
+${retryHintBlock}
 
 ## Chapter Intent
 ${sanitizedChapterIntent}
@@ -1954,6 +2000,7 @@ ${lengthRequirementBlock}
 
     return `请续写第${params.chapterNumber}章。
 ${modeLockBlock}
+${retryHintBlock}
 
 ## 本章意图
 ${sanitizedChapterIntent}

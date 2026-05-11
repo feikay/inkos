@@ -241,6 +241,10 @@ function isPassStatus(report) {
   return statusOf(report, "final_status") === "PASS";
 }
 
+function isExportablePublishStatus(status) {
+  return status === "READY_TO_EXPORT" || status === "READY_WITH_WARNINGS";
+}
+
 function hasBlockingReviewedStatus(no, reports) {
   const continuityDecisionReport = reports.finalReport || reports.report;
   const status = statusOf(continuityDecisionReport, "final_status");
@@ -273,7 +277,7 @@ function hasBlockingReviewedStatus(no, reports) {
 function selectReviewedChapterFile(no, originalFile) {
   const idx = formatChapterIndex(no);
   const reports = getReviewReports(no);
-  if (reports.publishReadyReport?.publish_status === "READY_TO_EXPORT") {
+  if (isExportablePublishStatus(reports.publishReadyReport?.publish_status)) {
     const reportedFile = typeof reports.publishReadyReport.final_candidate_file === "string"
       ? reports.publishReadyReport.final_candidate_file
       : "";
