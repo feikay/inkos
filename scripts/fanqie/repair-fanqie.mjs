@@ -75,6 +75,9 @@ const baseUrl =
   (provider === "anthropic" ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1");
 
 const minScore = Number(arg("min", 4));
+const chapterArg = arg("chapter");
+const fromArg = arg("from");
+const toArg = arg("to");
 const apply = flag("apply");
 const dryRun = flag("dry-run");
 
@@ -368,10 +371,21 @@ async function callLLMWithProgress({ prompt, chapterNo, missing }) {
 }
 
 const report = fs.readFileSync(reportFile, "utf8");
-const weak = parseWeakChapters(report);
+const chapterFilter = chapterArg
+  ? { from: Number(chapterArg), to: Number(chapterArg) }
+  : fromArg || toArg
+    ? { from: Number(fromArg || 1), to: Number(toArg || fromArg || 99999) }
+    : null;
+if (chapterFilter && (!Number.isInteger(chapterFilter.from) || !Number.isInteger(chapterFilter.to) || chapterFilter.from < 1 || chapterFilter.to < chapterFilter.from)) {
+  console.error("--chapter 或 --from/--to 参数不合法。");
+  process.exit(1);
+}
+const weak = parseWeakChapters(report)
+  .filter((item) => !chapterFilter || item.no >= chapterFilter.from && item.no <= chapterFilter.to);
 
 if (!weak.length) {
-  console.log(`没有低于 ${minScore}/6 的章节。`);
+  const rangeLabel = chapterFilter ? `（范围：${chapterFilter.from}-${chapterFilter.to}）` : "";
+  console.log(`没有低于 ${minScore}/6 的章节${rangeLabel}。`);
   process.exit(0);
 }
 
