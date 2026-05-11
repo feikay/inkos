@@ -89,7 +89,7 @@ export async function runChapterContinuityCheck(
       ].join("\n"),
     },
     { role: "user", content: prompt },
-  ], { temperature: 0.1, maxTokens: 4096 });
+  ], { temperature: 0.1, maxTokens: 4096, stage: "continuity" });
 
   const parsed = parseContinuityReport(response.content);
   const guarded = applyContinuityGuardrails(parsed, input.prevChapter, input.currentChapter, {
@@ -166,7 +166,7 @@ export async function runChapterContinuityFix(
       ].join("\n"),
     },
     { role: "user", content: report.rewrite_prompt },
-  ], { temperature: 0.35, maxTokens: 8192 });
+  ], { temperature: 0.35, maxTokens: 8192, stage: "continuity" });
 
   const fixed = stripCodeFence(response.content).trim();
   if (!fixed) {

@@ -400,11 +400,14 @@ describe("PipelineRunner", () => {
     const validator = resolveOverride("state-validator");
 
     expect(planner.model).toBe("planner-model");
+    expect(planner.client.providerLabel).toBe("custom");
     expect(planner.client.defaults.temperature).toBe(0.25);
     expect(planner.client.defaults.maxTokens).toBe(12000);
     expect(composer.model).toBe("composer-model");
+    expect(composer.client.providerLabel).toBe("custom");
     expect(composer.client.defaults.temperature).toBe(0.3);
     expect(validator.model).toBe("validator-model");
+    expect(validator.client.providerLabel).toBe("custom");
     expect(validator.client.defaults.temperature).toBe(0.1);
     expect(validator.client.stream).toBe(false);
   });

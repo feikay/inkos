@@ -481,7 +481,9 @@ export class PipelineRunner {
       || overrideProvider === "anthropic"
       || overrideProvider === "custom"
         ? overrideProvider
-        : resolveServiceProviderFamily(service) ?? base?.provider ?? "custom"
+        : overrideProvider === undefined
+          ? base?.provider ?? resolveServiceProviderFamily(service) ?? "custom"
+          : resolveServiceProviderFamily(service) ?? base?.provider ?? "custom"
     ) as "openai" | "anthropic" | "custom";
     const apiKeySource = override.apiKeyEnv
       ? `env:${override.apiKeyEnv}`
@@ -2014,7 +2016,7 @@ export class PipelineRunner {
         role: "user",
         content: `分析以下参考文本的写作风格：\n\n${referenceText.slice(0, 20000)}`,
       },
-    ], { temperature: 0.3 });
+    ], { temperature: 0.3, stage: "style-extraction", projectRoot: this.config.projectRoot });
 
     await writeFile(join(storyDir, "style_guide.md"), response.content, "utf-8");
     return response.content;
@@ -2136,7 +2138,7 @@ ${emotions}
 ## 正传角色矩阵
 ${matrix}`,
       },
-    ], { temperature: 0.3 });
+    ], { temperature: 0.3, stage: "architect", projectRoot: this.config.projectRoot });
 
     // Append deterministic meta block (LLM may hallucinate timestamps)
     const metaBlock = [

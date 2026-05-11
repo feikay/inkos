@@ -1936,7 +1936,7 @@ async function writeQualityFixedChapter(params: {
       ].join("\n"),
     },
     { role: "user", content: buildQualityAutoFixPrompt(params.currentText, params.qualityReport) },
-  ], { temperature: 0.28, maxTokens: 8192 });
+  ], { temperature: 0.28, maxTokens: 8192, stage: "fanqie-quality" });
   const fixed = stripMarkdownCodeFence(response.content).trim();
   if (!fixed) throw new Error("quality-auto-fix returned empty chapter content");
   const outDir = join(params.bookDir, "chapters-quality-fixed");
@@ -2537,7 +2537,7 @@ async function writeFanqiePolishedChapter(params: {
       ].join("\n"),
     },
     { role: "user", content: params.polishPrompt },
-  ], { temperature: 0.35, maxTokens: 8192 });
+  ], { temperature: 0.35, maxTokens: 8192, stage: "fanqie-polish" });
   const polished = stripMarkdownCodeFence(response.content).trim();
   if (!polished) throw new Error("fanqie-polish returned empty chapter content");
   const outDir = join(params.bookDir, "chapters-polished");
@@ -2669,7 +2669,7 @@ async function runContinuitySalvage(params: {
       ].join("\n"),
     },
     { role: "user", content: prompt },
-  ], { temperature: 0.45, maxTokens: 8192 });
+  ], { temperature: 0.45, maxTokens: 8192, stage: "continuity" });
 
   const rewritten = stripMarkdownCodeFence(response.content).trim();
   if (!rewritten) throw new Error("auto-salvage returned empty chapter content");

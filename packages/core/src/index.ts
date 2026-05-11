@@ -183,6 +183,7 @@ export * from "./agent/index.js";
 
 // LLM
 export { createLLMClient, chatCompletion, chatWithTools, createStreamMonitor, PartialResponseError, type LLMClient, type LLMResponse, type LLMMessage, type ToolDefinition, type ToolCall, type AgentMessage, type ChatWithToolsResult, type StreamProgress, type OnStreamProgress } from "./llm/provider.js";
+export { logLlmStart, logLlmSuccess, logLlmError, withLlmUsageLogging, normalizeProviderUsage, type LlmTokenUsage, type LlmUsageRecord } from "./llm/usageLogger.js";
 export {
   SERVICE_PRESETS,
   SERVICE_TO_PI_PROVIDER,

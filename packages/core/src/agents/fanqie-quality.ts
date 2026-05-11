@@ -82,7 +82,7 @@ export async function runFanqieQualityCheck(input: RunFanqieQualityCheckInput): 
       ].join("\n"),
     },
     { role: "user", content: buildFanqieQualityPrompt(input) },
-  ], { temperature: 0.1, maxTokens: 4096 });
+  ], { temperature: 0.1, maxTokens: 4096, stage: "fanqie-quality" });
 
   const parsed = parseFanqieQualityReport(response.content, input);
   const guarded = normalizeFanqieQualityReport(parsed, input);

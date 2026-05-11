@@ -30,6 +30,8 @@ export abstract class BaseAgent {
     return chatCompletion(this.ctx.client, this.ctx.model, messages, {
       ...options,
       onStreamProgress: this.ctx.onStreamProgress,
+      stage: this.name,
+      projectRoot: this.ctx.projectRoot,
     });
   }
 
@@ -48,6 +50,8 @@ export abstract class BaseAgent {
         ...options,
         webSearch: true,
         onStreamProgress: this.ctx.onStreamProgress,
+        stage: this.name,
+        projectRoot: this.ctx.projectRoot,
       });
     }
 

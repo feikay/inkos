@@ -15,6 +15,7 @@ import type {
   ToolCall as PiToolCall,
 } from "@mariozechner/pi-ai";
 import { resolveServicePreset } from "./service-presets.js";
+import { normalizeProviderUsage, withLlmUsageLogging, type LlmTokenUsage } from "./usageLogger.js";
 
 // === Streaming Monitor Types ===
 
@@ -76,6 +77,7 @@ export interface LLMResponse {
     readonly completionTokens: number;
     readonly totalTokens: number;
   };
+  readonly usageAvailable?: boolean;
 }
 
 export interface LLMMessage {
@@ -85,6 +87,7 @@ export interface LLMMessage {
 
 export interface LLMClient {
   readonly provider: "openai" | "anthropic";
+  readonly providerLabel?: string;
   readonly service?: string;
   readonly configSource?: LLMConfig["configSource"];
   readonly apiFormat: "chat" | "responses";
@@ -123,6 +126,12 @@ export type AgentMessage =
 export interface ChatWithToolsResult {
   readonly content: string;
   readonly toolCalls: ReadonlyArray<ToolCall>;
+  readonly usage?: {
+    readonly promptTokens: number;
+    readonly completionTokens: number;
+    readonly totalTokens: number;
+  };
+  readonly usageAvailable?: boolean;
 }
 
 // === Factory ===
@@ -164,6 +173,7 @@ export function createLLMClient(config: LLMConfig): LLMClient {
 
   return {
     provider,
+    providerLabel: config.provider === "custom" && serviceName !== "custom" ? serviceName : config.provider,
     service: serviceName,
     configSource: config.configSource,
     apiFormat,
@@ -226,6 +236,19 @@ function stripReservedKeys(extra: Record<string, unknown>): Record<string, unkno
     if (!RESERVED_KEYS.has(key)) result[key] = value;
   }
   return result;
+}
+
+function usageFromResponse(response: { readonly usage?: LLMResponse["usage"]; readonly usageAvailable?: boolean }): LlmTokenUsage | undefined {
+  if (response.usageAvailable === false) return undefined;
+  return normalizeProviderUsage(response.usage);
+}
+
+function usageAvailable(usage: LlmTokenUsage | undefined): boolean {
+  return usage !== undefined;
+}
+
+function zeroUsage(): LLMResponse["usage"] {
+  return { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 }
 
 // === Fixed-Temperature Model Clamp ===
@@ -480,13 +503,17 @@ async function chatCompletionViaCustomAnthropicCompatible(
     if (!content) {
       throw wrapLLMError(new Error("LLM returned empty response"), errorCtx);
     }
+    const usage = normalizeProviderUsage(json?.usage);
     return {
       content,
-      usage: {
-        promptTokens: json?.usage?.input_tokens ?? 0,
-        completionTokens: json?.usage?.output_tokens ?? 0,
-        totalTokens: (json?.usage?.input_tokens ?? 0) + (json?.usage?.output_tokens ?? 0),
-      },
+      usage: usage
+        ? {
+            promptTokens: usage.inputTokens ?? 0,
+            completionTokens: usage.outputTokens ?? 0,
+            totalTokens: usage.totalTokens ?? 0,
+          }
+        : zeroUsage(),
+      usageAvailable: usageAvailable(usage),
     };
   }
 
@@ -533,7 +560,7 @@ async function chatCompletionViaCustomAnthropicCompatible(
   if (!usage.totalTokens) {
     usage.totalTokens = usage.promptTokens + usage.completionTokens;
   }
-  return { content, usage };
+  return { content, usage, usageAvailable: usageAvailable(normalizeProviderUsage(usage)) };
 }
 
 async function chatCompletionViaCustomOpenAICompatible(
@@ -581,13 +608,17 @@ async function chatCompletionViaCustomOpenAICompatible(
       if (!content) {
         throw wrapLLMError(new Error("LLM returned empty response"), errorCtx);
       }
+      const usage = normalizeProviderUsage(json?.usage);
       return {
         content,
-        usage: {
-          promptTokens: json?.usage?.input_tokens ?? 0,
-          completionTokens: json?.usage?.output_tokens ?? 0,
-          totalTokens: json?.usage?.total_tokens ?? 0,
-        },
+        usage: usage
+          ? {
+              promptTokens: usage.inputTokens ?? 0,
+              completionTokens: usage.outputTokens ?? 0,
+              totalTokens: usage.totalTokens ?? 0,
+            }
+          : zeroUsage(),
+        usageAvailable: usageAvailable(usage),
       };
     }
 
@@ -632,7 +663,7 @@ async function chatCompletionViaCustomOpenAICompatible(
     if (!content) {
       throw wrapLLMError(new Error("LLM returned empty response from stream"), errorCtx);
     }
-    return { content, usage };
+    return { content, usage, usageAvailable: usageAvailable(normalizeProviderUsage(usage)) };
   }
 
   const payload: Record<string, unknown> = {
@@ -667,13 +698,17 @@ async function chatCompletionViaCustomOpenAICompatible(
     if (!content) {
       throw wrapLLMError(new Error("LLM returned empty response"), errorCtx);
     }
+    const usage = normalizeProviderUsage(json?.usage);
     return {
       content,
-      usage: {
-        promptTokens: json?.usage?.prompt_tokens ?? 0,
-        completionTokens: json?.usage?.completion_tokens ?? 0,
-        totalTokens: json?.usage?.total_tokens ?? 0,
-      },
+      usage: usage
+        ? {
+            promptTokens: usage.inputTokens ?? 0,
+            completionTokens: usage.outputTokens ?? 0,
+            totalTokens: usage.totalTokens ?? 0,
+          }
+        : zeroUsage(),
+      usageAvailable: usageAvailable(usage),
     };
   }
 
@@ -716,7 +751,7 @@ async function chatCompletionViaCustomOpenAICompatible(
   if (!content) {
     throw wrapLLMError(new Error("LLM returned empty response from stream"), errorCtx);
   }
-  return { content, usage };
+  return { content, usage, usageAvailable: usageAvailable(normalizeProviderUsage(usage)) };
 }
 
 // === Simple Chat (used by all agents via BaseAgent.chat()) ===
@@ -731,6 +766,9 @@ export async function chatCompletion(
     readonly webSearch?: boolean;
     readonly onStreamProgress?: OnStreamProgress;
     readonly onTextDelta?: (text: string) => void;
+    readonly stage?: string;
+    readonly command?: string;
+    readonly projectRoot?: string;
   },
 ): Promise<LLMResponse> {
   const perCallMax = options?.maxTokens ?? client.defaults.maxTokens;
@@ -747,21 +785,34 @@ export async function chatCompletion(
   const onTextDelta = options?.onTextDelta;
   const errorCtx = { baseUrl: client._piModel?.baseUrl ?? "(unknown)", model };
 
-  try {
-    if (shouldUseNativeCustomTransport(client)) {
-      return await chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta);
-    }
-    return await chatCompletionViaPiAi(client, model, messages, resolved, onStreamProgress, onTextDelta);
-  } catch (error) {
-    // Stream interrupted but partial content is usable — return truncated response
-    if (error instanceof PartialResponseError) {
-      return {
-        content: error.partialContent,
-        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
-      };
-    }
-    throw wrapLLMError(error, errorCtx);
-  }
+  return withLlmUsageLogging(
+    {
+      command: options?.command,
+      stage: options?.stage,
+      provider: client.providerLabel ?? client.provider,
+      model,
+      projectRoot: options?.projectRoot,
+    },
+    async () => {
+      try {
+        if (shouldUseNativeCustomTransport(client)) {
+          return await chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta);
+        }
+        return await chatCompletionViaPiAi(client, model, messages, resolved, onStreamProgress, onTextDelta);
+      } catch (error) {
+        // Stream interrupted but partial content is usable — return truncated response
+        if (error instanceof PartialResponseError) {
+          return {
+            content: error.partialContent,
+            usage: zeroUsage(),
+            usageAvailable: false,
+          };
+        }
+        throw wrapLLMError(error, errorCtx);
+      }
+    },
+    usageFromResponse,
+  );
 }
 
 // === Tool-calling Chat (used by agent loop) ===
@@ -774,20 +825,35 @@ export async function chatWithTools(
   options?: {
     readonly temperature?: number;
     readonly maxTokens?: number;
+    readonly stage?: string;
+    readonly command?: string;
+    readonly projectRoot?: string;
   },
 ): Promise<ChatWithToolsResult> {
-  try {
-    const resolved = {
-      temperature: clampTemperatureForModel(
-        model,
-        options?.temperature ?? client.defaults.temperature,
-      ),
-      maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
-    };
-    return await chatWithToolsViaPiAi(client, model, messages, tools, resolved);
-  } catch (error) {
-    throw wrapLLMError(error);
-  }
+  return withLlmUsageLogging(
+    {
+      command: options?.command,
+      stage: options?.stage,
+      provider: client.providerLabel ?? client.provider,
+      model,
+      projectRoot: options?.projectRoot,
+    },
+    async () => {
+      try {
+        const resolved = {
+          temperature: clampTemperatureForModel(
+            model,
+            options?.temperature ?? client.defaults.temperature,
+          ),
+          maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
+        };
+        return await chatWithToolsViaPiAi(client, model, messages, tools, resolved);
+      } catch (error) {
+        throw wrapLLMError(error);
+      }
+    },
+    usageFromResponse,
+  );
 }
 
 // === pi-ai Unified Implementation ===
@@ -927,6 +993,7 @@ async function chatCompletionViaPiAi(
         completionTokens: response.usage.output,
         totalTokens: response.usage.totalTokens,
       },
+      usageAvailable: true,
     };
   }
 
@@ -982,6 +1049,7 @@ async function chatCompletionViaPiAi(
       completionTokens: outputTokens,
       totalTokens: inputTokens + outputTokens,
     },
+    usageAvailable: true,
   };
 }
 
@@ -1018,12 +1086,23 @@ async function chatWithToolsViaPiAi(
         name: block.name,
         arguments: JSON.stringify(block.arguments),
       }));
-    return { content, toolCalls };
+    return {
+      content,
+      toolCalls,
+      usage: {
+        promptTokens: response.usage.input,
+        completionTokens: response.usage.output,
+        totalTokens: response.usage.totalTokens,
+      },
+      usageAvailable: true,
+    };
   }
 
   const eventStream = piStream(piModel, context, streamOpts);
   let content = "";
   const toolCalls: ToolCall[] = [];
+  let inputTokens = 0;
+  let outputTokens = 0;
 
   for await (const event of eventStream) {
     if (event.type === "text_delta") {
@@ -1036,10 +1115,24 @@ async function chatWithToolsViaPiAi(
         arguments: JSON.stringify(event.toolCall.arguments),
       });
     }
+    if (event.type === "done" || event.type === "error") {
+      const msg = event.type === "done" ? event.message : event.error;
+      inputTokens = msg.usage.input;
+      outputTokens = msg.usage.output;
+    }
     if (event.type === "error" && event.error.errorMessage) {
       throw new Error(event.error.errorMessage);
     }
   }
 
-  return { content, toolCalls };
+  return {
+    content,
+    toolCalls,
+    usage: {
+      promptTokens: inputTokens,
+      completionTokens: outputTokens,
+      totalTokens: inputTokens + outputTokens,
+    },
+    usageAvailable: true,
+  };
 }

@@ -299,7 +299,7 @@ export const doctorCommand = new Command("doctor")
               });
               const response = await chatCompletion(client, model, [
                 { role: "user", content: "Say OK" },
-              ], { maxTokens: 16 });
+              ], { maxTokens: 16, stage: "doctor" });
 
               connected = true;
               detectedDetail = `OK (model: ${model}, apiFormat=${plan.apiFormat}, stream=${plan.stream}, tokens: ${response.usage.totalTokens})`;

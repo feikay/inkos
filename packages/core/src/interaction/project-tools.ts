@@ -33,6 +33,7 @@ type InstrumentablePipelineLike = PipelineLike & {
     logger?: Logger;
     client?: LLMClient;
     model?: string;
+    projectRoot?: string;
   };
 };
 
@@ -478,7 +479,7 @@ export function createInteractionToolsFromDeps(
           { role: "user", content: userContent },
         ],
         [CREATE_BOOK_TOOL],
-        { temperature: 0.4 },
+        { temperature: 0.4, stage: "architect", projectRoot: instrumentedPipeline.config.projectRoot },
       );
 
       // Extract tool call if present
@@ -581,6 +582,8 @@ export function createInteractionToolsFromDeps(
               temperature: chatRequestOptions.temperature ?? 0.4,
               ...(chatRequestOptions.maxTokens !== undefined && { maxTokens: chatRequestOptions.maxTokens }),
               onTextDelta: hooks?.onChatTextDelta,
+              stage: "interaction-chat",
+              projectRoot: instrumentedPipeline.config.projectRoot,
             },
           );
         } catch (err) {
