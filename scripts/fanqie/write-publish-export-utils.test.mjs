@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   buildWarningSummary,
+  buildResolvedWarnings,
   findLatestJsonReport,
   generateManualFixPrompt,
   makeResumePlan,
@@ -40,11 +41,14 @@ test("resume plan starts at failed chapter and preserves remaining count", () =>
   });
 
   assert.equal(plan.resumedFromChapter, "0096");
-  assert.equal(plan.queue.length, 1);
+  assert.equal(plan.queue.length, 2);
   assert.equal(plan.queue[0].chapter, 96);
   assert.equal(plan.queue[0].resumeKind, "continuity");
-  assert.equal(plan.remainingNewCount, 1);
+  assert.equal(plan.queue[1].chapter, 97);
+  assert.equal(plan.remainingNewCount, 0);
   assert.equal(plan.remainingCount, 2);
+  assert.equal(plan.targetStartChapter, 95);
+  assert.equal(plan.targetEndChapter, 97);
 });
 
 test("range resume only applies failure strategy to the first failed chapter", () => {
@@ -65,8 +69,57 @@ test("range resume only applies failure strategy to the first failed chapter", (
 
   assert.deepEqual(plan.queue.map((item) => [item.chapter, item.resumeKind]), [
     [96, "quality"],
-    [97, "normal"],
   ]);
+});
+
+test("count resume preserves explicit target range and does not add extra chapters", () => {
+  const report = {
+    request: { count: 4 },
+    targetStartChapter: "0100",
+    targetEndChapter: "0103",
+    chapters: [
+      { chapter: 100, finalStatus: "READY_TO_PUBLISH" },
+      { chapter: 101, finalStatus: "STOPPED_BY_WRITE_LOCK" },
+    ],
+  };
+
+  const plan = makeResumePlan({
+    sourceReportPath: "report.json",
+    sourceReport: report,
+    bookDir: "/tmp/book",
+  });
+
+  assert.deepEqual(plan.queue.map((item) => item.chapter), [101, 102, 103]);
+  assert.equal(plan.queue[0].resumeKind, "writeLock");
+  assert.equal(plan.targetEndChapter, 103);
+  assert.equal(plan.remainingCount, 3);
+});
+
+test("resume rechecks all target chapters when report final status is not ready but chapters are ready", () => {
+  const report = {
+    request: { count: 4 },
+    finalStatus: "UNKNOWN_ERROR",
+    targetStartChapter: "0100",
+    targetEndChapter: "0103",
+    completedChapters: ["0100", "0101", "0102", "0103"],
+    chapters: [
+      { chapter: 100, finalStatus: "READY_TO_PUBLISH" },
+      { chapter: 101, finalStatus: "READY_TO_PUBLISH" },
+      { chapter: 102, finalStatus: "READY_TO_PUBLISH" },
+      { chapter: 103, finalStatus: "READY_TO_PUBLISH" },
+    ],
+  };
+
+  const plan = makeResumePlan({
+    sourceReportPath: "report.json",
+    sourceReport: report,
+    bookDir: "/tmp/book",
+  });
+
+  assert.equal(plan.noResumeNeeded, false);
+  assert.deepEqual(plan.queue.map((item) => item.chapter), [100, 101, 102, 103]);
+  assert.equal(plan.targetStartChapter, 100);
+  assert.equal(plan.targetEndChapter, 103);
 });
 
 test("warning summary classifies P0, P1, and P2 signals", () => {
@@ -105,6 +158,34 @@ test("warning summary classifies P0, P1, and P2 signals", () => {
   assert(summary.P0.some((item) => item.code === "BLOCKED_BY_CONTINUITY"));
   assert.equal(riskLevelForWarningSummary(summary), "BLOCKED");
   assert.equal(publishAdviceForWarningSummary(summary), "DO_NOT_PUBLISH");
+});
+
+test("warning summary ignores resolved historical continuity blockers for ready chapters", () => {
+  const report = {
+    request: { dryRun: true },
+    chapters: [
+      {
+        chapter: 103,
+        finalStatus: "READY_TO_PUBLISH",
+        publishReadyFinalStatus: "READY_WITH_WARNINGS",
+        numeric: { A: 0, B: 0, C: 0 },
+        didContinuityAuto: true,
+        steps: [
+          { name: "publish-ready", summary: "result: BLOCKED_BY_CONTINUITY" },
+          { name: "continuity-auto", summary: "result: PASS" },
+          { name: "publish-ready-recheck", summary: "result: READY_WITH_WARNINGS" },
+        ],
+      },
+    ],
+  };
+
+  const summary = buildWarningSummary(report);
+  const resolved = buildResolvedWarnings(report);
+  assert(!summary.P0.some((item) => item.code === "BLOCKED_BY_CONTINUITY"));
+  assert.deepEqual(resolved, [
+    { type: "BLOCKED_BY_CONTINUITY", resolvedBy: "continuity-auto", chapter: "0103" },
+  ]);
+  assert.equal(riskLevelForWarningSummary(summary), "MEDIUM");
 });
 
 test("manual fix prompt is generated under reviews/manual-fix-prompts", () => {

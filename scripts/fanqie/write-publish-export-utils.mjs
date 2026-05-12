@@ -49,6 +49,7 @@ export function inferFailureKind(chapter) {
   const publishStatus = String(chapter?.publishReadyFinalStatus || "").toUpperCase();
   const corpus = JSON.stringify(chapter || {}).toUpperCase();
 
+  if (finalStatus.includes("WRITE_LOCK") || finalStatus.includes("ACTIVE_LOCK") || finalStatus.includes("STALE_LOCK") || /WRITE\.LOCK|ACTIVE WRITE LOCK|STALE_LOCK/iu.test(corpus)) return "writeLock";
   if (finalStatus.includes("WRITE_AUDIT")) return "writeAudit";
   if (finalStatus.includes("NUMERIC")) return "numeric";
   if (finalStatus.includes("SIX_PART") || publishStatus.includes("SIX_PART") || corpus.includes("SIX_PART_FAIL")) return "sixPart";
@@ -58,9 +59,65 @@ export function inferFailureKind(chapter) {
   return "unknown";
 }
 
+function numberFromMaybePrefixed(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : null;
+}
+
+function targetRangeFromReport(sourceReport, chapters, failedChapter) {
+  const requestedCount = Number.isInteger(sourceReport?.request?.count) ? sourceReport.request.count : null;
+  const requestedFrom = Number.isInteger(sourceReport?.request?.from) ? sourceReport.request.from : null;
+  const requestedTo = Number.isInteger(sourceReport?.request?.to) ? sourceReport.request.to : null;
+  const explicitStart = numberFromMaybePrefixed(sourceReport?.targetStartChapter);
+  const explicitEnd = numberFromMaybePrefixed(sourceReport?.targetEndChapter);
+
+  if (explicitStart && explicitEnd) return { start: explicitStart, end: explicitEnd };
+  if (requestedFrom && requestedTo) return { start: requestedFrom, end: requestedTo };
+
+  if (requestedCount !== null) {
+    const chapterNumbers = chapters
+      .map((chapter) => Number(chapter.chapter))
+      .filter((chapter) => Number.isInteger(chapter) && chapter > 0);
+    const start = explicitStart || (chapterNumbers.length ? Math.min(...chapterNumbers) : failedChapter);
+    return { start, end: explicitEnd || start + requestedCount - 1 };
+  }
+
+  return { start: failedChapter, end: failedChapter };
+}
+
 export function makeResumePlan({ sourceReportPath, sourceReport, bookDir }) {
   const failed = findFirstFailedChapter(sourceReport);
   if (!failed) {
+    const chapters = sourceReport?.chapters || [];
+    const chapterNumbers = chapters
+      .map((chapter) => Number(chapter.chapter))
+      .filter((chapter) => Number.isInteger(chapter) && chapter > 0);
+    const fallbackChapter = chapterNumbers.length ? Math.min(...chapterNumbers) : 0;
+    const targetRange = targetRangeFromReport(sourceReport, chapters, fallbackChapter);
+    const completedChapters = (sourceReport?.completedChapters || [])
+      .map(numberFromMaybePrefixed)
+      .filter(Boolean);
+    if (String(sourceReport?.finalStatus || "").toUpperCase() !== "READY_TO_PUBLISH") {
+      const queue = [];
+      for (let chapter = targetRange.start; chapter <= targetRange.end; chapter += 1) {
+        queue.push({ chapter, resumeKind: "normal", sourceChapter: chapters.find((item) => Number(item.chapter) === chapter), needsWrite: false });
+      }
+      return {
+        enabled: true,
+        sourceReport: sourceReportPath,
+        resumedFromChapter: chapterPrefix(targetRange.start),
+        remainingCount: queue.length,
+        noResumeNeeded: false,
+        reason: "source report finalStatus is not READY_TO_PUBLISH; rechecking target range",
+        queue,
+        remainingNewCount: 0,
+        targetStartChapter: targetRange.start,
+        targetEndChapter: targetRange.end,
+        completedChapters,
+        bookDir,
+      };
+    }
     return {
       enabled: true,
       sourceReport: sourceReportPath,
@@ -70,44 +127,46 @@ export function makeResumePlan({ sourceReportPath, sourceReport, bookDir }) {
       reason: "source report is already READY_TO_PUBLISH",
       queue: [],
       remainingNewCount: 0,
+      targetStartChapter: targetRange.start,
+      targetEndChapter: targetRange.end,
+      completedChapters,
     };
   }
 
   const chapters = sourceReport?.chapters || [];
-  const failedIndex = chapters.indexOf(failed);
-  const requestedCount = Number.isInteger(sourceReport?.request?.count) ? sourceReport.request.count : null;
-  const requestedFrom = Number.isInteger(sourceReport?.request?.from) ? sourceReport.request.from : null;
-  const requestedTo = Number.isInteger(sourceReport?.request?.to) ? sourceReport.request.to : null;
   const failedChapter = Number(failed.chapter);
+  const targetRange = targetRangeFromReport(sourceReport, chapters, failedChapter);
+  const completedChapters = chapters
+    .filter(isReadyChapter)
+    .map((chapter) => Number(chapter.chapter))
+    .filter((chapter) => Number.isInteger(chapter) && chapter >= targetRange.start && chapter <= targetRange.end);
   const queue = [];
-  let remainingNewCount = 0;
 
-  if (requestedCount !== null) {
-    queue.push({ chapter: failedChapter, resumeKind: inferFailureKind(failed), sourceChapter: failed });
-    remainingNewCount = Math.max(0, requestedCount - failedIndex - 1);
-  } else if (requestedFrom !== null && requestedTo !== null) {
-    for (let chapter = failedChapter; chapter <= requestedTo; chapter += 1) {
-      const sourceChapter = chapters.find((item) => Number(item.chapter) === chapter);
-      queue.push({
-        chapter,
-        resumeKind: chapter === failedChapter && sourceChapter ? inferFailureKind(sourceChapter) : "normal",
-        sourceChapter,
-      });
-    }
-  } else {
-    queue.push({ chapter: failedChapter, resumeKind: inferFailureKind(failed), sourceChapter: failed });
+  for (let chapter = failedChapter; chapter <= targetRange.end; chapter += 1) {
+    const sourceChapter = chapters.find((item) => Number(item.chapter) === chapter);
+    const ready = sourceChapter && isReadyChapter(sourceChapter);
+    if (ready) continue;
+    queue.push({
+      chapter,
+      resumeKind: chapter === failedChapter && sourceChapter ? inferFailureKind(sourceChapter) : "normal",
+      sourceChapter,
+      needsWrite: !sourceChapter || inferFailureKind(sourceChapter) === "writeLock" || inferFailureKind(sourceChapter) === "writeAudit",
+    });
   }
 
   return {
     enabled: true,
     sourceReport: sourceReportPath,
     resumedFromChapter: chapterPrefix(failedChapter),
-    remainingCount: queue.length + remainingNewCount,
+    remainingCount: queue.length,
     noResumeNeeded: false,
     queue,
-    remainingNewCount,
+    remainingNewCount: 0,
     failedChapter: failed,
     bookDir,
+    targetStartChapter: targetRange.start,
+    targetEndChapter: targetRange.end,
+    completedChapters,
   };
 }
 
@@ -155,13 +214,15 @@ export function buildWarningSummary(report, { bookDir } = {}) {
     const finalStatus = String(chapter.finalStatus || "").toUpperCase();
     const publishStatus = String(chapter.publishReadyFinalStatus || "").toUpperCase();
     const text = chapterCorpus(chapter);
+    const isReady = finalStatus === "READY_TO_PUBLISH";
+    const unresolvedP0Corpus = `${finalStatus}\n${publishStatus}`;
 
     if ((chapter.numeric?.A ?? 0) > 0) addWarning(summary, "P0", "NUMERIC_A", `numeric A=${chapter.numeric.A}`, { chapter: chapterId });
-    if (/DROP/u.test(`${finalStatus}\n${publishStatus}\n${text}`)) addWarning(summary, "P0", "DROP", "DROP blocks publish", { chapter: chapterId });
-    if (/BLOCKED_BY_CONTINUITY|STOPPED_BY_CONTINUITY/u.test(`${finalStatus}\n${publishStatus}\n${text}`)) addWarning(summary, "P0", "BLOCKED_BY_CONTINUITY", "continuity blocks publish", { chapter: chapterId });
-    if (/BLOCKED_BY_QUALITY|STOPPED_BY_QUALITY/u.test(`${finalStatus}\n${publishStatus}\n${text}`)) addWarning(summary, "P0", "BLOCKED_BY_QUALITY", "quality blocks publish", { chapter: chapterId });
-    if (/SIX_PART_FAIL|STOPPED_BY_SIX_PART/u.test(`${finalStatus}\n${publishStatus}\n${text}`)) addWarning(summary, "P0", "SIX_PART_FAIL", "six-part structure blocks publish", { chapter: chapterId });
-    if (finalStatus === "STOPPED_BY_WRITE_AUDIT" || /did not create chapter file|没有落盘|No chapter file was created/iu.test(text)) {
+    if (!isReady && /DROP/u.test(unresolvedP0Corpus)) addWarning(summary, "P0", "DROP", "DROP blocks publish", { chapter: chapterId });
+    if (!isReady && /BLOCKED_BY_CONTINUITY|STOPPED_BY_CONTINUITY/u.test(unresolvedP0Corpus)) addWarning(summary, "P0", "BLOCKED_BY_CONTINUITY", "continuity blocks publish", { chapter: chapterId });
+    if (!isReady && /BLOCKED_BY_QUALITY|STOPPED_BY_QUALITY/u.test(unresolvedP0Corpus)) addWarning(summary, "P0", "BLOCKED_BY_QUALITY", "quality blocks publish", { chapter: chapterId });
+    if (!isReady && /SIX_PART_FAIL|STOPPED_BY_SIX_PART/u.test(`${unresolvedP0Corpus}\n${text}`)) addWarning(summary, "P0", "SIX_PART_FAIL", "six-part structure blocks publish", { chapter: chapterId });
+    if (!isReady && (finalStatus === "STOPPED_BY_WRITE_AUDIT" || /did not create chapter file|没有落盘|No chapter file was created/iu.test(text))) {
       addWarning(summary, "P0", "WRITE_NEXT_NO_FILE", "write next did not land a chapter file", { chapter: chapterId });
     }
     if (finalStatus === "READY_TO_PUBLISH" && bookDir && !report.request?.dryRun) {
@@ -194,6 +255,37 @@ export function buildWarningSummary(report, { bookDir } = {}) {
   }
 
   return summary;
+}
+
+export function buildResolvedWarnings(report) {
+  const resolved = [];
+  for (const chapter of report.chapters || []) {
+    if (!isReadyChapter(chapter)) continue;
+    const chapterId = chapterPrefix(chapter.chapter);
+    const text = chapterCorpus(chapter);
+    if (/BLOCKED_BY_CONTINUITY|STOPPED_BY_CONTINUITY/iu.test(text)) {
+      resolved.push({
+        type: "BLOCKED_BY_CONTINUITY",
+        resolvedBy: chapter.didContinuityAuto ? "continuity-auto" : "publish-ready-recheck",
+        chapter: chapterId,
+      });
+    }
+    if (/BLOCKED_BY_QUALITY|STOPPED_BY_QUALITY/iu.test(text)) {
+      resolved.push({
+        type: "BLOCKED_BY_QUALITY",
+        resolvedBy: chapter.didFanqiePolish ? "fanqie-polish" : "publish-ready-recheck",
+        chapter: chapterId,
+      });
+    }
+    if (/SIX_PART_FAIL|STOPPED_BY_SIX_PART/iu.test(text)) {
+      resolved.push({
+        type: "SIX_PART_FAIL",
+        resolvedBy: chapter.didRepairFanqie ? "repair-fanqie" : "publish-ready-recheck",
+        chapter: chapterId,
+      });
+    }
+  }
+  return resolved;
 }
 
 export function riskLevelForWarningSummary(summary) {

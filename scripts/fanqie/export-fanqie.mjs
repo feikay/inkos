@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
+import { writeBookInfoFile } from "./lib/book-info.mjs";
 
 const root = process.cwd();
 const argv = process.argv.slice(2);
@@ -1069,152 +1070,6 @@ function qualityWarnings(text) {
   return warnings;
 }
 
-function parseSimpleYaml(text) {
-  const data = {};
-  for (const line of text.split("\n")) {
-    const match = line.match(/^([A-Za-z0-9_\-]+):\s*(.+?)\s*$/);
-    if (!match) continue;
-    data[match[1]] = match[2].replace(/^["']|["']$/g, "");
-  }
-  return data;
-}
-
-function parseCharacterMatrix(text) {
-  return [...text.matchAll(/^##\s+(.+)$/gm)].map((match) => match[1].trim()).filter(Boolean);
-}
-
-function unique(items) {
-  return [...new Set(items.filter(Boolean))];
-}
-
-function pickTopTags(rules, corpus, limit = 3) {
-  const tags = [];
-  for (const [tag, pattern] of rules) {
-    if (pattern.test(corpus)) tags.push(tag);
-    if (tags.length >= limit) break;
-  }
-  return tags;
-}
-
-function inferReader(genreLabel, corpus) {
-  if (/女频|言情|宫斗|宅斗|女尊|甜宠|古言|现言/.test(`${genreLabel}\n${corpus}`)) return "女频";
-  return "男频";
-}
-
-function inferMainCategory(genreLabel, corpus) {
-  const source = `${genreLabel}\n${corpus}`;
-  if (/仙侠|修仙|修真|道尊/.test(source)) return "东方仙侠";
-  if (/玄幻|葬渊|契约|守门|星图|异族|血脉/.test(source)) return "传统玄幻";
-  if (/悬疑|诡|守墓|棺|暗河|规则/.test(source)) return "悬疑灵异";
-  return "传统玄幻";
-}
-
-function inferFemaleLead(characterNames, corpus, maleLead) {
-  const preferred = characterNames.find((name) => name !== maleLead && /云岚|苏|宁|月|雪|瑶|灵|璃|瑾|柔|薇|岚/.test(name));
-  if (preferred) return preferred;
-  return characterNames.find((name) => name !== maleLead) || "未定";
-}
-
-function inferBookMetadata(chapterFiles) {
-  const genreProfile = parseSimpleYaml(readIfExists(path.join(bookDir, "story", "genre_profile.yaml")));
-  const characterMatrixText = readIfExists(path.join(bookDir, "story", "character_matrix.md"));
-  const currentStateText = readIfExists(path.join(bookDir, "story", "current_state.md"));
-  const chapterSummaryText = readIfExists(path.join(bookDir, "story", "chapter_summaries.md"));
-  const characterNames = parseCharacterMatrix(characterMatrixText);
-  const sampleTexts = chapterFiles
-    .slice(0, 8)
-    .map(({ file }) => removeExistingTitle(cleanText(extractText(file))))
-    .join("\n");
-  const corpus = [
-    genreProfile.label || "",
-    characterMatrixText,
-    currentStateText,
-    chapterSummaryText,
-    sampleTexts,
-    publishTitle,
-  ].join("\n");
-
-  const maleLead = characterNames[0] || "未定";
-  const femaleLead = inferFemaleLead(characterNames, corpus, maleLead);
-  const reader = inferReader(genreProfile.label || genreProfile.template || "", corpus);
-  const mainCategory = inferMainCategory(genreProfile.label || genreProfile.template || "", corpus);
-
-  const themeRules = [
-    ["规则怪谈", /规则|契约|守门|真名|细则/],
-    ["高武世界", /高武|修炼|境界|灵气|结晶|神府/],
-    ["东方玄幻", /玄幻|葬渊|异族|血脉|封印|星图/],
-    ["悬疑", /线索|疑云|守墓|棺椁|暗河|残卷|谜/],
-    ["异世大陆", /异世|异族|古殿|遗迹/],
-    ["灵气复苏", /灵气|复苏/],
-  ];
-
-  const roleRules = [
-    ["单女主", femaleLead !== "未定" ? /./ : /$^/],
-    ["腹黑", /冷静|筹码|算计|试探|藏着|不动声色/],
-    ["反派", /大祭司|守门人|反派|叛逃者/],
-    ["大佬", /主角|契约共生者|规则化身/],
-  ];
-
-  const plotRules = [
-    ["求生", /求生|活路|死局|濒死|撤退|逃|活下来/],
-    ["升级流", /升级|突破|变强|进阶|境界|小胜立威/],
-    ["封神", /封印|星图|传承|祭坛|守门/],
-    ["1v1", /单女主|楚夜.*云岚|云岚.*楚夜/s],
-  ];
-
-  return {
-    reader,
-    maleLead,
-    femaleLead,
-    mainCategory,
-    themes: unique(pickTopTags(themeRules, corpus, 3)),
-    roles: unique(pickTopTags(roleRules, corpus, 3)),
-    plots: unique(pickTopTags(plotRules, corpus, 3)),
-  };
-}
-
-function writeBookInfo(chapterFiles) {
-  const metadata = inferBookMetadata(chapterFiles);
-  const intro = `书名：${publishTitle}
-
-目标读者：${metadata.reader}
-
-主角名：
-- 男主：${metadata.maleLead}
-- 女主：${metadata.femaleLead}
-
-作品标签：
-- 主分类：${metadata.mainCategory}
-- 主题：${metadata.themes.join("、") || "待补充"}
-- 角色：${metadata.roles.join("、") || "待补充"}
-- 情节：${metadata.plots.join("、") || "待补充"}
-
-简介：
-楚夜醒来时，气血为0。
-
-按理说，他已经是个死人。
-
-但他没死。
-
-因为他签了一份契约。
-
-一份会吞噬他的契约。
-
-气血越少，它吞得越快。
-契约越强，他死得越快。
-
-可同时，他也能撬动规则。
-
-当所有人都在规则下挣扎时，他开始用命，去改规则。
-
-既然活不了，那就玩大一点。
-
-这是一个用寿命换力量，用死亡撬动世界的故事。
-`;
-
-  if (!dryRun) fs.writeFileSync(path.join(outDir, "book-info.txt"), intro, "utf8");
-}
-
 let lastExport = 0;
 if (incremental && fs.existsSync(markerFile)) {
   lastExport = Number(fs.readFileSync(markerFile, "utf8")) || 0;
@@ -1387,7 +1242,25 @@ if (nonNovelMarkerFailures.length) {
   process.exit(1);
 }
 
-writeBookInfo(chapterFiles);
+if (!dryRun) {
+  const bookInfoResult = writeBookInfoFile({
+    book: bookName,
+    bookDir,
+    publishDir: outDir,
+    alternatePublishDir: path.join(root, "publish", bookName),
+    exportMeta: {
+      title: publishTitle,
+      from,
+      to,
+      wordCount: exported.reduce((sum, item) => sum + item.chars, 0),
+    },
+    chapters: exported,
+    options: { useReviewed, incremental, reset },
+  });
+  for (const warning of bookInfoResult.warnings || []) {
+    console.warn(`[book-info] warning: ${warning}`);
+  }
+}
 
 if (!dryRun) {
   for (const item of exported) {

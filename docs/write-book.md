@@ -168,6 +168,22 @@ if 仍 < 85:
   → 丢人工（不要死循环）
 ```
 
+# 润色书介绍
+
+```
+node scripts/fanqie/polish-book-info.mjs <book>
+node scripts/fanqie/polish-book-info.mjs <book> --type fanqie
+node scripts/fanqie/polish-book-info.mjs <book> --type promo
+node scripts/fanqie/polish-book-info.mjs <book> --type shortvideo
+```
+
+**输出文件**
+
+- general -> publish/<book>/book-info-polished.txt
+- fanqie -> publish/<book>/book-info-fanqie.txt
+- promo -> publish/<book>/book-info-promo.txt
+- shortvideo -> publish/<book>/book-info-shortvideo.txt
+
 
 
 # 新开书

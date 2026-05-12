@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   buildAutoFixSuggestions,
+  buildResolvedWarnings,
   buildWarningSummary,
   findLatestJsonReport,
   generateManualFixPrompt,
@@ -38,6 +39,9 @@ const FINAL_STATUS = {
   numeric: "STOPPED_BY_NUMERIC",
   sixPart: "STOPPED_BY_SIX_PART",
   drop: "STOPPED_BY_DROP",
+  writeLock: "STOPPED_BY_WRITE_LOCK",
+  activeLock: "STOPPED_BY_ACTIVE_LOCK",
+  staleLock: "STOPPED_BY_STALE_LOCK",
   unknown: "UNKNOWN_ERROR",
 };
 
@@ -286,6 +290,81 @@ async function runStep(chapterRun, name, command, args, options = {}) {
   return step;
 }
 
+function parseLockPid(text) {
+  const match = String(text || "").match(/pid\s*:?\s*(\d+)/iu);
+  return match ? Number(match[1]) : null;
+}
+
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function makeSyntheticStep(chapterRun, name, summary, exitCode = 0) {
+  const now = new Date().toISOString();
+  const step = {
+    name,
+    command: summary,
+    cwd: ".",
+    startedAt: now,
+    exitCode,
+    stdout: summary,
+    stderr: "",
+    summary,
+    finishedAt: now,
+  };
+  chapterRun.steps.push(step);
+  console.log(`[${name}] ${summary}`);
+  return step;
+}
+
+function checkWriteLock(bookDir, chapterRun, report, { dryRun = false } = {}) {
+  const lockPath = path.join(bookDir, ".write.lock");
+  const relLockPath = rel(lockPath);
+  report.lockHandling.checked = true;
+  report.lockHandling.lockPath = relLockPath;
+  if (!fs.existsSync(lockPath)) {
+    if (!report.lockHandling.events.length && report.lockHandling.status !== "active") {
+      report.lockHandling.status = "none";
+    }
+    report.lockHandling.pid = null;
+    return { status: "none", pid: null, lockPath: relLockPath };
+  }
+
+  const lockText = fs.readFileSync(lockPath, "utf8");
+  const pid = parseLockPid(lockText);
+  report.lockHandling.pid = pid;
+  if (pid && isPidAlive(pid)) {
+    report.lockHandling.status = "active";
+    makeSyntheticStep(chapterRun, "write-lock-check", `ACTIVE_LOCK pid=${pid} path=${relLockPath}`, 1);
+    return { status: "active", pid, lockPath: relLockPath };
+  }
+
+  if (!dryRun) fs.unlinkSync(lockPath);
+  report.lockHandling.status = "stale_cleaned";
+  report.lockHandling.events.push({
+    chapter: chapterRun.chapter ? chapterPrefix(chapterRun.chapter) : "",
+    status: "stale_cleaned",
+    pid,
+    lockPath: relLockPath,
+  });
+  makeSyntheticStep(chapterRun, "write-lock-check", `STALE_LOCK_CLEANED pid=${pid ?? "unknown"} path=${relLockPath}`);
+  return { status: "stale_cleaned", pid, lockPath: relLockPath };
+}
+
+function hasWriteLockFailureSignal(text) {
+  return /write\.lock|\.write\.lock|locked by another process|is locked by another process|If this is stale/iu.test(text);
+}
+
+function isLockFinalStatus(status) {
+  return status === FINAL_STATUS.writeLock || status === FINAL_STATUS.activeLock || status === FINAL_STATUS.staleLock;
+}
+
 function publishReportPath(bookDir, chapter) {
   return path.join(bookDir, "reviews", "publish-ready", `${chapterPrefix(chapter)}.publish-report.json`);
 }
@@ -422,6 +501,9 @@ function renderMarkdown(report) {
     `- finishedAt: ${report.finishedAt}`,
     `- requested count: ${report.request.count ?? "n/a"}`,
     `- requested from/to: ${report.request.from ?? "n/a"}-${report.request.to ?? "n/a"}`,
+    `- target chapters: ${report.targetStartChapter || "n/a"}-${report.targetEndChapter || "n/a"}`,
+    `- completed chapters: ${report.completedChapters?.length ? report.completedChapters.join(", ") : "none"}`,
+    `- remaining chapters: ${report.remainingChapters?.length ? report.remainingChapters.join(", ") : "none"}`,
     `- processed chapters: ${report.processedChapters.length ? report.processedChapters.map(chapterPrefix).join(", ") : "none"}`,
     `- finalStatus: ${report.finalStatus}`,
     `- exported: ${report.exported ? "true" : "false"}`,
@@ -452,6 +534,30 @@ function renderMarkdown(report) {
   lines.push("## Publish Advice");
   lines.push("");
   lines.push(report.publishAdvice || "CAN_PUBLISH");
+  lines.push("");
+
+  lines.push("## Lock Handling");
+  lines.push("");
+  lines.push(`- checked: ${report.lockHandling?.checked ? "true" : "false"}`);
+  lines.push(`- lockPath: ${report.lockHandling?.lockPath || "n/a"}`);
+  lines.push(`- status: ${report.lockHandling?.status || "none"}`);
+  lines.push(`- pid: ${report.lockHandling?.pid ?? "n/a"}`);
+  if (report.lockHandling?.events?.length) {
+    for (const event of report.lockHandling.events) {
+      lines.push(`- event: ${event.status} chapter=${event.chapter || "n/a"} pid=${event.pid ?? "unknown"}`);
+    }
+  }
+  lines.push("");
+
+  lines.push("## Resolved Warnings");
+  lines.push("");
+  if (!report.resolvedWarnings?.length) {
+    lines.push("- none");
+  } else {
+    for (const warning of report.resolvedWarnings) {
+      lines.push(`- ${warning.chapter}: ${warning.type} resolvedBy=${warning.resolvedBy}`);
+    }
+  }
   lines.push("");
 
   lines.push("## Resume Info");
@@ -683,6 +789,19 @@ async function main() {
     }
   }
 
+  const initialLatestChapter = latestChapter(bookDir);
+  const targetStartNumber = resumePlan.enabled
+    ? resumePlan.targetStartChapter
+    : opts.count !== undefined
+      ? initialLatestChapter + 1
+      : opts.from;
+  const targetEndNumber = resumePlan.enabled
+    ? resumePlan.targetEndChapter
+    : opts.count !== undefined
+      ? initialLatestChapter + opts.count
+      : opts.to;
+  const completedChapterSet = new Set((resumePlan.completedChapters || []).filter((chapter) => Number.isInteger(chapter)));
+
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const startedAtMs = Date.now();
   const report = {
@@ -703,6 +822,11 @@ async function main() {
       disableNumericFix: opts.disableNumericFix,
       dryRun: opts.dryRun,
     },
+    requestedCount: opts.count ?? null,
+    targetStartChapter: targetStartNumber ? chapterPrefix(targetStartNumber) : null,
+    targetEndChapter: targetEndNumber ? chapterPrefix(targetEndNumber) : null,
+    completedChapters: Array.from(completedChapterSet).sort((a, b) => a - b).map(chapterPrefix),
+    remainingChapters: [],
     processedChapters: [],
     chapters: [],
     exported: false,
@@ -711,6 +835,13 @@ async function main() {
     finalStatus: FINAL_STATUS.unknown,
     stopReason: "",
     writeAuditFailure: null,
+    lockHandling: {
+      checked: false,
+      lockPath: rel(path.join(bookDir, ".write.lock")),
+      status: "none",
+      pid: null,
+      events: [],
+    },
     resume: {
       enabled: resumePlan.enabled,
       sourceReport: resumePlan.sourceReport || "",
@@ -718,6 +849,7 @@ async function main() {
       remainingCount: resumePlan.remainingCount,
     },
     warningSummary: { P0: [], P1: [], P2: [] },
+    resolvedWarnings: [],
     riskLevel: "LOW",
     publishAdvice: "CAN_PUBLISH",
     manualFixPrompt: {
@@ -731,28 +863,27 @@ async function main() {
   const chapterQueue = [];
   if (resumePlan.enabled) {
     chapterQueue.push(...resumePlan.queue);
+  } else if (opts.count !== undefined) {
+    for (let chapter = targetStartNumber; chapter <= targetEndNumber; chapter += 1) {
+      chapterQueue.push({ chapter, resumeKind: "normal", needsWrite: true, sourceChapter: null });
+    }
   } else if (opts.from !== undefined && opts.to !== undefined) {
     for (let chapter = opts.from; chapter <= opts.to; chapter += 1) chapterQueue.push(chapter);
   }
 
   let hardStop = false;
-  const targetIterations = resumePlan.enabled
-    ? chapterQueue.length + resumePlan.remainingNewCount
-    : opts.count ?? chapterQueue.length;
+  const targetIterations = chapterQueue.length;
 
   for (let i = 0; i < targetIterations; i += 1) {
     const queued = chapterQueue[i];
     let chapter = typeof queued === "object" ? queued.chapter : queued;
     const resumeKind = typeof queued === "object" ? queued.resumeKind : "normal";
     const sourceChapter = typeof queued === "object" ? queued.sourceChapter : null;
+    const shouldWriteTarget = typeof queued === "object" ? Boolean(queued.needsWrite) : false;
     let chapterRun = makeChapterRun(chapter ?? 0);
 
     if (resumeKind === "unknown" || resumeKind === "drop") {
-      chapterRun.finalStatus = resumeKind === "numeric"
-        ? FINAL_STATUS.numeric
-        : resumeKind === "drop"
-          ? FINAL_STATUS.drop
-          : FINAL_STATUS.unknown;
+      chapterRun.finalStatus = resumeKind === "drop" ? FINAL_STATUS.drop : FINAL_STATUS.unknown;
       report.stopReason = `Resume cannot automatically continue chapter ${chapterPrefix(chapter)} from ${sourceChapter?.finalStatus || "UNKNOWN_ERROR"}. Manual repair is required.`;
       report.chapters.push(chapterRun);
       hardStop = true;
@@ -780,13 +911,23 @@ async function main() {
         break;
       }
 
+      const lock = checkWriteLock(bookDir, chapterRun, report, { dryRun: opts.dryRun });
+      if (lock.status === "active") {
+        chapterRun.finalStatus = FINAL_STATUS.activeLock;
+        report.stopReason = `active write lock exists at ${lock.lockPath} pid=${lock.pid}`;
+        report.chapters.push(chapterRun);
+        hardStop = true;
+        break;
+      }
+
       const before = latestChapter(bookDir);
       const writeStep = await runStep(chapterRun, "write-next-resume", "node", [cli, "write", "next", bookName], {
         cwd: myNovelDir,
         dryRun: opts.dryRun,
       });
       if (writeStep.exitCode !== 0) {
-        chapterRun.finalStatus = FINAL_STATUS.unknown;
+        const writeOutput = `${writeStep.stdout}\n${writeStep.stderr}`;
+        chapterRun.finalStatus = hasWriteLockFailureSignal(writeOutput) ? FINAL_STATUS.writeLock : FINAL_STATUS.unknown;
         report.stopReason = `resume write next failed for chapter ${chapterPrefix(chapter)}`;
         report.chapters.push(chapterRun);
         hardStop = true;
@@ -802,37 +943,57 @@ async function main() {
         break;
       }
       chapter = requestedChapter;
-    } else if (opts.count !== undefined || (resumePlan.enabled && i >= chapterQueue.length)) {
+    } else if (shouldWriteTarget && !findChapterFile(bookDir, chapter)) {
+      const requestedChapter = chapter;
+      const lock = checkWriteLock(bookDir, chapterRun, report, { dryRun: opts.dryRun });
+      if (lock.status === "active") {
+        chapterRun.finalStatus = FINAL_STATUS.activeLock;
+        report.stopReason = `active write lock exists at ${lock.lockPath} pid=${lock.pid}`;
+        report.chapters.push(chapterRun);
+        hardStop = true;
+        break;
+      }
+
       const before = latestChapter(bookDir);
+      if (!opts.dryRun && before + 1 !== requestedChapter) {
+        chapterRun.finalStatus = FINAL_STATUS.writeLock;
+        report.stopReason = `target chapter boundary mismatch: expected write next to create ${chapterPrefix(requestedChapter)}, latest chapter is ${chapterPrefix(before)}.`;
+        report.chapters.push(chapterRun);
+        hardStop = true;
+        break;
+      }
       const writeStep = await runStep(chapterRun, "write-next", "node", [cli, "write", "next", bookName], {
         cwd: myNovelDir,
         dryRun: opts.dryRun,
       });
       if (writeStep.exitCode !== 0) {
-        chapterRun.chapter = before + 1;
-        chapterRun.finalStatus = FINAL_STATUS.unknown;
-        report.stopReason = `write next failed before chapter ${before + 1}`;
+        const writeOutput = `${writeStep.stdout}\n${writeStep.stderr}`;
+        chapterRun.chapter = requestedChapter;
+        chapterRun.finalStatus = hasWriteLockFailureSignal(writeOutput) ? FINAL_STATUS.writeLock : FINAL_STATUS.unknown;
+        report.stopReason = hasWriteLockFailureSignal(writeOutput)
+          ? `write next stopped by write lock before chapter ${chapterPrefix(requestedChapter)}`
+          : `write next failed before chapter ${chapterPrefix(requestedChapter)}`;
         report.chapters.push(chapterRun);
         hardStop = true;
         break;
       }
-      const after = opts.dryRun ? before + 1 : latestChapter(bookDir);
-      chapter = after > before ? after : before + 1;
-      chapterRun.chapter = chapter;
+      const after = opts.dryRun ? requestedChapter : latestChapter(bookDir);
+      chapter = requestedChapter;
+      chapterRun.chapter = requestedChapter;
 
-      if (!opts.dryRun && !findChapterFile(bookDir, chapter)) {
+      if (!opts.dryRun && (after !== requestedChapter || !findChapterFile(bookDir, requestedChapter))) {
         const writeOutput = `${writeStep.stdout}\n${writeStep.stderr}`;
         if (after <= before && hasWriteAuditFailureSignal(writeOutput)) {
-          const failure = extractWriteAuditFailure(chapter, writeOutput);
+          const failure = extractWriteAuditFailure(requestedChapter, writeOutput);
           const retryHintFile = writeRetryHint(bookDir, failure);
           failure.retryHintPath = rel(retryHintFile);
           chapterRun.writeAuditFailure = failure;
           report.writeAuditFailure = failure;
           chapterRun.finalStatus = FINAL_STATUS.writeAudit;
-          report.stopReason = `write next produced write-audit failure for chapter ${chapterPrefix(chapter)}. No chapter file was created. Retry hint generated at ${failure.retryHintPath}.`;
+          report.stopReason = `write next produced write-audit failure for chapter ${chapterPrefix(requestedChapter)}. No chapter file was created. Retry hint generated at ${failure.retryHintPath}.`;
         } else {
-          chapterRun.finalStatus = FINAL_STATUS.unknown;
-          report.stopReason = `write next did not create chapter file ${chapterPrefix(chapter)}.`;
+          chapterRun.finalStatus = hasWriteLockFailureSignal(writeOutput) ? FINAL_STATUS.writeLock : FINAL_STATUS.unknown;
+          report.stopReason = `write next did not create target chapter file ${chapterPrefix(requestedChapter)}.`;
         }
         report.chapters.push(chapterRun);
         hardStop = true;
@@ -1096,7 +1257,22 @@ async function main() {
     if (hardStop && opts.stopOnFail) break;
   }
 
-  const allReady = report.chapters.length > 0
+  for (const chapter of report.chapters) {
+    if (chapter.finalStatus === FINAL_STATUS.ready) completedChapterSet.add(chapter.chapter);
+  }
+  const targetChapters = targetStartNumber && targetEndNumber
+    ? Array.from({ length: targetEndNumber - targetStartNumber + 1 }, (_, index) => targetStartNumber + index)
+    : [];
+  report.completedChapters = targetChapters
+    .filter((chapter) => completedChapterSet.has(chapter))
+    .map(chapterPrefix);
+  report.remainingChapters = targetChapters
+    .filter((chapter) => !completedChapterSet.has(chapter))
+    .map(chapterPrefix);
+
+  const allReady = targetChapters.length > 0
+    && report.remainingChapters.length === 0
+    && report.chapters.length > 0
     && report.chapters.every((chapter) => chapter.finalStatus === FINAL_STATUS.ready);
   report.finalStatus = hardStop
     ? (report.chapters.find((chapter) => chapter.finalStatus !== FINAL_STATUS.ready)?.finalStatus || FINAL_STATUS.unknown)
@@ -1105,8 +1281,8 @@ async function main() {
       : FINAL_STATUS.unknown;
 
   if (allReady && !opts.noExport) {
-    const from = Math.min(...report.processedChapters);
-    const to = Math.max(...report.processedChapters);
+    const from = targetStartNumber || Math.min(...report.processedChapters);
+    const to = targetEndNumber || Math.max(...report.processedChapters);
     const exportArgs = [
       path.join("scripts", "fanqie", "export-fanqie.mjs"),
       bookName,
@@ -1133,7 +1309,7 @@ async function main() {
   }
 
   const failedChapter = latestFailedChapter(report);
-  if (failedChapter) {
+  if (failedChapter && !isLockFinalStatus(failedChapter.finalStatus)) {
     report.manualFixPrompt = generateManualFixPrompt({
       root,
       bookDir,
@@ -1143,6 +1319,7 @@ async function main() {
     });
   }
 
+  report.resolvedWarnings = buildResolvedWarnings(report);
   report.warningSummary = buildWarningSummary(report, { bookDir });
   report.riskLevel = riskLevelForWarningSummary(report.warningSummary);
   report.publishAdvice = publishAdviceForWarningSummary(report.warningSummary);
