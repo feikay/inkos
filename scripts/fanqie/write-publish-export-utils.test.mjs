@@ -5,11 +5,24 @@ import path from "node:path";
 import test from "node:test";
 import {
   buildWarningSummary,
+  findLatestJsonReport,
   generateManualFixPrompt,
   makeResumePlan,
   publishAdviceForWarningSummary,
   riskLevelForWarningSummary,
 } from "./write-publish-export-utils.mjs";
+
+test("latest report ignores trend json files", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "inkos-wpe-latest-"));
+  const real = path.join(dir, "2026-01-01T00-00-00-000Z.json");
+  const trend = path.join(dir, "quality-trend.json");
+  fs.writeFileSync(real, JSON.stringify({ book: "Book", request: {}, finalStatus: "READY_TO_PUBLISH", chapters: [] }), "utf8");
+  fs.writeFileSync(trend, JSON.stringify({ book: "Book", chapterCount: 1, chapters: [{ finalStatus: "STOPPED_BY_NUMERIC" }] }), "utf8");
+  const now = Date.now() / 1000;
+  fs.utimesSync(real, now - 10, now - 10);
+  fs.utimesSync(trend, now, now);
+  assert.equal(findLatestJsonReport(dir), real);
+});
 
 test("resume plan starts at failed chapter and preserves remaining count", () => {
   const report = {

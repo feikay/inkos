@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  buildAutoFixSuggestions,
   buildWarningSummary,
   findLatestJsonReport,
   generateManualFixPrompt,
@@ -59,6 +60,7 @@ Options:
   --max-repair <n>
   --max-continuity-fix <n>
   --max-numeric-fix <n>
+  --disable-numeric-fix
   --dry-run
   --mock-run`);
 }
@@ -389,6 +391,13 @@ function parseNumeric(step) {
   return { A: Number(match[1]), B: Number(match[2]), C: Number(match[3]) };
 }
 
+function parseNumericFix(step) {
+  const text = `${step?.stdout || ""}\n${step?.stderr || ""}`;
+  const fixedFile = text.match(/\d{4}:\s+\w+\s+changes=\d+/u) ? "" : "";
+  const reportFile = text.match(/report:\s+(.+?\.numeric-fix-report\.json)/u)?.[1]?.trim() || "";
+  return { fixedFile, reportFile };
+}
+
 function findExportFiles(bookName, from, to, startedAtMs) {
   const outDir = path.join(root, "publish", bookName, "fanqie");
   return walk(outDir)
@@ -509,6 +518,33 @@ function renderMarkdown(report) {
     lines.push("");
   }
 
+  lines.push("## Numeric Fix");
+  lines.push("");
+  const numericFixes = report.chapters.flatMap((chapter) => chapter.numericFix ? [{ chapter: chapter.chapter, ...chapter.numericFix }] : []);
+  if (!numericFixes.length) {
+    lines.push("- none");
+  } else {
+    lines.push("| Chapter | Attempted | Attempts | Before | After | Result | Fixed File | Backup File | Report |");
+    lines.push("| --- | --- | ---: | --- | --- | --- | --- | --- | --- |");
+    for (const fix of numericFixes) {
+      const before = fix.before ? `A=${fix.before.A ?? "n/a"} B=${fix.before.B ?? "n/a"} C=${fix.before.C ?? "n/a"}` : "n/a";
+      const after = fix.after ? `A=${fix.after.A ?? "n/a"} B=${fix.after.B ?? "n/a"} C=${fix.after.C ?? "n/a"}` : "n/a";
+      lines.push(`| ${chapterPrefix(fix.chapter)} | ${fix.attempted ? "true" : "false"} | ${fix.attempts ?? 0} | ${before} | ${after} | ${fix.result || "SKIPPED"} | ${fix.fixedFile || "n/a"} | ${fix.backupFile || "n/a"} | ${fix.reportFile || "n/a"} |`);
+    }
+  }
+  lines.push("");
+
+  lines.push("## Auto Fix Suggestions");
+  lines.push("");
+  if (!report.autoFixSuggestions?.length) {
+    lines.push("- none");
+  } else {
+    for (const item of report.autoFixSuggestions) {
+      lines.push(`- ${item.priority} ${item.type}${item.chapter ? ` ${item.chapter}` : ""}: ${item.suggestedCommand || item.suggestedAction || "n/a"}`);
+    }
+  }
+  lines.push("");
+
   if (report.stopReason) {
     lines.push("## Stop Reason");
     lines.push("");
@@ -573,6 +609,7 @@ function parseOptions() {
     maxRepair: intOpt("max-repair", DEFAULTS.maxRepair),
     maxContinuityFix: intOpt("max-continuity-fix", DEFAULTS.maxContinuityFix),
     maxNumericFix: intOpt("max-numeric-fix", DEFAULTS.maxNumericFix),
+    disableNumericFix: hasFlag("disable-numeric-fix"),
     dryRun: hasFlag("dry-run") || hasFlag("mock-run"),
     mockRun: hasFlag("mock-run"),
   };
@@ -597,6 +634,16 @@ function makeChapterRun(chapter) {
     didFanqiePolish: false,
     didRepairFanqie: false,
     writeAuditFailure: null,
+    numericFix: {
+      attempted: false,
+      attempts: 0,
+      before: null,
+      after: null,
+      fixedFile: "",
+      backupFile: "",
+      reportFile: "",
+      result: "SKIPPED",
+    },
     exported: false,
     finalStatus: "UNKNOWN_ERROR",
   };
@@ -653,6 +700,7 @@ async function main() {
       maxRepair: opts.maxRepair,
       maxContinuityFix: opts.maxContinuityFix,
       maxNumericFix: opts.maxNumericFix,
+      disableNumericFix: opts.disableNumericFix,
       dryRun: opts.dryRun,
     },
     processedChapters: [],
@@ -676,6 +724,7 @@ async function main() {
       generated: false,
       path: "",
     },
+    autoFixSuggestions: [],
   };
 
   const cli = path.join("..", "packages", "cli", "dist", "index.js");
@@ -698,7 +747,7 @@ async function main() {
     const sourceChapter = typeof queued === "object" ? queued.sourceChapter : null;
     let chapterRun = makeChapterRun(chapter ?? 0);
 
-    if (resumeKind === "numeric" || resumeKind === "unknown" || resumeKind === "drop") {
+    if (resumeKind === "unknown" || resumeKind === "drop") {
       chapterRun.finalStatus = resumeKind === "numeric"
         ? FINAL_STATUS.numeric
         : resumeKind === "drop"
@@ -996,9 +1045,49 @@ async function main() {
       report.stopReason = `numeric final-only status is unknown for chapter ${chapterPrefix(chapter)}`;
       hardStop = true;
     } else if (numeric.A > 0) {
-      chapterRun.finalStatus = FINAL_STATUS.numeric;
-      report.stopReason = `numeric final-only A=${numeric.A} for chapter ${chapterPrefix(chapter)}. Numeric-fix mode is not available yet; export blocked.`;
-      hardStop = true;
+      chapterRun.numericFix.before = numeric;
+      const maxNumericFix = opts.disableNumericFix ? 0 : opts.maxNumericFix;
+      if (maxNumericFix > 0) {
+        for (let attempt = 1; attempt <= maxNumericFix; attempt += 1) {
+          chapterRun.numericFix.attempted = true;
+          chapterRun.numericFix.attempts = attempt;
+          const fixStep = await runStep(chapterRun, "fix-numeric-expression", "node", [
+            path.join("scripts", "fanqie", "fix-numeric-expression.mjs"),
+            bookName,
+            "--chapter",
+            String(chapter),
+            "--final-only",
+          ], { cwd: root, dryRun: opts.dryRun });
+          chapterRun.numericFix.fixedFile = rel(path.join(bookDir, "chapters-reviewed", `${chapterPrefix(chapter)}_final.md`));
+          chapterRun.numericFix.backupFile = rel(path.join(bookDir, "chapters-reviewed", `${chapterPrefix(chapter)}_final.numeric-backup.md`));
+          chapterRun.numericFix.reportFile = parseNumericFix(fixStep).reportFile;
+          if (fixStep.exitCode !== 0) break;
+
+          const recheckStep = await runStep(chapterRun, "numeric-final-only-recheck", "node", [
+            path.join("scripts", "fanqie", "check-numeric-expression.mjs"),
+            bookName,
+            "--chapter",
+            String(chapter),
+            "--final-only",
+          ], { cwd: root, dryRun: opts.dryRun });
+          const recheckNumeric = opts.dryRun ? { A: 0, B: 0, C: 0 } : parseNumeric(recheckStep);
+          chapterRun.numeric = recheckNumeric;
+          chapterRun.numericFix.after = recheckNumeric;
+          if (recheckStep.exitCode === 0 && recheckNumeric.A === 0) {
+            chapterRun.numericFix.result = "PASS";
+            chapterRun.finalStatus = FINAL_STATUS.ready;
+            hardStop = false;
+            break;
+          }
+        }
+      }
+
+      if (chapterRun.finalStatus !== FINAL_STATUS.ready) {
+        chapterRun.numericFix.result = chapterRun.numericFix.attempted ? "STILL_BLOCKED" : "SKIPPED";
+        chapterRun.finalStatus = FINAL_STATUS.numeric;
+        report.stopReason = `numeric final-only A=${chapterRun.numeric?.A ?? numeric.A} for chapter ${chapterPrefix(chapter)}. Export blocked.`;
+        hardStop = true;
+      }
     } else {
       chapterRun.finalStatus = FINAL_STATUS.ready;
     }
@@ -1057,6 +1146,7 @@ async function main() {
   report.warningSummary = buildWarningSummary(report, { bookDir });
   report.riskLevel = riskLevelForWarningSummary(report.warningSummary);
   report.publishAdvice = publishAdviceForWarningSummary(report.warningSummary);
+  report.autoFixSuggestions = buildAutoFixSuggestions(report, bookName);
   if (report.finalStatus === FINAL_STATUS.ready && report.warningSummary.P0.length > 0) {
     report.finalStatus = FINAL_STATUS.unknown;
     report.stopReason = report.stopReason || "P0 warning blocks publish.";

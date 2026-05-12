@@ -27,6 +27,10 @@ export function walk(dir) {
 export function findLatestJsonReport(reportDir) {
   const reports = walk(reportDir)
     .filter((file) => path.extname(file).toLowerCase() === ".json")
+    .filter((file) => {
+      const json = readJsonIfExists(file);
+      return Boolean(json?.book && json?.request && json?.finalStatus && Array.isArray(json?.chapters));
+    })
     .map((file) => ({ file, mtimeMs: fs.statSync(file).mtimeMs }))
     .sort((a, b) => b.mtimeMs - a.mtimeMs || b.file.localeCompare(a.file));
   return reports[0]?.file || null;
@@ -202,6 +206,77 @@ export function publishAdviceForWarningSummary(summary) {
   if (summary.P0.length > 0) return "DO_NOT_PUBLISH";
   if (summary.P1.length > 0) return "CAN_PUBLISH_WITH_WARNINGS";
   return "CAN_PUBLISH";
+}
+
+export function buildAutoFixSuggestions(report, bookName) {
+  const suggestions = [];
+  const seen = new Set();
+  for (const level of WARNING_LEVELS) {
+    for (const warning of report.warningSummary?.[level] || []) {
+      const key = `${level}:${warning.code}:${warning.chapter || ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const chapter = warning.chapter ? String(Number(warning.chapter)) : "";
+      if (warning.code === "NUMERIC_A") {
+        suggestions.push({
+          type: warning.code,
+          priority: level,
+          chapter: warning.chapter,
+          suggestedCommand: `node scripts/fanqie/fix-numeric-expression.mjs ${bookName} --chapter ${chapter} --final-only`,
+        });
+      } else if (warning.code === "BLOCKED_BY_CONTINUITY") {
+        suggestions.push({
+          type: warning.code,
+          priority: level,
+          chapter: warning.chapter,
+          suggestedCommand: `node ../packages/cli/dist/index.js review continuity-auto --book ${bookName} --chapter ${chapter} --max-fix-attempts 1`,
+        });
+      } else if (warning.code === "BLOCKED_BY_QUALITY") {
+        suggestions.push({
+          type: warning.code,
+          priority: level,
+          chapter: warning.chapter,
+          suggestedCommand: `node ../packages/cli/dist/index.js review fanqie-polish --book ${bookName} --chapter ${chapter}`,
+        });
+      } else if (warning.code === "SIX_PART_FAIL") {
+        suggestions.push({
+          type: warning.code,
+          priority: level,
+          chapter: warning.chapter,
+          suggestedCommand: `node scripts/fanqie/repair-fanqie.mjs ${bookName} --chapter ${chapter} --apply`,
+        });
+      } else if (warning.code === "DROP" || warning.code === "WRITE_NEXT_NO_FILE" || warning.code === "FINAL_FILE_MISSING" || warning.code === "EXPORT_FAILED") {
+        suggestions.push({
+          type: warning.code,
+          priority: level,
+          chapter: warning.chapter,
+          suggestedAction: "Stop and repair manually before publishing.",
+        });
+      } else if (warning.code === "QUALITY_WARN_POLISH_OPTIONAL" || warning.code === "QUALITY_SCORE_80_84" || warning.code === "READY_WITH_WARNINGS") {
+        suggestions.push({
+          type: warning.code,
+          priority: level,
+          chapter: warning.chapter,
+          suggestedCommand: `node ../packages/cli/dist/index.js review fanqie-polish --book ${bookName} --chapter ${chapter}`,
+        });
+      } else if (warning.code === "MISSING_STATE_CHANGE" || warning.code === "MINOR_STATE_WARNING") {
+        suggestions.push({
+          type: warning.code,
+          priority: level,
+          chapter: warning.chapter,
+          suggestedAction: "补充状态卡同步，或检查状态卡审计是否需要降低强度。",
+        });
+      } else if (level === "P1") {
+        suggestions.push({
+          type: warning.code,
+          priority: level,
+          chapter: warning.chapter,
+          suggestedAction: "按 warning 类型做人工定点润色；不要改主线。",
+        });
+      }
+    }
+  }
+  return suggestions;
 }
 
 export function latestFailedChapter(report) {
