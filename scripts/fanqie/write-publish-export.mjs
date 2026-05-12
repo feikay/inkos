@@ -3,6 +3,17 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  buildWarningSummary,
+  findLatestJsonReport,
+  generateManualFixPrompt,
+  hasContinuityResumeArtifact,
+  hasWriteRetryHint,
+  latestFailedChapter,
+  makeResumePlan,
+  publishAdviceForWarningSummary,
+  riskLevelForWarningSummary,
+} from "./write-publish-export-utils.mjs";
 
 const scriptFile = fileURLToPath(import.meta.url);
 const root = path.resolve(path.dirname(scriptFile), "..", "..");
@@ -33,10 +44,14 @@ function usage() {
   console.error(`Usage:
   node scripts/fanqie/write-publish-export.mjs <book> --count <n>
   node scripts/fanqie/write-publish-export.mjs <book> --from <chapter> --to <chapter>
+  node scripts/fanqie/write-publish-export.mjs <book> --resume-last
+  node scripts/fanqie/write-publish-export.mjs <book> --resume <reportPath>
 
 Options:
   --count <n>
   --from <n> --to <n>
+  --resume-last
+  --resume <reportPath>
   --no-export
   --stop-on-fail / --no-stop-on-fail
   --use-reviewed / --no-use-reviewed
@@ -404,6 +419,46 @@ function renderMarkdown(report) {
     "",
   ];
 
+  lines.push("## Warning Summary");
+  lines.push("");
+  for (const level of ["P0", "P1", "P2"]) {
+    const warnings = report.warningSummary?.[level] || [];
+    lines.push(`### ${level}`);
+    lines.push("");
+    if (!warnings.length) {
+      lines.push("- none");
+    } else {
+      for (const warning of warnings) {
+        lines.push(`- ${warning.chapter ? `${warning.chapter}: ` : ""}${warning.code} - ${warning.message}`);
+      }
+    }
+    lines.push("");
+  }
+
+  lines.push("## Risk Level");
+  lines.push("");
+  lines.push(report.riskLevel || "LOW");
+  lines.push("");
+
+  lines.push("## Publish Advice");
+  lines.push("");
+  lines.push(report.publishAdvice || "CAN_PUBLISH");
+  lines.push("");
+
+  lines.push("## Resume Info");
+  lines.push("");
+  lines.push(`- enabled: ${report.resume?.enabled ? "true" : "false"}`);
+  lines.push(`- sourceReport: ${report.resume?.sourceReport || "n/a"}`);
+  lines.push(`- resumedFromChapter: ${report.resume?.resumedFromChapter || "n/a"}`);
+  lines.push(`- remainingCount: ${report.resume?.remainingCount ?? 0}`);
+  lines.push("");
+
+  lines.push("## Manual Fix Prompt");
+  lines.push("");
+  lines.push(`- generated: ${report.manualFixPrompt?.generated ? "true" : "false"}`);
+  lines.push(`- path: ${report.manualFixPrompt?.path || "n/a"}`);
+  lines.push("");
+
   if (report.writeAuditFailure) {
     lines.push("## Write Audit Failure");
     lines.push("");
@@ -473,9 +528,12 @@ function parseOptions() {
   const countRaw = getArg("count");
   const fromRaw = getArg("from");
   const toRaw = getArg("to");
+  const resumeLast = hasFlag("resume-last");
+  const resumePath = getArg("resume");
   const count = countRaw === undefined ? undefined : Number(countRaw);
   const from = fromRaw === undefined ? undefined : Number(fromRaw);
   const to = toRaw === undefined ? undefined : Number(toRaw);
+  const resumeEnabled = resumeLast || resumePath !== undefined;
 
   if (count !== undefined && (!Number.isInteger(count) || count < 1)) {
     throw new Error("--count must be a positive integer");
@@ -486,7 +544,13 @@ function parseOptions() {
   if (to !== undefined && (!Number.isInteger(to) || to < 1)) {
     throw new Error("--to must be a positive integer");
   }
-  if (count === undefined && (from === undefined || to === undefined)) {
+  if (resumeLast && resumePath !== undefined) {
+    throw new Error("--resume-last cannot be combined with --resume");
+  }
+  if (resumeEnabled && (count !== undefined || from !== undefined || to !== undefined)) {
+    throw new Error("--resume/--resume-last cannot be combined with --count or --from/--to");
+  }
+  if (!resumeEnabled && count === undefined && (from === undefined || to === undefined)) {
     throw new Error("Use either --count <n> or --from <n> --to <n>");
   }
   if (count !== undefined && (from !== undefined || to !== undefined)) {
@@ -500,6 +564,8 @@ function parseOptions() {
     count,
     from,
     to,
+    resumeLast,
+    resumePath,
     noExport: hasFlag("no-export"),
     stopOnFail: boolOpt("stop-on-fail", DEFAULTS.stopOnFail),
     useReviewed: boolOpt("use-reviewed", DEFAULTS.useReviewed),
@@ -544,6 +610,32 @@ async function main() {
   ensureBookDir(bookDir, opts.dryRun);
   fs.mkdirSync(reportDir, { recursive: true });
 
+  let resumePlan = {
+    enabled: false,
+    sourceReport: "",
+    resumedFromChapter: null,
+    remainingCount: 0,
+    queue: [],
+    remainingNewCount: 0,
+  };
+  if (opts.resumeLast || opts.resumePath) {
+    const sourceReportPath = opts.resumeLast
+      ? findLatestJsonReport(reportDir)
+      : path.resolve(root, opts.resumePath);
+    if (!sourceReportPath) throw new Error(`No write-publish-export JSON report found under ${rel(reportDir)}`);
+    const sourceReport = readJsonIfExists(sourceReportPath);
+    if (!sourceReport || sourceReport.parse_error) {
+      throw new Error(`Cannot read resume report: ${rel(sourceReportPath)}`);
+    }
+    resumePlan = makeResumePlan({ sourceReportPath: rel(sourceReportPath), sourceReport, bookDir });
+    if (resumePlan.noResumeNeeded) {
+      console.log("[write-publish-export]");
+      console.log(`resume source: ${resumePlan.sourceReport}`);
+      console.log("Latest report is already READY_TO_PUBLISH. Nothing to resume.");
+      process.exit(0);
+    }
+  }
+
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const startedAtMs = Date.now();
   const report = {
@@ -571,22 +663,97 @@ async function main() {
     finalStatus: FINAL_STATUS.unknown,
     stopReason: "",
     writeAuditFailure: null,
+    resume: {
+      enabled: resumePlan.enabled,
+      sourceReport: resumePlan.sourceReport || "",
+      resumedFromChapter: resumePlan.resumedFromChapter,
+      remainingCount: resumePlan.remainingCount,
+    },
+    warningSummary: { P0: [], P1: [], P2: [] },
+    riskLevel: "LOW",
+    publishAdvice: "CAN_PUBLISH",
+    manualFixPrompt: {
+      generated: false,
+      path: "",
+    },
   };
 
   const cli = path.join("..", "packages", "cli", "dist", "index.js");
   const chapterQueue = [];
-  if (opts.from !== undefined && opts.to !== undefined) {
+  if (resumePlan.enabled) {
+    chapterQueue.push(...resumePlan.queue);
+  } else if (opts.from !== undefined && opts.to !== undefined) {
     for (let chapter = opts.from; chapter <= opts.to; chapter += 1) chapterQueue.push(chapter);
   }
 
   let hardStop = false;
-  const targetIterations = opts.count ?? chapterQueue.length;
+  const targetIterations = resumePlan.enabled
+    ? chapterQueue.length + resumePlan.remainingNewCount
+    : opts.count ?? chapterQueue.length;
 
   for (let i = 0; i < targetIterations; i += 1) {
-    let chapter = chapterQueue[i];
+    const queued = chapterQueue[i];
+    let chapter = typeof queued === "object" ? queued.chapter : queued;
+    const resumeKind = typeof queued === "object" ? queued.resumeKind : "normal";
+    const sourceChapter = typeof queued === "object" ? queued.sourceChapter : null;
     let chapterRun = makeChapterRun(chapter ?? 0);
 
-    if (opts.count !== undefined) {
+    if (resumeKind === "numeric" || resumeKind === "unknown" || resumeKind === "drop") {
+      chapterRun.finalStatus = resumeKind === "numeric"
+        ? FINAL_STATUS.numeric
+        : resumeKind === "drop"
+          ? FINAL_STATUS.drop
+          : FINAL_STATUS.unknown;
+      report.stopReason = `Resume cannot automatically continue chapter ${chapterPrefix(chapter)} from ${sourceChapter?.finalStatus || "UNKNOWN_ERROR"}. Manual repair is required.`;
+      report.chapters.push(chapterRun);
+      hardStop = true;
+      break;
+    }
+
+    if (resumeKind === "writeAudit") {
+      const requestedChapter = chapter;
+      if (!hasWriteRetryHint(bookDir, chapter)) {
+        const failure = sourceChapter?.writeAuditFailure || report.writeAuditFailure || {
+          chapter: chapterPrefix(chapter),
+          reasons: [],
+          promisedPayoff: "",
+          expectedEndingType: "",
+          suggestedAction: "Add chapter retry hint and rerun write next.",
+        };
+        const retryHintFile = writeRetryHint(bookDir, failure);
+        failure.retryHintPath = rel(retryHintFile);
+        chapterRun.writeAuditFailure = failure;
+        report.writeAuditFailure = failure;
+        chapterRun.finalStatus = FINAL_STATUS.writeAudit;
+        report.stopReason = `write retry hint was missing for chapter ${chapterPrefix(chapter)}. Generated retry hint and manual fix prompt before stopping.`;
+        report.chapters.push(chapterRun);
+        hardStop = true;
+        break;
+      }
+
+      const before = latestChapter(bookDir);
+      const writeStep = await runStep(chapterRun, "write-next-resume", "node", [cli, "write", "next", bookName], {
+        cwd: myNovelDir,
+        dryRun: opts.dryRun,
+      });
+      if (writeStep.exitCode !== 0) {
+        chapterRun.finalStatus = FINAL_STATUS.unknown;
+        report.stopReason = `resume write next failed for chapter ${chapterPrefix(chapter)}`;
+        report.chapters.push(chapterRun);
+        hardStop = true;
+        break;
+      }
+      const after = opts.dryRun ? Math.max(before + 1, chapter) : latestChapter(bookDir);
+      chapterRun.chapter = requestedChapter;
+      if (!opts.dryRun && (after !== requestedChapter || !findChapterFile(bookDir, requestedChapter))) {
+        chapterRun.finalStatus = FINAL_STATUS.writeAudit;
+        report.stopReason = `resume write next did not create chapter file ${chapterPrefix(requestedChapter)}.`;
+        report.chapters.push(chapterRun);
+        hardStop = true;
+        break;
+      }
+      chapter = requestedChapter;
+    } else if (opts.count !== undefined || (resumePlan.enabled && i >= chapterQueue.length)) {
       const before = latestChapter(bookDir);
       const writeStep = await runStep(chapterRun, "write-next", "node", [cli, "write", "next", bookName], {
         cwd: myNovelDir,
@@ -627,11 +794,73 @@ async function main() {
     report.processedChapters.push(chapter);
     console.log(`\n[chapter ${chapterPrefix(chapter)}] start`);
 
+    let continuityOverridePass = false;
+    if (resumeKind === "continuity" && !hasContinuityResumeArtifact(bookDir, chapter)) {
+      chapterRun.didContinuityAuto = true;
+      const fixStep = await runStep(chapterRun, "continuity-auto-resume", "node", [
+        cli,
+        "review",
+        "continuity-auto",
+        "--book",
+        bookName,
+        "--chapter",
+        String(chapter),
+        "--max-fix-attempts",
+        String(opts.maxContinuityFix),
+      ], { cwd: myNovelDir, dryRun: opts.dryRun });
+      if (fixStep.exitCode !== 0 || (!opts.dryRun && !continuityAutoPassed(fixStep))) {
+        chapterRun.finalStatus = FINAL_STATUS.continuity;
+        report.stopReason = `resume continuity-auto failed for chapter ${chapterPrefix(chapter)}`;
+        report.chapters.push(chapterRun);
+        hardStop = true;
+        break;
+      }
+      continuityOverridePass = true;
+      chapterRun.continuityOverride = "PASS";
+      chapterRun.continuityOverrideReason = "continuity-auto returned PASS";
+    } else if (resumeKind === "quality") {
+      chapterRun.didFanqiePolish = true;
+      const polishStep = await runStep(chapterRun, "fanqie-polish-resume", "node", [
+        cli,
+        "review",
+        "fanqie-polish",
+        "--book",
+        bookName,
+        "--chapter",
+        String(chapter),
+        "--max-polish-attempts",
+        String(opts.maxPolish),
+      ], { cwd: myNovelDir, dryRun: opts.dryRun });
+      if (polishStep.exitCode !== 0) {
+        chapterRun.finalStatus = FINAL_STATUS.quality;
+        report.stopReason = `resume fanqie-polish failed for chapter ${chapterPrefix(chapter)}`;
+        report.chapters.push(chapterRun);
+        hardStop = true;
+        break;
+      }
+    } else if (resumeKind === "sixPart") {
+      chapterRun.didRepairFanqie = true;
+      const repairStep = await runStep(chapterRun, "repair-fanqie-resume", "node", [
+        path.join("scripts", "fanqie", "repair-fanqie.mjs"),
+        bookName,
+        "--chapter",
+        String(chapter),
+        "--apply",
+      ], { cwd: root, dryRun: opts.dryRun });
+      if (repairStep.exitCode !== 0) {
+        chapterRun.finalStatus = FINAL_STATUS.sixPart;
+        report.stopReason = `resume repair-fanqie failed for chapter ${chapterPrefix(chapter)}`;
+        report.chapters.push(chapterRun);
+        hardStop = true;
+        break;
+      }
+    }
+
     let publishStep = await runStep(
       chapterRun,
       "publish-ready",
       "node",
-      publishReadyArgs(cli, bookName, chapter, opts),
+      publishReadyArgs(cli, bookName, chapter, opts, continuityOverridePass),
       { cwd: myNovelDir, dryRun: opts.dryRun },
     );
 
@@ -642,7 +871,6 @@ async function main() {
     let continuityFixes = 0;
     let polishFixes = 0;
     let repairs = 0;
-    let continuityOverridePass = false;
 
     while (classification.kind !== "pass") {
       if (classification.kind === "drop") {
@@ -813,6 +1041,25 @@ async function main() {
       report.finalStatus = FINAL_STATUS.unknown;
       report.stopReason = `export-fanqie failed for ${chapterPrefix(from)}-${chapterPrefix(to)}`;
     }
+  }
+
+  const failedChapter = latestFailedChapter(report);
+  if (failedChapter) {
+    report.manualFixPrompt = generateManualFixPrompt({
+      root,
+      bookDir,
+      bookName,
+      chapterRun: failedChapter,
+      report,
+    });
+  }
+
+  report.warningSummary = buildWarningSummary(report, { bookDir });
+  report.riskLevel = riskLevelForWarningSummary(report.warningSummary);
+  report.publishAdvice = publishAdviceForWarningSummary(report.warningSummary);
+  if (report.finalStatus === FINAL_STATUS.ready && report.warningSummary.P0.length > 0) {
+    report.finalStatus = FINAL_STATUS.unknown;
+    report.stopReason = report.stopReason || "P0 warning blocks publish.";
   }
 
   report.finishedAt = new Date().toISOString();
