@@ -300,6 +300,37 @@ function reportCorpus(report, step) {
   return `${JSON.stringify(report || {})}\n${step?.stdout || ""}\n${step?.stderr || ""}`;
 }
 
+function stepText(step) {
+  return `${step?.stdout || ""}\n${step?.stderr || ""}`;
+}
+
+function continuityAutoPassed(step) {
+  const text = stepText(step);
+  return /(?:^|\n)\s*result:\s*PASS\b/iu.test(text)
+    || /(?:^|\n)\s*Ch\.\d+:\s*final=PASS\b/iu.test(text)
+    || /(?:final_status|finalStatus)["':\s]+PASS\b/iu.test(text);
+}
+
+function publishReadyArgs(cli, bookName, chapter, opts, continuityOverridePass = false) {
+  const args = [
+    cli,
+    "review",
+    "publish-ready",
+    "--book",
+    bookName,
+    "--chapter",
+    String(chapter),
+    "--max-fix-attempts",
+    "0",
+    "--max-polish-attempts",
+    String(Math.max(1, opts.maxPolish)),
+    "--max-quality-fix-attempts",
+    "0",
+  ];
+  if (continuityOverridePass) args.push("--continuity-override-pass");
+  return args;
+}
+
 function classifyPublishReady(report, step) {
   const status = String(report?.publish_status || report?.status || report?.stdout_status || "UNKNOWN").toUpperCase();
   const corpus = reportCorpus(report, step);
@@ -395,6 +426,8 @@ function renderMarkdown(report) {
     lines.push(`- publish-ready final: ${chapter.publishReadyFinalStatus || "UNKNOWN"}`);
     lines.push(`- numeric: A=${chapter.numeric?.A ?? "n/a"} B=${chapter.numeric?.B ?? "n/a"} C=${chapter.numeric?.C ?? "n/a"}`);
     lines.push(`- continuity-auto: ${chapter.didContinuityAuto ? "true" : "false"}`);
+    if (chapter.continuityOverride) lines.push(`- continuityOverride: ${chapter.continuityOverride}`);
+    if (chapter.continuityOverrideReason) lines.push(`- continuityOverrideReason: ${chapter.continuityOverrideReason}`);
     lines.push(`- fanqie-polish: ${chapter.didFanqiePolish ? "true" : "false"}`);
     lines.push(`- repair-fanqie: ${chapter.didRepairFanqie ? "true" : "false"}`);
     if (chapter.writeAuditFailure) {
@@ -493,6 +526,8 @@ function makeChapterRun(chapter) {
     publishReadyFinalStatus: "UNKNOWN",
     numeric: null,
     didContinuityAuto: false,
+    continuityOverride: null,
+    continuityOverrideReason: "",
     didFanqiePolish: false,
     didRepairFanqie: false,
     writeAuditFailure: null,
@@ -592,21 +627,13 @@ async function main() {
     report.processedChapters.push(chapter);
     console.log(`\n[chapter ${chapterPrefix(chapter)}] start`);
 
-    let publishStep = await runStep(chapterRun, "publish-ready", "node", [
-      cli,
-      "review",
+    let publishStep = await runStep(
+      chapterRun,
       "publish-ready",
-      "--book",
-      bookName,
-      "--chapter",
-      String(chapter),
-      "--max-fix-attempts",
-      "0",
-      "--max-polish-attempts",
-      String(Math.max(1, opts.maxPolish)),
-      "--max-quality-fix-attempts",
-      "0",
-    ], { cwd: myNovelDir, dryRun: opts.dryRun });
+      "node",
+      publishReadyArgs(cli, bookName, chapter, opts),
+      { cwd: myNovelDir, dryRun: opts.dryRun },
+    );
 
     let publish = opts.dryRun
       ? { source: "dry-run", report: { publish_status: "READY_TO_EXPORT" } }
@@ -615,6 +642,7 @@ async function main() {
     let continuityFixes = 0;
     let polishFixes = 0;
     let repairs = 0;
+    let continuityOverridePass = false;
 
     while (classification.kind !== "pass") {
       if (classification.kind === "drop") {
@@ -645,6 +673,15 @@ async function main() {
           hardStop = true;
           break;
         }
+        if (!opts.dryRun && !continuityAutoPassed(fixStep)) {
+          chapterRun.finalStatus = FINAL_STATUS.continuity;
+          report.stopReason = `continuity-auto did not return PASS for chapter ${chapterPrefix(chapter)}.`;
+          hardStop = true;
+          break;
+        }
+        continuityOverridePass = true;
+        chapterRun.continuityOverride = "PASS";
+        chapterRun.continuityOverrideReason = "continuity-auto returned PASS";
       } else if (classification.kind === "sixPart" && repairs < opts.maxRepair) {
         repairs += 1;
         chapterRun.didRepairFanqie = true;
@@ -695,21 +732,13 @@ async function main() {
         break;
       }
 
-      publishStep = await runStep(chapterRun, "publish-ready-recheck", "node", [
-        cli,
-        "review",
-        "publish-ready",
-        "--book",
-        bookName,
-        "--chapter",
-        String(chapter),
-        "--max-fix-attempts",
-        "0",
-        "--max-polish-attempts",
-        String(Math.max(1, opts.maxPolish)),
-        "--max-quality-fix-attempts",
-        "0",
-      ], { cwd: myNovelDir, dryRun: opts.dryRun });
+      publishStep = await runStep(
+        chapterRun,
+        "publish-ready-recheck",
+        "node",
+        publishReadyArgs(cli, bookName, chapter, opts, continuityOverridePass),
+        { cwd: myNovelDir, dryRun: opts.dryRun },
+      );
       publish = opts.dryRun
         ? { source: "dry-run", report: { publish_status: "READY_TO_EXPORT" } }
         : readPublishReady(bookDir, chapter, publishStep);

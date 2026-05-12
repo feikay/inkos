@@ -709,6 +709,7 @@ reviewCommand
   .option("--quality-accept-threshold <number>", "Minimum accepted quality score threshold", "75")
   .option("--min-chapter-words <number>", "Minimum effective chapter word count", "1000")
   .option("--accept-manual-continuity", "Allow explicit publish-ready processing for MANUAL_REVIEW continuity")
+  .option("--continuity-override-pass", "Trust a PASS final continuity report and skip repeated continuity recheck")
   .option("--json", "Output JSON")
   .action(async (opts) => {
     try {
@@ -746,6 +747,7 @@ reviewCommand
           qualityAcceptThreshold,
           minChapterWords,
           acceptManualContinuity: Boolean(opts.acceptManualContinuity),
+          continuityOverridePass: Boolean(opts.continuityOverridePass),
           json: Boolean(opts.json),
         });
         results.push(result);
@@ -1043,6 +1045,8 @@ interface PublishReadyResult {
   readonly continuityStatusBeforeManualAccept?: string;
   readonly continuityScoreBeforeManualAccept?: number;
   readonly acceptedContinuityFile?: string;
+  readonly continuityOverride?: "PASS";
+  readonly continuityOverrideReason?: string;
   readonly reviewedFinalExists?: boolean;
   readonly source_file?: string;
   readonly word_count?: number;
@@ -1090,6 +1094,7 @@ async function runPublishReadyChapter(params: {
   readonly qualityAcceptThreshold: number;
   readonly minChapterWords: number;
   readonly acceptManualContinuity: boolean;
+  readonly continuityOverridePass: boolean;
   readonly json: boolean;
 }): Promise<PublishReadyResult> {
   const sourceChain = new Set<string>();
@@ -1105,6 +1110,24 @@ async function runPublishReadyChapter(params: {
     params.acceptManualContinuity,
   );
   if (candidateOverride === original.file) candidateOverride = undefined;
+  if (params.continuityOverridePass) {
+    const overrideResult = await runPublishReadyWithContinuityOverride(params, sourceChain);
+    if (overrideResult) return overrideResult;
+    return writePublishReadyReport(params.bookDir, {
+      book: params.bookId,
+      chapter_index: params.chapter,
+      publish_status: "BLOCKED_BY_CONTINUITY",
+      final_candidate_file: "",
+      source_chain: [...sourceChain],
+      continuity: { final_status: "UNKNOWN" },
+      quality: {},
+      warnings: ["continuity override was requested, but no PASS final continuity report with an existing used_file was found."],
+      word_count: 0,
+      min_chapter_words: params.minChapterWords,
+      report_json_path: "",
+      report_markdown_path: "",
+    });
+  }
   const existingReady = await tryWriteAcceptedExistingCandidate(params, candidateOverride ?? original.file, sourceChain);
   if (existingReady) return existingReady;
   let continuity: ContinuityCommandResult | undefined;
@@ -1387,6 +1410,118 @@ async function runPublishReadyChapter(params: {
     min_chapter_words: params.minChapterWords,
     report_json_path: "",
     report_markdown_path: "",
+  });
+}
+
+interface ContinuityOverridePassCandidate {
+  readonly report: ContinuityReport;
+  readonly sourceFile: string;
+  readonly sourceRef: string;
+}
+
+export async function resolveContinuityOverridePassCandidate(
+  bookDir: string,
+  chapter: number,
+): Promise<ContinuityOverridePassCandidate | null> {
+  const finalReport = await readContinuityReportIfExists(bookDir, chapter, "final-report");
+  if (!isContinuityPassReport(finalReport)) return null;
+  const usedFile = typeof finalReport?.used_file === "string" ? finalReport.used_file : "";
+  if (!usedFile) return null;
+  const sourceFile = resolveUsedFilePath(bookDir, usedFile);
+  if (!sourceFile || !existsSync(sourceFile)) return null;
+  return {
+    report: finalReport as ContinuityReport,
+    sourceFile,
+    sourceRef: relative(bookDir, sourceFile),
+  };
+}
+
+async function runPublishReadyWithContinuityOverride(
+  params: {
+    readonly bookId: string;
+    readonly bookDir: string;
+    readonly chapter: number;
+    readonly client: ReturnType<typeof createClient>;
+    readonly model: string;
+    readonly qualityPassThreshold: number;
+    readonly qualityAcceptThreshold: number;
+    readonly minChapterWords: number;
+    readonly json: boolean;
+  },
+  sourceChain: Set<string>,
+): Promise<PublishReadyResult | null> {
+  const override = await resolveContinuityOverridePassCandidate(params.bookDir, params.chapter);
+  if (!override) return null;
+
+  sourceChain.add(override.sourceRef);
+  const candidateSource = await resolvePublishReadyStartingCandidate(params.bookDir, params.chapter, override.sourceFile, false);
+  const candidateRef = relative(params.bookDir, candidateSource);
+  sourceChain.add(candidateRef);
+  if (!params.json) {
+    log("");
+    log("step 1 continuity:");
+    log(`status: PASS`);
+    log(`file: ${override.sourceRef}`);
+    log("source: continuity-auto override");
+    log("");
+    log("step 2 quality:");
+  }
+
+  const quality = await checkFanqieQualityChapter({
+    bookId: params.bookId,
+    bookDir: params.bookDir,
+    chapter: params.chapter,
+    client: params.client,
+    model: params.model,
+    currentOverridePath: candidateSource,
+  });
+  sourceChain.add(relative(params.bookDir, quality.sourceFile));
+
+  const qualityScore = quality.report.quality_score;
+  const qualityDecision = decidePublishQuality(qualityScore, params.qualityPassThreshold, params.qualityAcceptThreshold);
+  const qualityStatus = qualityFinalStatusFromDecision(qualityDecision);
+  if (!params.json) {
+    log(`score: ${qualityScore}`);
+    log(`status: ${quality.report.status}`);
+  }
+
+  const common = {
+    book: params.bookId,
+    chapter_index: params.chapter,
+    source_chain: [...sourceChain],
+    continuity: { final_status: "PASS", score: override.report.score },
+    quality: { final_quality_status: qualityStatus, score: qualityScore },
+    quality_decision: qualityDecision,
+    quality_score: qualityScore,
+    quality_pass_threshold: params.qualityPassThreshold,
+    quality_accept_threshold: params.qualityAcceptThreshold,
+    continuityOverride: "PASS" as const,
+    continuityOverrideReason: "continuity-auto returned PASS",
+    source_file: candidateRef,
+    word_count: override.report.word_count,
+    min_chapter_words: params.minChapterWords,
+    report_json_path: "",
+    report_markdown_path: "",
+  };
+
+  if (qualityDecision !== "QUALITY_PASS" && qualityDecision !== "QUALITY_WARN_POLISH_OPTIONAL") {
+    return writePublishReadyReport(params.bookDir, {
+      ...common,
+      publish_status: "BLOCKED_BY_QUALITY",
+      final_candidate_file: "",
+    });
+  }
+
+  const finalFile = await writeReviewedFinalChapter(params.bookDir, params.chapter, candidateSource);
+  sourceChain.add(relative(params.bookDir, finalFile));
+  const readyToExport = isReadyToExport(override.report, qualityDecision, finalFile, params.minChapterWords);
+  return writePublishReadyReport(params.bookDir, {
+    ...common,
+    publish_status: readyToExport ? publishStatusForQualityDecision(qualityDecision) : "MANUAL_REVIEW",
+    final_candidate_file: relative(params.bookDir, finalFile),
+    source_chain: [...sourceChain],
+    accepted_reason: qualityDecision === "QUALITY_WARN_POLISH_OPTIONAL" ? "quality score is publishable with optional polish" : undefined,
+    warnings: qualityWarnings(qualityDecision, qualityScore, params.qualityPassThreshold),
   });
 }
 
@@ -1690,6 +1825,8 @@ ${report.accepted_reason ? `- accepted_reason: ${report.accepted_reason}\n` : ""
 - continuityScoreBeforeManualAccept: ${report.continuityScoreBeforeManualAccept ?? "n/a"}
 - acceptedContinuityFile: ${report.acceptedContinuityFile}
 - reviewedFinalExists: ${report.reviewedFinalExists ? "true" : "false"}
+` : ""}${report.continuityOverride ? `- continuityOverride: ${report.continuityOverride}
+- continuityOverrideReason: ${report.continuityOverrideReason ?? "n/a"}
 ` : ""}${report.warnings?.length ? `- warnings:\n${report.warnings.map((warning) => `  - ${warning}`).join("\n")}\n` : ""}${report.source_file ? `- source_file: ${report.source_file}\n` : ""}- word_count: ${report.word_count ?? "n/a"}/${report.min_chapter_words}
 
 ## Source Chain

@@ -1,6 +1,6 @@
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ContinuityReport } from "@actalk/inkos-core";
 import {
@@ -10,6 +10,7 @@ import {
   removeStaleRepeatedInfoBlockers,
   retainNonSalvageFinalAfterSalvageFailure,
   resolvePublishReadyStartingCandidate,
+  resolveContinuityOverridePassCandidate,
   decidePublishQuality,
 } from "../commands/review.js";
 
@@ -184,6 +185,31 @@ describe("continuity-auto verdict helpers", () => {
 
       await expect(resolvePublishReadyStartingCandidate(bookDir, 85, original, false)).resolves.toBe(fixed);
       await expect(resolvePublishReadyStartingCandidate(bookDir, 85, original, true)).resolves.toBe(reviewed);
+    } finally {
+      await rm(bookDir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves a continuity-auto PASS final report as a publish-ready override source", async () => {
+    const bookDir = await mkdtemp(join(tmpdir(), "inkos-continuity-override-"));
+    try {
+      await mkdir(join(bookDir, "chapters"), { recursive: true });
+      await mkdir(join(bookDir, "reviews", "continuity"), { recursive: true });
+      const original = join(bookDir, "chapters", "0094_标题.md");
+      await writeFile(original, "# 第94章 标题\n\n正文\n", "utf-8");
+      await writeFile(join(bookDir, "reviews", "continuity", "0094.final-report.json"), JSON.stringify({
+        final_status: "PASS",
+        score: 92,
+        used_file: "chapters/0094_标题.md",
+        word_count: 1500,
+      }), "utf-8");
+
+      const candidate = await resolveContinuityOverridePassCandidate(bookDir, 94);
+
+      expect(candidate?.sourceRef).toBe("chapters/0094_标题.md");
+      expect(candidate?.report.final_status).toBe("PASS");
+      expect(candidate?.report.score).toBe(92);
+      expect(basename(candidate?.sourceFile ?? "")).toBe("0094_标题.md");
     } finally {
       await rm(bookDir, { recursive: true, force: true });
     }
