@@ -604,6 +604,10 @@ enableFullCastTracking: false
 (描述本书的核心矛盾和驱动力)
 \`\`\``;
 
+    const politicalSafetyRulesPrompt = resolvedLanguage === "en"
+      ? `\nPolitical/international/election safety rule: if the premise involves presidents, elections, parties, international conflict, or real-world ethnic/national identity, do not write an overbroad prohibition like "ban any real country mapping". Use a precise rule instead: real nationality/ethnic identity may be used as character background, but real political figures, real political parties, real political events, and direct identity slurs are forbidden; foreign governments, parties, presidents, and capital groups must be fully fictionalized.`
+      : `\n政治/国际/竞选题材安全规则：如果题材涉及总统、竞选、政党、国际冲突或真实国籍/族裔身份，不要写“禁止任何现实国家映射”这种过宽禁忌。应写成更精确规则：允许真实国籍/族裔身份作为角色背景，但禁止现实政治人物、现实政党、现实政治事件映射，禁止直接身份羞辱词；外国政权、政党、总统、财团必须完全虚构化。`;
+
     const currentStatePrompt = resolvedLanguage === "en"
       ? `Initial state card (Chapter 0), include:
 | Field | Value |
@@ -695,6 +699,7 @@ ${volumeOutlinePrompt}
 
 === SECTION: book_rules ===
 ${bookRulesPrompt}
+${politicalSafetyRulesPrompt}
 
 === SECTION: current_state ===
 ${currentStatePrompt}

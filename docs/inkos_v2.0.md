@@ -457,3 +457,5 @@ inkos 2.0：故事性的大升级
 3. inkos 2.0 任务三——增强 FoundationReviewerAgent 审核故事发动机质量
 4. inkos 2.0 任务二点五——create 阶段反哺旧控制文档
 5. inkos 2.0 任务二点六——优化 create 反哺文档的结构化
+6. inkos 2.0 任务三点五——create 阶段题材安全与发布风险
+7. inkos 2.0 任务三点五点一——补强 identity_insult 检测与真实国家规则一致性

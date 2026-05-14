@@ -4,6 +4,7 @@ import {
   FoundationReviewerAgent,
   hasFallbackContent,
 } from "../agents/foundation-reviewer.js";
+import { detectPublishSafetyRisks } from "../agents/foundation-safety.js";
 import type { ArchitectOutput } from "../agents/architect.js";
 
 const ZERO_USAGE = {
@@ -48,7 +49,7 @@ function createFoundation(overrides: Partial<ArchitectOutput> = {}): ArchitectOu
 }
 
 function reviewResponse(score = 88): string {
-  return Array.from({ length: 11 }, (_, index) => [
+  return Array.from({ length: 12 }, (_, index) => [
     `=== DIMENSION: ${index + 1} ===`,
     `分数：${score}`,
     `意见：维度${index + 1}基本成立。`,
@@ -75,6 +76,7 @@ describe("FoundationReviewerAgent", () => {
     expect(messages[0]?.content).toContain("人物动机有效性");
     expect(messages[0]?.content).toContain("前10章追读有效性");
     expect(messages[0]?.content).toContain("续写可用性");
+    expect(messages[0]?.content).toContain("发布安全与题材风险");
     expect(messages[0]?.content).toContain("反派结构");
     expect(messages[0]?.content).toContain("六步闭环");
 
@@ -107,6 +109,7 @@ describe("FoundationReviewerAgent", () => {
       expect.stringContaining("motivation_effectiveness"),
       expect.stringContaining("first_10_chapter_pull"),
       expect.stringContaining("continuation_usability"),
+      expect.stringContaining("publish_safety_risk"),
     ]));
     expect(result.passed).toBe(true);
   });
@@ -187,6 +190,180 @@ describe("FoundationReviewerAgent", () => {
 
     expect(result.dimensions).toHaveLength(5);
     expect(result.totalScore).toBe(86);
+    expect(result.passed).toBe(true);
+  });
+
+  it("caps publish safety when book rules forbid political mapping but a real political figure appears", async () => {
+    const agent = createAgent();
+    vi.spyOn(agent as unknown as { chat: (...args: unknown[]) => Promise<unknown> }, "chat")
+      .mockResolvedValue({ content: reviewResponse(95), usage: ZERO_USAGE });
+
+    const result = await agent.review({
+      foundation: createFoundation({
+        bookRules: "---\nprohibitions:\n  - 禁止映射现实政治人物与事件，所有内容均为平行世界虚构\nadditionalAuditDimensions: [政治敏感内容排查]\n---",
+        antagonistMap: "# 反派结构\n\n## 1. 核心反派\n- 姓名/代号：特朗普\n- 表层身份：现任美国总统\n- 真实身份：资本寡头代理人",
+      }),
+      mode: "original",
+      language: "zh",
+    });
+
+    const safetyDimension = result.dimensions.find((dimension) => dimension.name.includes("publish_safety_risk"));
+    expect(safetyDimension?.score).toBeLessThanOrEqual(60);
+    expect(result.totalScore).toBeLessThanOrEqual(79);
+    expect(result.passed).toBe(false);
+    expect(result.overallFeedback).toContain("完全虚构");
+    expect(result.overallFeedback).toContain("现实政治");
+  });
+
+  it("caps publish safety for direct identity insults without repeating the insult in feedback", async () => {
+    const agent = createAgent();
+    vi.spyOn(agent as unknown as { chat: (...args: unknown[]) => Promise<unknown> }, "chat")
+      .mockResolvedValue({ content: reviewResponse(95), usage: ZERO_USAGE });
+
+    const result = await agent.review({
+      foundation: createFoundation({
+        bookRules: "---\nprohibitions:\n  - 禁止出现种族歧视、违反公序良俗的政治操作\nadditionalAuditDimensions: [政治敏感内容排查]\n---",
+        genreArchitecture: "# 题材架构\n\n## 3. 开局打法\n第一章让反派用黄种猪羞辱主角。",
+      }),
+      mode: "original",
+      language: "zh",
+    });
+
+    const safetyDimension = result.dimensions.find((dimension) => dimension.name.includes("publish_safety_risk"));
+    expect(safetyDimension?.score).toBeLessThanOrEqual(55);
+    expect(result.totalScore).toBeLessThanOrEqual(75);
+    expect(result.passed).toBe(false);
+    expect(result.overallFeedback).toContain("身份羞辱");
+    expect(result.overallFeedback).toContain("概括性描述");
+    expect(result.overallFeedback).not.toContain("黄种猪");
+  });
+
+  it("detects expanded Chinese and English identity insults across foundation sections", () => {
+    const genreReport = detectPublishSafetyRisks(createFoundation({
+      genreArchitecture: "# 题材架构\n\n第一章混混用黄皮猪羞辱主角。",
+    }));
+    expect(genreReport.risks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "identity_insult", section: "genre_architecture" }),
+    ]));
+
+    const first10Report = detectPublishSafetyRisks(createFoundation({
+      first10ChapterPlan: "# 前10章规划\n\n第1章反派阵营用 ChInK 攻击主角。",
+    }));
+    expect(first10Report.risks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "identity_insult", section: "first_10_chapter_plan" }),
+    ]));
+
+    const antagonistReport = detectPublishSafetyRisks(createFoundation({
+      antagonistMap: "# 反派结构\n\n阶段反派用 nigger 辱骂主角盟友。",
+    }));
+    expect(antagonistReport.risks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "identity_insult", section: "antagonist_map" }),
+    ]));
+  });
+
+  it("does not repeat expanded identity insults in reviewer feedback", async () => {
+    const agent = createAgent();
+    vi.spyOn(agent as unknown as { chat: (...args: unknown[]) => Promise<unknown> }, "chat")
+      .mockResolvedValue({ content: reviewResponse(95), usage: ZERO_USAGE });
+
+    const result = await agent.review({
+      foundation: createFoundation({
+        bookRules: "---\nprohibitions:\n  - 禁止出现种族歧视、违反公序良俗的政治操作\nadditionalAuditDimensions: [政治敏感内容排查]\n---",
+        first10ChapterPlan: "# 前10章规划\n\n第1章反派用黄皮猪和 ChInK 刺激主角。",
+      }),
+      mode: "original",
+      language: "zh",
+    });
+
+    const safetyDimension = result.dimensions.find((dimension) => dimension.name.includes("publish_safety_risk"));
+    expect(safetyDimension?.score).toBeLessThanOrEqual(55);
+    expect(result.totalScore).toBeLessThanOrEqual(75);
+    expect(result.passed).toBe(false);
+    expect(result.overallFeedback).toContain("概括性描述");
+    expect(result.overallFeedback).not.toContain("黄皮猪");
+    expect(result.overallFeedback.toLowerCase()).not.toContain("chink");
+  });
+
+  it("caps the total at 69 when real political mapping and identity insults appear together", async () => {
+    const agent = createAgent();
+    vi.spyOn(agent as unknown as { chat: (...args: unknown[]) => Promise<unknown> }, "chat")
+      .mockResolvedValue({ content: reviewResponse(95), usage: ZERO_USAGE });
+
+    const result = await agent.review({
+      foundation: createFoundation({
+        bookRules: "---\nprohibitions:\n  - 禁止映射现实政治人物与事件，所有内容均为平行世界虚构\n  - 禁止出现种族歧视、违反公序良俗的政治操作\nadditionalAuditDimensions: [政治敏感内容排查]\n---",
+        antagonistMap: "# 反派结构\n\n- 姓名/代号：拜登\n- 表层身份：现任美国总统",
+        first10ChapterPlan: "# 前10章规划\n\n## 1. 黄金三章目标\n### 第1章\n- 前500字冲突：反派阵营用黑鬼攻击主角盟友。",
+      }),
+      mode: "original",
+      language: "zh",
+    });
+
+    expect(result.totalScore).toBeLessThanOrEqual(69);
+    expect(result.passed).toBe(false);
+  });
+
+  it("does not fail fictionalized political elements by local safety gate", async () => {
+    const report = detectPublishSafetyRisks(createFoundation({
+      bookRules: "---\nprohibitions:\n  - 禁止映射现实政治人物与事件，所有内容均为平行世界虚构\nadditionalAuditDimensions: [政治敏感内容排查]\n---",
+      genreArchitecture: "# 题材架构\n\n平行世界总统竞选，虚构总统与蓝鹰党、赤象党争夺民意系统。",
+      antagonistMap: "# 反派结构\n\n- 姓名/代号：霍兰\n- 表层身份：虚构联邦现任总统\n- 反派类型：谋局者",
+    }));
+
+    expect(report.risks).toHaveLength(0);
+  });
+
+  it("does not treat real nationality or ancestry as severe political mapping", () => {
+    const report = detectPublishSafetyRisks(createFoundation({
+      bookRules: "---\nprohibitions:\n  - 禁止任何现实国家、政党、人物、事件映射\nadditionalAuditDimensions: [政治敏感内容排查]\n---",
+      storyBible: "# Story Bible\n\n主角是中国籍华裔青年，想给祖国争光；故事发生在平行世界联邦。",
+      genreArchitecture: "# 题材架构\n\n保留身份不公和跨国竞选爽点，但外国政权和总统全部虚构化。",
+    }));
+
+    expect(report.risks).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "real_political_figure" }),
+      expect.objectContaining({ type: "real_political_party" }),
+      expect.objectContaining({ type: "real_event_mapping" }),
+      expect.objectContaining({ type: "identity_insult" }),
+    ]));
+    expect(report.risks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "rule_precision_warning", severity: "low" }),
+    ]));
+    expect(report.maxTotalScore).toBeUndefined();
+  });
+
+  it("still blocks real political figures, parties, and events after country-rule precision handling", () => {
+    const report = detectPublishSafetyRisks(createFoundation({
+      bookRules: "---\nprohibitions:\n  - 禁止任何现实国家、政党、人物、事件映射\nadditionalAuditDimensions: [政治敏感内容排查]\n---",
+      antagonistMap: "# 反派结构\n\n- 姓名/代号：奥巴马\n- 背后势力：民主党",
+      first10ChapterPlan: "# 前10章规划\n\n第5章卷入2024大选余波。",
+    }));
+
+    expect(report.risks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "real_political_figure" }),
+      expect.objectContaining({ type: "real_political_party" }),
+      expect.objectContaining({ type: "real_event_mapping" }),
+      expect.objectContaining({ type: "book_rule_violation" }),
+    ]));
+    expect(report.maxTotalScore).toBeLessThanOrEqual(79);
+  });
+
+  it("does not affect ordinary non-political system foundations", async () => {
+    const agent = createAgent();
+    vi.spyOn(agent as unknown as { chat: (...args: unknown[]) => Promise<unknown> }, "chat")
+      .mockResolvedValue({ content: reviewResponse(88), usage: ZERO_USAGE });
+
+    const result = await agent.review({
+      foundation: createFoundation({
+        storyBible: "# Story Bible\n\n主角拿到没用系统，在修仙宗门中从杂役逆袭。",
+        bookRules: "---\nversion: \"1.0\"\n---\n\n# Book Rules\n禁止系统规则前后矛盾。",
+      }),
+      mode: "original",
+      language: "zh",
+    });
+
+    const safetyDimension = result.dimensions.find((dimension) => dimension.name.includes("publish_safety_risk"));
+    expect(safetyDimension?.score).toBe(88);
     expect(result.passed).toBe(true);
   });
 });
