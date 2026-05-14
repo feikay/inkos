@@ -178,6 +178,9 @@ export {
 // Short story mode
 export * from "./short-story/index.js";
 
+// Story methods
+export * from "./story-methods/index.js";
+
 // Agent (pi-agent integration)
 export * from "./agent/index.js";
 
