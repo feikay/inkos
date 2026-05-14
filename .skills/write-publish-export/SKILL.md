@@ -11,15 +11,18 @@ description: >
 
 # write-publish-export
 
-Current version: v2.2
+Current version: v2.3
 
 - v1: write -> publish-ready -> repair -> numeric -> export
 - v2.1: resume / warningSummary / manual-fix-prompt
 - v2.2: numeric-fix / quality-trend / autoFixSuggestions
+- v2.3: first-chapter continuity baseline for new books
 
 ## 适用场景
 
 当用户要求"写某本书新一章""写某本书新 N 章""把第 X 到 Y 章检查并导出"时，使用本 skill 串联长篇连载生产流程。
+
+新书第一章也适用。第一章没有上一章，不能跑常规 continuity handoff；总控脚本会自动生成 first-chapter continuity baseline，再进入 publish-ready、numeric 和 export。
 
 本 skill 只适用于 `my-novel/books/<book>` 下的长篇小说项目，不用于 short-story 模块。
 
@@ -28,6 +31,7 @@ Current version: v2.2
 ```bash
 node scripts/fanqie/write-publish-export.mjs 葬渊魔经 --count 1
 node scripts/fanqie/write-publish-export.mjs 葬渊魔经 --count 3
+node scripts/fanqie/write-publish-export.mjs 新书名 --count 1
 node scripts/fanqie/write-publish-export.mjs 葬渊魔经 --from 90 --to 95
 node scripts/fanqie/write-publish-export.mjs 葬渊魔经 --count 3 --no-export
 node scripts/fanqie/write-publish-export.mjs 葬渊魔经 --resume-last
@@ -41,17 +45,19 @@ node scripts/fanqie/write-publish-export-trend.mjs 葬渊魔经 --last 10
 
 1. 解析书名和范围。
 2. `--count` 模式先执行 `write next`，每写一章后自动识别最新章节号。
-3. 对每章执行 `publish-ready`。
-4. 根据 publish-ready 状态分流补救：continuity-auto、fanqie-polish、repair-fanqie。
-5. publish-ready 最终通过后执行 `check-numeric-expression.mjs --final-only`。
-6. numeric A>0 时默认执行一次 numeric fix，再重新检查。
-7. 全部章节通过后，若没有 `--no-export`，执行 `export-fanqie.mjs --use-reviewed`。
-8. 写入 JSON 和 Markdown 运行报告。
+3. 如果当前章是第 1 章，先生成 first-chapter continuity baseline：`reviews/continuity/0001.final-report.json`，状态为 `PASS`，并在 publish-ready 时使用 `--continuity-override-pass`。
+4. 对每章执行 `publish-ready`。
+5. 根据 publish-ready 状态分流补救：continuity-auto、fanqie-polish、repair-fanqie。
+6. publish-ready 最终通过后执行 `check-numeric-expression.mjs --final-only`。
+7. numeric A>0 时默认执行一次 numeric fix，再重新检查。
+8. 全部章节通过后，若没有 `--no-export`，执行 `export-fanqie.mjs --use-reviewed`。
+9. 写入 JSON 和 Markdown 运行报告。
 
 ## 分支判断规则
 
 - `READY_TO_EXPORT` / `READY_WITH_WARNINGS` / `PASS`：进入 numeric check；`READY_WITH_WARNINGS` 允许继续但记 P1。
 - `DROP`：立即停止，不继续写下一章，不导出。
+- 第 1 章：因为没有上一章，跳过常规 continuity handoff，写入 first-chapter baseline PASS 报告；这只表示"无前章衔接可检查"，不代表质量或番茄风格自动通过。
 - 连续性相关：`BLOCKED_BY_CONTINUITY`、`continuity.final_status != PASS`、`MANUAL_REVIEW`、stdout 中出现 continuity/manual review，执行 `continuity-auto`，最多 `--max-continuity-fix` 次。
 - 番茄风格、标题、段落、质量相关：`quality_decision=NEED_REWRITE`、quality 分数不足，或 stdout 中出现 style/fanqie/title/paragraph/quality，执行 `fanqie-polish`，最多 `--max-polish` 次。
 - 6 段检查相关：stdout/report 中出现 `SIX_PART_FAIL`、`6段`、`Hook`、`Payoff`、`Pull`、`钩子`、`回收`、`追读` 等，执行 `repair-fanqie`，最多 `--max-repair` 次。
@@ -80,6 +86,21 @@ node scripts/fanqie/write-publish-export-trend.mjs 葬渊魔经 --last 10
 - 不允许跳过失败章节直接写后续章节。
 - 失败章节通过后继续补足原 `count` 剩余章节。
 - `STOPPED_BY_NUMERIC` 会按当前 numeric fix 设置处理；`--disable-numeric-fix` 可保留旧阻断行为。
+
+## 新书第一章
+
+当 `latestChapter=0` 且使用 `--count 1` 或更大 count 时，目标第一章为 `0001`。
+
+第一章特殊规则：
+
+- `write next` 仍按正常长篇流程生成 `chapters/0001*.md`。
+- 生成成功后，总控脚本写入 `my-novel/books/<book>/reviews/continuity/0001.final-report.json`。
+- baseline report 字段包括：`final_status=PASS`、`score=100`、`used_file=chapters/0001*.md`、`decision_source=first_chapter_baseline`。
+- 随后调用 `publish-ready --continuity-override-pass`，让 publish-ready 继续执行质量检查和最终候选写入。
+- numeric final-only 和 export 仍照常执行。
+- 如果第一章 `write next` 审计失败或没有落盘，仍然停止，不生成 baseline，不导出。
+
+禁止把 first-chapter baseline 用在第 2 章及以后；第 2 章开始必须走真实 continuity 检查。
 
 ## Warning 分级
 
@@ -200,7 +221,7 @@ my-novel/books/<book>/reviews/write-publish-export/quality-trend.json
     "type": "QUALITY_WARN_POLISH_OPTIONAL",
     "priority": "P1",
     "chapter": "0098",
-    "suggestedCommand": "node ../packages/cli/dist/index.js review fanqie-polish --book 葬渊魔经 --chapter 98"
+    "suggestedCommand": "node packages/cli/dist/index.js review fanqie-polish --book 葬渊魔经 --chapter 98"
   }
 ]
 ```

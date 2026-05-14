@@ -23,7 +23,7 @@ import {
   type FanqieQualityReport,
 } from "@actalk/inkos-core";
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createClient, findProjectRoot, loadConfig, resolveBookId, log, logError, loadReviewPresentation, GLOBAL_ENV_PATH } from "../utils.js";
 
@@ -1620,12 +1620,53 @@ async function runContinuityPublishPass(
   return { final: { ...current, report }, report };
 }
 
+function extractFinalChapterBody(raw: string): string {
+  const source = String(raw || "").replace(/\r\n/g, "\n");
+  const chapterContentMatch = source.match(/^\s*(?:#{1,6}\s*)?(?:===\s*)?CHAPTER_CONTENT(?:\s*===)?\s*$/imu);
+  if (chapterContentMatch?.index !== undefined) {
+    const start = chapterContentMatch.index + chapterContentMatch[0].length;
+    const rest = source.slice(start);
+    const endMatch = rest.match(/^\s*(?:#{1,6}\s*)?(?:===\s*)?(?:PRE_WRITE_CHECK|CHAPTER_TITLE|ORIGINAL_PRE_WRITE_CHECK|REVIEW|AUDIT)(?:\s*===)?\s*$/imu);
+    return rest.slice(0, endMatch?.index ?? rest.length);
+  }
+  return source;
+}
+
+function sanitizeReviewedFinalChapter(raw: string, chapter: number): string {
+  const body = extractFinalChapterBody(raw)
+    .replace(/^\s*---\s*\n[\s\S]*?\n---\s*/u, "")
+    .split(/\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => {
+      const value = line.trim();
+      if (!value) return true;
+      if (value === "---") return false;
+      if (/^\|.*\|$/u.test(value)) return false;
+      if (/^\|?\s*[-:]{3,}\s*(?:\|\s*[-:]{3,}\s*)+\|?$/u.test(value)) return false;
+      if (/^(?:#{1,6}\s*)?(?:CHAPTER_CONTENT|PRE_WRITE_CHECK|CHAPTER_TITLE|ORIGINAL_PRE_WRITE_CHECK)(?:\s*===)?$/iu.test(value)) return false;
+      if (/^(?:#{1,6}\s*)?第\s*0*\d+\s*章(?:\s+.*)?$/u.test(value)) return false;
+      if (/^#{1,6}\s+/u.test(value)) return false;
+      if (/^(?:检查项|检查结果|备注)\s*$/u.test(value)) return false;
+      return true;
+    })
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  if (!body) {
+    throw new Error(`chapter ${chapterNumberPrefix(chapter)} final candidate is empty after CHAPTER_CONTENT extraction`);
+  }
+  return `${body}\n`;
+}
+
 async function writeReviewedFinalChapter(bookDir: string, chapter: number, sourceFile: string): Promise<string> {
   const outDir = join(bookDir, "chapters-reviewed");
   const outFile = join(outDir, `${chapterNumberPrefix(chapter)}_final.md`);
-  if (resolve(sourceFile) === resolve(outFile)) return outFile;
   await mkdir(outDir, { recursive: true });
-  await copyFile(sourceFile, outFile);
+  const raw = await readFile(sourceFile, "utf-8");
+  const sanitized = sanitizeReviewedFinalChapter(raw, chapter);
+  if (resolve(sourceFile) === resolve(outFile) && raw === sanitized) return outFile;
+  await writeFile(outFile, sanitized, "utf-8");
   return outFile;
 }
 

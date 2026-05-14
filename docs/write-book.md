@@ -1,27 +1,140 @@
+
+
+# 新书
+
+```
+inkos book create --title "重生2003：深圳往事" --genre rebirth --platform tomato
+```
+
+# 一键续写
+
+```bash
+# 写1章
+node scripts/fanqie/write-publish-export.mjs 葬渊魔经 --count 1
+
+# 写N章
+node scripts/fanqie/write-publish-export.mjs 葬渊魔经 --count n
+```
+
+# 自然语言选题
+
+```bash
+# fanqie-topic-advisor + fanqie-novel-research skills
+# fanqie-novel-research可以独立使用
+用户询问以下类型问题时触发：
+- "帮我确定一下最近选题倾向"
+- "我想写新书，给我一些建议"
+- "最近番茄什么题材好签？"
+- "我想创建一个新项目，应该怎么选题材？"
+- "帮我分析一下当前热门题材"
+- "结合我的系统能力，推荐几个题材"
+
+# 目标
+确定当期番茄最热和社媒评论中最容易通过的签约的题材，输出多个题材类型，再结合当前题材画像的匹配度分析
+
+# workflow
+用户提问
+   ↓
+fanqie-topic-advisor (新增)
+   ↓
+   ├─ 检查知识库是否过期
+   │      ↓
+   │      ├─ 是 → 调用 fanqie-novel-research 更新
+   │      └─ 否 → 继续
+   ↓
+   ├─ 读取 packages/core/genres/*.md
+   ↓
+   ├─ 匹配 + 生成报告
+   ↓
+   └─ 输出选题建议
+
+---
+
+fanqie-novel-research (已有，不变)
+   ↓
+用户直接提问签约相关问题
+   ↓
+独立执行，输出调研报告
+
+```
+
+# 自然语言新开书
+
+```bash
+# book-starter skills
+# 提问，要明确章节数、单节字数、总字数、发布平台
+新开XX类型的书，计划不确定章节数、单节字数不低于1000字、不设总字数下限、发布平台番茄
+新开一本都市系统流的小说
+新开系统流类型的书，不需要确定章节数、单节字数不低于1000字、不设总字数下限、发布平台番茄。你先给我几个有创意有吸引力的标题和创意简报。确定后，你生成系统的创意简报作为创建新书的入参（使用 --brief 参数）
+
+# workflow
+Step 0: 加载系统支持的中文题材列表（动态读取 genres 目录）
+   ↓
+Step 1: 解析用户需求（使用动态映射表匹配）
+   ↓
+Step 2: 生成3个候选书名和主题方向
+   ↓
+Step 3: 用户选择后，创建书籍
+   ↓
+Step 4: 输出概要并分析匹配度
+   ↓
+Step 5: 用户确认（通过/重新生成循环）
+
+```
+
+
+
+# 自然语言续写
+
+```bash
+# write-publish-export skills
+# 提问
+
+你可以用“写新章 / 连写 N 章 / 检查并导出番茄版”这类自然语言触发 `write-publish-export`。
+
+例子：
+写《葬渊魔经》新一章并导出番茄版
+给《葬渊魔经》连写 3 章，publish-ready 通过后导出番茄版
+写《苍穹之下》下一章，检查通过后导出番茄版
+把《葬渊魔经》第 90 到 95 章跑 publish-ready，全部通过后导出番茄版
+给《苍穹之下》写 2 章，不导出，只跑发布前检查
+写《葬渊魔经》新一章，如果连续性失败就停止，不要继续写
+把《葬渊魔经》第 92 章重新跑发布前检查、数字表达检查和番茄导出
+连写《苍穹之下》3 章，遇到 continuity 问题就自动修一次，过不了就停止
+
+更稳定的提问格式是：
+使用 write-publish-export：写《书名》新 N 章，并导出番茄版
+使用 write-publish-export：处理《书名》第 X 到 Y 章，publish-ready 通过后 export-fanqie
+
+# 关键词最好带上这些之一：`写新章`、`连写`、`publish-ready`、`导出番茄版`、`export-fanqie`、`write-publish-export`。
+```
+
+
+
 # 续写
 
 ```bash
-cd my-novel
+cd /Users/feikay/Documents/mycode/node-workspace/inkos
 
 # 写新章
-node ../packages/cli/dist/index.js write next 葬渊魔经
+node packages/cli/dist/index.js write next 葬渊魔经
 
 -----------------------------
 # 连续性自动检测+自动修复
-node ../packages/cli/dist/index.js review continuity-auto --book 葬渊魔经 --chapter 84 --max-fix-attempts 2
+node packages/cli/dist/index.js review continuity-auto --book 葬渊魔经 --chapter 84 --max-fix-attempts 2
 
 # 番茄质量检测：爽点 / 节奏 / 钩子
-node ../packages/cli/dist/index.js review fanqie-quality --book 葬渊魔经 --chapter 84
+node packages/cli/dist/index.js review fanqie-quality --book 葬渊魔经 --chapter 84
 
 # 优化爽点/节奏（单章） 
-node ../packages/cli/dist/index.js review fanqie-polish --book 葬渊魔经 --chapter 84 --max-polish-attempts 2
+node packages/cli/dist/index.js review fanqie-polish --book 葬渊魔经 --chapter 84 --max-polish-attempts 2
 # 批量优化（可选）
-node ../packages/cli/dist/index.js review fanqie-polish --book 葬渊魔经 --from 2 --to 200
+node packages/cli/dist/index.js review fanqie-polish --book 葬渊魔经 --from 2 --to 200
 --------------------------------
 # 综合输出（单章） 包含 continuity-auto -> fanqie-quality -> fanqie-polish -> continuity-auto
-node ../packages/cli/dist/index.js review publish-ready --book 葬渊魔经 --chapter 84
+node packages/cli/dist/index.js review publish-ready --book 葬渊魔经 --chapter 84
 # 综合输出（批量） 包含 continuity-auto -> fanqie-quality -> fanqie-polish -> continuity-auto
-node ../packages/cli/dist/index.js review publish-ready --book 葬渊魔经 \
+node packages/cli/dist/index.js review publish-ready --book 葬渊魔经 \
   --from 2 --to 200 \
   --max-fix-attempts 2 \
   --max-polish-attempts 1 \
@@ -32,7 +145,6 @@ node ../packages/cli/dist/index.js review publish-ready --book 葬渊魔经 \
   --accept-manual-continuity \ # 如果接受人工
   --min-chapter-words 1000
 
-cd ..
 # 
 node scripts/fanqie/check-numeric-expression.mjs 葬渊魔经 --from 84 --to 86 --final-only
 node scripts/fanqie/check-numeric-expression.mjs 葬渊魔经 --chapter 87 --final-only
@@ -43,13 +155,9 @@ node scripts/fanqie/export-fanqie.mjs 葬渊魔经 --incremental --use-reviewed 
 # 6段节奏修复（6段检查Hook / Pressure / Attempt / Twist / Payoff / Pull）
 node scripts/fanqie/repair-fanqie.mjs 葬渊魔经 --apply
 
-cd my-novel
-
 # 6段修复后再查连续性 --max-fix-attempts不带时默认2 
 # --max-fix-attempts 0 时强制自动重写salvage
-node ../packages/cli/dist/index.js review continuity-auto --book 葬渊魔经 --from 2 --to 200 --max-fix-attempts 2 
-
-cd ..
+node packages/cli/dist/index.js review continuity-auto --book 葬渊魔经 --from 2 --to 200 --max-fix-attempts 2 
 
 # 全量重新导出
 node scripts/fanqie/export-fanqie.mjs 葬渊魔经 --from 1 --to 999 --use-reviewed --title "气血为0，我却能撬动规则"
@@ -75,37 +183,35 @@ auto 修 2 次
 #####################
 
 # 修复连贯性问题（轻微断链 70 ≤ score < 85 修复指定章节）
-node ../packages/cli/dist/index.js review continuity-fix --book 葬渊魔经 --chapter 84
+node packages/cli/dist/index.js review continuity-fix --book 葬渊魔经 --chapter 84
 # 修复连贯性问题（严重断链 score < 70 章节重写）
 cp my-novel/books/葬渊魔经/chapters-salvaged/0019_salvage.md my-novel/books/葬渊魔经/chapters/0019_xxx.md
-node ../packages/cli/dist/index.js review continuity-auto --book 葬渊魔经 --chapter 19
+node packages/cli/dist/index.js review continuity-auto --book 葬渊魔经 --chapter 19
 
 ```
 
 ```bash
 # 番茄推荐机制优化（爽点+节奏+钩子检测）
 #单章检测：
-node ../packages/cli/dist/index.js review fanqie-quality --book 葬渊魔经 --chapter 84
+node packages/cli/dist/index.js review fanqie-quality --book 葬渊魔经 --chapter 84
 
 #批量检测：
-node ../packages/cli/dist/index.js review fanqie-quality --book 葬渊魔经 --from 2 --to 200
+node packages/cli/dist/index.js review fanqie-quality --book 葬渊魔经 --from 2 --to 200
 
 # fanqie-quality: score >= 85 不用
 # fanqie-quality: score in 70~84
-node ../packages/cli/dist/index.js review fanqie-polish --book 葬渊魔经 --chapter 84
+node packages/cli/dist/index.js review fanqie-polish --book 葬渊魔经 --chapter 84
 # fanqie-quality: score < 70 两次 走 salvage
-node ../packages/cli/dist/index.js review continuity-auto --book 葬渊魔经 --from 2 --to 200 --max-fix-attempts 0
+node packages/cli/dist/index.js review continuity-auto --book 葬渊魔经 --from 2 --to 200 --max-fix-attempts 0
 
 ```
 
 # 重写
 ```bash
-cd my-novel
-
 rm books/葬渊魔经/reviews/continuity/0019.final-report.json
 rm books/葬渊魔经/reviews/continuity/0019.salvage-report.json
 
-node ../packages/cli/dist/index.js review continuity-auto --book 葬渊魔经 --chapter 19 --max-fix-attempts 0
+node packages/cli/dist/index.js review continuity-auto --book 葬渊魔经 --chapter 19 --max-fix-attempts 0
 ```
 👉 这样：
 ```
@@ -240,7 +346,7 @@ chapter-002.md
 
 ```bash
 cd my-novel
-node ../packages/cli/dist/index.js book create \
+node packages/cli/dist/index.js book create \
   --title "新" \
   --genre xuanhuan \
   --platform tomato \
@@ -250,7 +356,7 @@ node ../packages/cli/dist/index.js book create \
 ## 📌 写新书
 
 ```bash
-node ../packages/cli/dist/index.js write next 新书名
+node packages/cli/dist/index.js write next 新书名
 ```
 
 ------

@@ -1,5 +1,6 @@
+import { existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { createLLMClient, StateManager, createLogger, createStderrSink, createJsonLineSink, loadProjectConfig, GLOBAL_CONFIG_DIR, GLOBAL_ENV_PATH, type ChapterGoal, type ProjectConfig, type PipelineConfig, type LogSink } from "@actalk/inkos-core";
 import { formatSqliteMemorySupportWarning } from "./runtime-requirements.js";
 
@@ -28,7 +29,16 @@ export async function resolveContext(opts: {
 }
 
 export function findProjectRoot(): string {
-  return process.cwd();
+  let current = process.cwd();
+  while (true) {
+    if (existsSync(join(current, "inkos.json"))) return current;
+    const nestedProject = join(current, "my-novel");
+    if (existsSync(join(nestedProject, "inkos.json"))) return nestedProject;
+
+    const parent = dirname(current);
+    if (parent === current) return process.cwd();
+    current = parent;
+  }
 }
 
 export async function loadConfig(options?: { readonly requireApiKey?: boolean; readonly projectRoot?: string }): Promise<ProjectConfig> {

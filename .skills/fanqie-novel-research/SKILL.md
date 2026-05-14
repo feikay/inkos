@@ -4,6 +4,9 @@ description: 番茄小说平台签约过审经验调研技能。当用户询问�
 agent_created: true
 ---
 
+<!-- Generated mirror. Edit `skills/fanqie-novel-research/SKILL.md` instead. -->
+
+
 # Fanqie Novel Research - 番茄小说平台签约调研技能
 
 ## Overview

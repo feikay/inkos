@@ -19,7 +19,7 @@ function hasFlag(name) {
 
 const from = Number(getArg("from", 1));
 const to = Number(getArg("to", 99999));
-const publishTitle = getArg("title", "气血为0，我却能撬动规则");
+const publishTitleArg = getArg("title");
 
 const incremental = hasFlag("incremental");
 const reset = hasFlag("reset");
@@ -43,6 +43,9 @@ if (!fs.existsSync(bookDir)) {
   console.error(`找不到书籍目录：${bookDir}`);
   process.exit(1);
 }
+
+const bookConfig = readJsonIfExists(path.join(bookDir, "book.json")) || {};
+const publishTitle = publishTitleArg || bookConfig.title || bookName;
 
 if (!dryRun) fs.mkdirSync(chapterOutDir, { recursive: true });
 if (reset && fs.existsSync(markerFile)) fs.rmSync(markerFile);
@@ -368,7 +371,7 @@ function normalizeTextValue(value) {
 function cleanText(text) {
   const source = normalizeTextValue(text);
   const lines = source
-    .replace(/^---[\s\S]*?---\s*/m, "")
+    .replace(/^\s*---\s*\n[\s\S]*?\n---\s*/u, "")
     .replace(/```[\s\S]*?```/g, "")
     .replace(/^#{1,6}\s*(?:创作说明|本章问题|六段检查|审核|检查|改写建议|修复建议|正文开始|正文结束)\s*\n[\s\S]*?(?=\n\s*\n|$)/gm, "")
     .replace(/INFO\s+\[.*?\].*/g, "")
@@ -1166,7 +1169,26 @@ for (const { file, originalFile, no } of chapterFiles) {
     continue;
   }
 
-  if (!text) continue;
+  if (!text) {
+    nonNovelMarkerFailures.push({
+      no,
+      title,
+      file,
+      originalFile,
+      rawIssues,
+      cleanedIssues: {
+        issues: [
+          {
+            lineNo: 0,
+            raw: "cleaned text is empty",
+            type: "清理后正文为空",
+            action: "fail",
+          },
+        ],
+      },
+    });
+    continue;
+  }
 
   const rewrittenText = rewriteToWebNovelStyle(text);
   const finalText = `${title}\n\n${rewrittenText}\n`;
@@ -1219,11 +1241,14 @@ ${checks.map(({ title, file, rawIssues, cleanedIssues }) => {
 }
 
 function makeReportContent() {
+  const finalStatus = nonNovelMarkerFailures.length || exported.length === 0 ? "EXPORT_FAILED" : "READY";
   return `# 番茄发布检查报告
 
 书名：${publishTitle}
 
 导出时间：${new Date().toLocaleString("zh-CN")}
+
+final_status：${finalStatus}
 
 导出章节数：${exported.length}
 
@@ -1242,7 +1267,48 @@ if (nonNovelMarkerFailures.length) {
   process.exit(1);
 }
 
+const expectedExportFiles = chapterFiles.map(({ no }) => path.join(chapterOutDir, `${String(no).padStart(4, "0")}.txt`));
+
+function missingExpectedExportFiles() {
+  return expectedExportFiles.filter((file) => !fs.existsSync(file));
+}
+
 if (!dryRun) {
+  if (exported.length === 0) {
+    fs.writeFileSync(path.join(outDir, "report.md"), makeReportContent(), "utf8");
+    fs.writeFileSync(path.join(outDir, "book-info.txt"), [
+      `书名：${publishTitle}`,
+      "final_status：EXPORT_FAILED",
+      "当前导出章节：0",
+      "当前导出字数：0",
+      "错误：导出章节数为 0",
+      "",
+    ].join("\n"), "utf8");
+    console.error("❌ 番茄导出失败：导出章节数为 0。");
+    process.exit(1);
+  }
+
+  for (const item of exported) {
+    fs.writeFileSync(item.outFile, item.finalText, "utf8");
+  }
+
+  const missing = missingExpectedExportFiles();
+  if (missing.length) {
+    fs.writeFileSync(path.join(outDir, "report.md"), makeReportContent(), "utf8");
+    fs.writeFileSync(path.join(outDir, "book-info.txt"), [
+      `书名：${publishTitle}`,
+      "final_status：EXPORT_FAILED",
+      `当前导出章节：${exported.length}`,
+      `当前导出字数：${exported.reduce((sum, item) => sum + item.chars, 0)}`,
+      ...missing.map((file) => `错误：Missing exported chapter file: ${path.relative(root, file)}`),
+      "",
+    ].join("\n"), "utf8");
+    for (const file of missing) {
+      console.error(`Missing exported chapter file: ${path.relative(root, file)}`);
+    }
+    process.exit(1);
+  }
+
   const bookInfoResult = writeBookInfoFile({
     book: bookName,
     bookDir,
@@ -1260,13 +1326,6 @@ if (!dryRun) {
   for (const warning of bookInfoResult.warnings || []) {
     console.warn(`[book-info] warning: ${warning}`);
   }
-}
-
-if (!dryRun) {
-  for (const item of exported) {
-    fs.writeFileSync(item.outFile, item.finalText, "utf8");
-  }
-
   fs.writeFileSync(path.join(outDir, "full.txt"), exported.map((x) => x.finalText).join("\n\n"), "utf8");
 
   fs.writeFileSync(path.join(outDir, "report.md"), makeReportContent(), "utf8");

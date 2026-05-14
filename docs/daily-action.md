@@ -1,14 +1,14 @@
 以后你的实际 SOP 简化成这套：
 
 ```bash
-# 0. 进入项目
-cd my-novel
+# 0. 进入仓库根目录
+cd /Users/feikay/Documents/mycode/node-workspace/inkos
 
 # 1. 写新章节
-node ../packages/cli/dist/index.js write next 葬渊魔经
+node packages/cli/dist/index.js write next 葬渊魔经
 
 # 2. 单章发布闭环检测
-node ../packages/cli/dist/index.js review publish-ready \
+node packages/cli/dist/index.js review publish-ready \
   --book 葬渊魔经 \
   --chapter 31 \
   --max-fix-attempts 2 \
@@ -29,8 +29,6 @@ READY_TO_EXPORT
 就可以导出：
 
 ```bash
-cd ..
-
 node scripts/fanqie/export-fanqie.mjs 葬渊魔经 \
   --from 31 \
   --to 31 \
@@ -49,9 +47,7 @@ my-novel/books/葬渊魔经/chapters-reviewed/0031_final.md
 批量跑：
 
 ```bash
-cd my-novel
-
-node ../packages/cli/dist/index.js review publish-ready \
+node packages/cli/dist/index.js review publish-ready \
   --book 葬渊魔经 \
   --from 2 \
   --to 200 \
@@ -84,14 +80,14 @@ write next
 
 ```bash
 # 先单章重跑：
-node ../packages/cli/dist/index.js review continuity-auto \
+node packages/cli/dist/index.js review continuity-auto \
   --book 葬渊魔经 \
   --chapter 39 \
   --max-fix-attempts 2 \
   --min-chapter-words 1000
   
  # 然后再跑：
- node ../packages/cli/dist/index.js review publish-ready \
+ node packages/cli/dist/index.js review publish-ready \
   --book 葬渊魔经 \
   --chapter 39 \
   --max-fix-attempts 2 \
@@ -105,7 +101,7 @@ node ../packages/cli/dist/index.js review continuity-auto \
 # 如果第39章变成：READY_TO_EXPORT
 
 # 恢复批量：
-node ../packages/cli/dist/index.js review publish-ready \
+node packages/cli/dist/index.js review publish-ready \
   --book 葬渊魔经 \
   --from 40 \
   --to 200 \

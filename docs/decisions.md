@@ -78,7 +78,7 @@ open chapters-salvaged/0019_salvage.md
 👉 烂 → 重写
 
 # 4. 再检测
-node ../packages/cli/dist/index.js review continuity-auto --chapter 19
+node packages/cli/dist/index.js review continuity-auto --chapter 19
 ```
 
 # --accept-manual-continuity流程风险

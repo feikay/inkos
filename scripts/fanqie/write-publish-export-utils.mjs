@@ -51,6 +51,8 @@ export function inferFailureKind(chapter) {
 
   if (finalStatus.includes("WRITE_LOCK") || finalStatus.includes("ACTIVE_LOCK") || finalStatus.includes("STALE_LOCK") || /WRITE\.LOCK|ACTIVE WRITE LOCK|STALE_LOCK/iu.test(corpus)) return "writeLock";
   if (finalStatus.includes("WRITE_AUDIT")) return "writeAudit";
+  if (finalStatus.includes("EXPORT")) return "export";
+  if (finalStatus.includes("FIRST_CHAPTER_QUALITY")) return "quality";
   if (finalStatus.includes("NUMERIC")) return "numeric";
   if (finalStatus.includes("SIX_PART") || publishStatus.includes("SIX_PART") || corpus.includes("SIX_PART_FAIL")) return "sixPart";
   if (finalStatus.includes("CONTINUITY") || publishStatus.includes("CONTINUITY") || corpus.includes("BLOCKED_BY_CONTINUITY")) return "continuity";
@@ -225,6 +227,15 @@ export function buildWarningSummary(report, { bookDir } = {}) {
     if (!isReady && (finalStatus === "STOPPED_BY_WRITE_AUDIT" || /did not create chapter file|没有落盘|No chapter file was created/iu.test(text))) {
       addWarning(summary, "P0", "WRITE_NEXT_NO_FILE", "write next did not land a chapter file", { chapter: chapterId });
     }
+    if (!isReady && /STOPPED_BY_EXPORT/u.test(finalStatus)) {
+      addWarning(summary, "P0", "EXPORT_MISSING_CHAPTER", "exported chapter txt is missing", { chapter: chapterId });
+    }
+    if (/FINAL_STRUCTURAL_MARKER|FINAL_MARKDOWN_TABLE|FINAL_MARKDOWN_SEPARATOR|FINAL_YAML_FRONTMATTER|FINAL_MARKDOWN_HEADING/iu.test(text)) {
+      addWarning(summary, "P0", "FINAL_CANDIDATE_NOT_PURE_BODY", "final candidate contains non-body markers", { chapter: chapterId });
+    }
+    if (!isReady && /STOPPED_BY_FIRST_CHAPTER_QUALITY/u.test(finalStatus)) {
+      addWarning(summary, "P0", "FIRST_CHAPTER_NEEDS_POLISH", "first chapter quality gate failed", { chapter: chapterId });
+    }
     if (finalStatus === "READY_TO_PUBLISH" && bookDir && !report.request?.dryRun) {
       const finalFile = path.join(bookDir, "chapters-reviewed", `${chapterId}_final.md`);
       if (!fs.existsSync(finalFile)) addWarning(summary, "P0", "FINAL_FILE_MISSING", "final file does not exist", { chapter: chapterId, path: finalFile });
@@ -252,6 +263,9 @@ export function buildWarningSummary(report, { bookDir } = {}) {
 
   if (report.exportStep && report.exportStep.exitCode !== 0) {
     addWarning(summary, "P0", "EXPORT_FAILED", "export failed", {});
+  }
+  for (const file of report.exportMissingFiles || []) {
+    addWarning(summary, "P0", "EXPORT_MISSING_CHAPTER", `missing exported chapter file: ${file}`, {});
   }
 
   return summary;
@@ -321,14 +335,14 @@ export function buildAutoFixSuggestions(report, bookName) {
           type: warning.code,
           priority: level,
           chapter: warning.chapter,
-          suggestedCommand: `node ../packages/cli/dist/index.js review continuity-auto --book ${bookName} --chapter ${chapter} --max-fix-attempts 1`,
+          suggestedCommand: `node packages/cli/dist/index.js review continuity-auto --book ${bookName} --chapter ${chapter} --max-fix-attempts 1`,
         });
       } else if (warning.code === "BLOCKED_BY_QUALITY") {
         suggestions.push({
           type: warning.code,
           priority: level,
           chapter: warning.chapter,
-          suggestedCommand: `node ../packages/cli/dist/index.js review fanqie-polish --book ${bookName} --chapter ${chapter}`,
+          suggestedCommand: `node packages/cli/dist/index.js review fanqie-polish --book ${bookName} --chapter ${chapter}`,
         });
       } else if (warning.code === "SIX_PART_FAIL") {
         suggestions.push({
@@ -337,7 +351,7 @@ export function buildAutoFixSuggestions(report, bookName) {
           chapter: warning.chapter,
           suggestedCommand: `node scripts/fanqie/repair-fanqie.mjs ${bookName} --chapter ${chapter} --apply`,
         });
-      } else if (warning.code === "DROP" || warning.code === "WRITE_NEXT_NO_FILE" || warning.code === "FINAL_FILE_MISSING" || warning.code === "EXPORT_FAILED") {
+      } else if (warning.code === "DROP" || warning.code === "WRITE_NEXT_NO_FILE" || warning.code === "FINAL_FILE_MISSING" || warning.code === "EXPORT_FAILED" || warning.code === "EXPORT_MISSING_CHAPTER" || warning.code === "FINAL_CANDIDATE_NOT_PURE_BODY" || warning.code === "FIRST_CHAPTER_NEEDS_POLISH") {
         suggestions.push({
           type: warning.code,
           priority: level,
@@ -349,7 +363,7 @@ export function buildAutoFixSuggestions(report, bookName) {
           type: warning.code,
           priority: level,
           chapter: warning.chapter,
-          suggestedCommand: `node ../packages/cli/dist/index.js review fanqie-polish --book ${bookName} --chapter ${chapter}`,
+          suggestedCommand: `node packages/cli/dist/index.js review fanqie-polish --book ${bookName} --chapter ${chapter}`,
         });
       } else if (warning.code === "MISSING_STATE_CHANGE" || warning.code === "MINOR_STATE_WARNING") {
         suggestions.push({
@@ -391,6 +405,9 @@ function promptByKind(kind, { bookName, chapterId }) {
   }
   if (kind === "sixPart") {
     return `请修复《${bookName}》第${chapterId}章六段节奏问题。重点补齐 Hook / Pressure / Attempt / Twist / Payoff / Pull 的缺失功能。不改主线，只补齐节奏功能与追读牵引。`;
+  }
+  if (kind === "export") {
+    return `请修复《${bookName}》第${chapterId}章番茄导出失败。重点检查 chapters-reviewed final 候选是否为纯正文，以及 publish/<book>/fanqie/chapters/${chapterId}.txt 是否生成。不得在缺少章节 txt 时发布。`;
   }
   return `请定位并修复《${bookName}》第${chapterId}章 write-publish-export 失败。先阅读报告中的失败步骤和日志摘要，再给出最小修改方案；不要改动主线或无关章节。`;
 }

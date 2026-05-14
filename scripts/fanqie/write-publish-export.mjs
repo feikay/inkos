@@ -39,6 +39,8 @@ const FINAL_STATUS = {
   numeric: "STOPPED_BY_NUMERIC",
   sixPart: "STOPPED_BY_SIX_PART",
   drop: "STOPPED_BY_DROP",
+  export: "STOPPED_BY_EXPORT",
+  firstChapterQuality: "STOPPED_BY_FIRST_CHAPTER_QUALITY",
   writeLock: "STOPPED_BY_WRITE_LOCK",
   activeLock: "STOPPED_BY_ACTIVE_LOCK",
   staleLock: "STOPPED_BY_STALE_LOCK",
@@ -131,6 +133,110 @@ function findChapterFile(bookDir, chapter) {
   return walk(chaptersDir)
     .filter((file) => chapterNoFromFile(file) === chapter)
     .sort((a, b) => path.basename(a).localeCompare(path.basename(b)))[0] || null;
+}
+
+function finalCandidatePath(bookDir, chapter) {
+  return path.join(bookDir, "chapters-reviewed", `${chapterPrefix(chapter)}_final.md`);
+}
+
+function detectFinalCandidateIssues(file) {
+  if (!fs.existsSync(file)) return [{ code: "FINAL_FILE_MISSING", message: "final candidate file is missing" }];
+  const text = fs.readFileSync(file, "utf8");
+  const issues = [];
+  const lines = text.split(/\r?\n/);
+  if (/^\s*---\s*$/mu.test(text)) issues.push({ code: "FINAL_MARKDOWN_SEPARATOR", message: "final candidate contains markdown separator ---" });
+  if (/^\s*#{1,6}\s*(?:CHAPTER_CONTENT|PRE_WRITE_CHECK|CHAPTER_TITLE|ORIGINAL_PRE_WRITE_CHECK)\s*$/imu.test(text)) {
+    issues.push({ code: "FINAL_STRUCTURAL_MARKER", message: "final candidate contains structural marker" });
+  }
+  if (lines.some((line) => /^\s*\|.*\|\s*$/u.test(line))) {
+    issues.push({ code: "FINAL_MARKDOWN_TABLE", message: "final candidate contains markdown table" });
+  }
+  if (/^\s*---\s*\n[\s\S]*?\n---\s*/u.test(text)) {
+    issues.push({ code: "FINAL_YAML_FRONTMATTER", message: "final candidate contains YAML/frontmatter" });
+  }
+  if (/^\s*#{1,6}\s+/mu.test(text)) {
+    issues.push({ code: "FINAL_MARKDOWN_HEADING", message: "final candidate contains markdown heading" });
+  }
+  return issues;
+}
+
+function parsePublishQualityScore(publishReport, publishStep) {
+  const direct = Number(publishReport?.quality_score ?? publishReport?.quality?.score);
+  if (Number.isFinite(direct)) return direct;
+  const match = stepText(publishStep).match(/score:\s*(\d{1,3})/iu);
+  return match ? Number(match[1]) : null;
+}
+
+function hasFirstChapterBlockingSignals(chapterRun) {
+  const text = chapterCorpusForLocalChecks(chapterRun);
+  return /style-guard:\s*开头检测：首句缺少明确动作、异象或事件触发：“---”|ending-type-mismatch|hook_anomaly.*(?:长期钩子|移除)/iu.test(text);
+}
+
+function chapterCorpusForLocalChecks(chapterRun) {
+  return [
+    JSON.stringify(chapterRun || {}),
+    ...(chapterRun?.steps || []).map((step) => `${step.name}\n${step.summary || ""}\n${step.stdout || ""}\n${step.stderr || ""}`),
+  ].join("\n");
+}
+
+function countChapterWords(text) {
+  return [...String(text || "").replace(/\s/g, "")].length;
+}
+
+function ensureFirstChapterContinuityBaseline(bookDir, chapter, { dryRun = false } = {}) {
+  if (chapter !== 1) return null;
+
+  const chapterFile = findChapterFile(bookDir, chapter);
+  if (!chapterFile) return null;
+
+  const reportDir = path.join(bookDir, "reviews", "continuity");
+  const prefix = chapterPrefix(chapter);
+  const jsonPath = path.join(reportDir, `${prefix}.final-report.json`);
+  const mdPath = path.join(reportDir, `${prefix}.final-report.md`);
+  const body = fs.readFileSync(chapterFile, "utf8");
+  const usedFile = relFromBook(bookDir, chapterFile);
+  const report = {
+    chapter_index: chapter,
+    status: "PASS",
+    final_status: "PASS",
+    score: 100,
+    word_count: countChapterWords(body),
+    used_file: usedFile,
+    body_source: "original",
+    decision_source: "first_chapter_baseline",
+    summary: "First chapter has no previous chapter, so continuity handoff is treated as PASS by write-publish-export.",
+    issues: [],
+    warnings: ["first chapter continuity baseline: no previous chapter exists"],
+    rewrite_mode: "none",
+  };
+
+  if (!dryRun) {
+    fs.mkdirSync(reportDir, { recursive: true });
+    fs.writeFileSync(jsonPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+    fs.writeFileSync(mdPath, [
+      "# Continuity Final Report",
+      "",
+      `- chapter: ${prefix}`,
+      "- final_status: PASS",
+      "- score: 100",
+      `- used_file: ${usedFile}`,
+      "- decision_source: first_chapter_baseline",
+      "",
+      "First chapter has no previous chapter, so continuity handoff is treated as PASS by write-publish-export.",
+      "",
+    ].join("\n"), "utf8");
+  }
+
+  return {
+    jsonPath,
+    mdPath,
+    usedFile,
+    wordCount: report.word_count,
+  };
+}
+
+function relFromBook(bookDir, file) {
+  return path.relative(bookDir, file) || ".";
 }
 
 function readJsonIfExists(file) {
@@ -492,6 +598,18 @@ function findExportFiles(bookName, from, to, startedAtMs) {
     .sort();
 }
 
+function expectedExportFiles(bookName, from, to) {
+  const files = [];
+  for (let chapter = from; chapter <= to; chapter += 1) {
+    files.push(path.join(root, "publish", bookName, "fanqie", "chapters", `${chapterPrefix(chapter)}.txt`));
+  }
+  return files;
+}
+
+function findMissingExportFiles(bookName, from, to) {
+  return expectedExportFiles(bookName, from, to).filter((file) => !fs.existsSync(file));
+}
+
 function renderMarkdown(report) {
   const lines = [
     "# Write Publish Export Report",
@@ -606,6 +724,13 @@ function renderMarkdown(report) {
       lines.push(`- expectedEndingType: ${chapter.writeAuditFailure.expectedEndingType || "n/a"}`);
       lines.push(`- retryHint: ${chapter.writeAuditFailure.retryHintPath || "n/a"}`);
     }
+    if (chapter.firstChapterQuality) {
+      lines.push(`- firstChapterQuality: score=${chapter.firstChapterQuality.qualityScore ?? "unknown"} threshold=${chapter.firstChapterQuality.threshold}`);
+      lines.push(`- firstChapterBlockingSignals: ${chapter.firstChapterQuality.blockingSignals ? "true" : "false"}`);
+    }
+    if (chapter.finalCandidateIssues?.length) {
+      lines.push(`- finalCandidateIssues: ${chapter.finalCandidateIssues.map((issue) => issue.code).join(", ")}`);
+    }
     lines.push("");
     lines.push("| Step | Exit | Command | Summary |");
     lines.push("| --- | ---: | --- | --- |");
@@ -621,6 +746,7 @@ function renderMarkdown(report) {
     lines.push(`- exitCode: ${report.exportStep.exitCode}`);
     lines.push(`- command: \`${report.exportStep.command}\``);
     lines.push(`- files: ${report.exportFiles.length ? report.exportFiles.join(", ") : "n/a"}`);
+    if (report.exportMissingFiles?.length) lines.push(`- missing: ${report.exportMissingFiles.join(", ")}`);
     lines.push("");
   }
 
@@ -831,6 +957,7 @@ async function main() {
     chapters: [],
     exported: false,
     exportFiles: [],
+    exportMissingFiles: [],
     exportStep: null,
     finalStatus: FINAL_STATUS.unknown,
     stopReason: "",
@@ -859,7 +986,7 @@ async function main() {
     autoFixSuggestions: [],
   };
 
-  const cli = path.join("..", "packages", "cli", "dist", "index.js");
+  const cli = path.join("packages", "cli", "dist", "index.js");
   const chapterQueue = [];
   if (resumePlan.enabled) {
     chapterQueue.push(...resumePlan.queue);
@@ -922,7 +1049,7 @@ async function main() {
 
       const before = latestChapter(bookDir);
       const writeStep = await runStep(chapterRun, "write-next-resume", "node", [cli, "write", "next", bookName], {
-        cwd: myNovelDir,
+        cwd: root,
         dryRun: opts.dryRun,
       });
       if (writeStep.exitCode !== 0) {
@@ -963,7 +1090,7 @@ async function main() {
         break;
       }
       const writeStep = await runStep(chapterRun, "write-next", "node", [cli, "write", "next", bookName], {
-        cwd: myNovelDir,
+        cwd: root,
         dryRun: opts.dryRun,
       });
       if (writeStep.exitCode !== 0) {
@@ -1005,6 +1132,21 @@ async function main() {
     console.log(`\n[chapter ${chapterPrefix(chapter)}] start`);
 
     let continuityOverridePass = false;
+    if (chapter === 1) {
+      const baseline = ensureFirstChapterContinuityBaseline(bookDir, chapter, { dryRun: opts.dryRun });
+      if (baseline || opts.dryRun) {
+        continuityOverridePass = true;
+        chapterRun.continuityOverride = "PASS";
+        chapterRun.continuityOverrideReason = "first chapter has no previous chapter";
+        makeSyntheticStep(
+          chapterRun,
+          "first-chapter-continuity-baseline",
+          baseline
+            ? `FIRST_CHAPTER_CONTINUITY_PASS report=${rel(baseline.jsonPath)} usedFile=${baseline.usedFile} wordCount=${baseline.wordCount}`
+            : "FIRST_CHAPTER_CONTINUITY_PASS dry-run",
+        );
+      }
+    }
     if (resumeKind === "continuity" && !hasContinuityResumeArtifact(bookDir, chapter)) {
       chapterRun.didContinuityAuto = true;
       const fixStep = await runStep(chapterRun, "continuity-auto-resume", "node", [
@@ -1017,7 +1159,7 @@ async function main() {
         String(chapter),
         "--max-fix-attempts",
         String(opts.maxContinuityFix),
-      ], { cwd: myNovelDir, dryRun: opts.dryRun });
+      ], { cwd: root, dryRun: opts.dryRun });
       if (fixStep.exitCode !== 0 || (!opts.dryRun && !continuityAutoPassed(fixStep))) {
         chapterRun.finalStatus = FINAL_STATUS.continuity;
         report.stopReason = `resume continuity-auto failed for chapter ${chapterPrefix(chapter)}`;
@@ -1040,7 +1182,7 @@ async function main() {
         String(chapter),
         "--max-polish-attempts",
         String(opts.maxPolish),
-      ], { cwd: myNovelDir, dryRun: opts.dryRun });
+      ], { cwd: root, dryRun: opts.dryRun });
       if (polishStep.exitCode !== 0) {
         chapterRun.finalStatus = FINAL_STATUS.quality;
         report.stopReason = `resume fanqie-polish failed for chapter ${chapterPrefix(chapter)}`;
@@ -1071,7 +1213,7 @@ async function main() {
       "publish-ready",
       "node",
       publishReadyArgs(cli, bookName, chapter, opts, continuityOverridePass),
-      { cwd: myNovelDir, dryRun: opts.dryRun },
+      { cwd: root, dryRun: opts.dryRun },
     );
 
     let publish = opts.dryRun
@@ -1104,7 +1246,7 @@ async function main() {
           String(chapter),
           "--max-fix-attempts",
           String(opts.maxContinuityFix),
-        ], { cwd: myNovelDir, dryRun: opts.dryRun });
+        ], { cwd: root, dryRun: opts.dryRun });
         if (fixStep.exitCode !== 0) {
           chapterRun.finalStatus = FINAL_STATUS.continuity;
           report.stopReason = `continuity-auto failed for chapter ${chapterPrefix(chapter)}`;
@@ -1149,7 +1291,7 @@ async function main() {
           String(chapter),
           "--max-polish-attempts",
           String(opts.maxPolish),
-        ], { cwd: myNovelDir, dryRun: opts.dryRun });
+        ], { cwd: root, dryRun: opts.dryRun });
         if (polishStep.exitCode !== 0) {
           chapterRun.finalStatus = FINAL_STATUS.quality;
           report.stopReason = `fanqie-polish failed for chapter ${chapterPrefix(chapter)}`;
@@ -1175,7 +1317,7 @@ async function main() {
         "publish-ready-recheck",
         "node",
         publishReadyArgs(cli, bookName, chapter, opts, continuityOverridePass),
-        { cwd: myNovelDir, dryRun: opts.dryRun },
+        { cwd: root, dryRun: opts.dryRun },
       );
       publish = opts.dryRun
         ? { source: "dry-run", report: { publish_status: "READY_TO_EXPORT" } }
@@ -1191,6 +1333,35 @@ async function main() {
     }
 
     chapterRun.publishReadyFinalStatus = classification.status;
+    const finalIssues = detectFinalCandidateIssues(finalCandidatePath(bookDir, chapter));
+    if (finalIssues.length) {
+      chapterRun.finalCandidateIssues = finalIssues;
+      chapterRun.finalStatus = FINAL_STATUS.quality;
+      report.stopReason = `final candidate is not pure正文 for chapter ${chapterPrefix(chapter)}: ${finalIssues.map((issue) => issue.code).join(", ")}`;
+      hardStop = true;
+      report.chapters.push(chapterRun);
+      if (opts.stopOnFail) break;
+      continue;
+    }
+
+    const isNewBookFirstChapterCountOne = opts.count === 1 && initialLatestChapter === 0 && chapter === 1;
+    if (isNewBookFirstChapterCountOne) {
+      const qualityScore = parsePublishQualityScore(publish.report, publishStep);
+      if ((qualityScore !== null && qualityScore < 88) || hasFirstChapterBlockingSignals(chapterRun)) {
+        chapterRun.firstChapterQuality = {
+          qualityScore,
+          threshold: 88,
+          blockingSignals: hasFirstChapterBlockingSignals(chapterRun),
+        };
+        chapterRun.finalStatus = FINAL_STATUS.firstChapterQuality;
+        report.stopReason = `first chapter quality gate failed for ${chapterPrefix(chapter)}: quality=${qualityScore ?? "unknown"}, threshold=88.`;
+        hardStop = true;
+        report.chapters.push(chapterRun);
+        if (opts.stopOnFail) break;
+        continue;
+      }
+    }
+
     const numericStep = await runStep(chapterRun, "numeric-final-only", "node", [
       path.join("scripts", "fanqie", "check-numeric-expression.mjs"),
       bookName,
@@ -1299,12 +1470,21 @@ async function main() {
       dryRun: opts.dryRun,
     });
     report.exportStep = exportStep;
-    report.exported = exportStep.exitCode === 0;
+    const missingExportFiles = opts.dryRun ? [] : findMissingExportFiles(bookName, from, to);
+    report.exported = exportStep.exitCode === 0 && missingExportFiles.length === 0;
     report.exportFiles = opts.dryRun ? [] : findExportFiles(bookName, from, to, startedAtMs);
     for (const chapter of report.chapters) chapter.exported = report.exported;
-    if (exportStep.exitCode !== 0) {
-      report.finalStatus = FINAL_STATUS.unknown;
-      report.stopReason = `export-fanqie failed for ${chapterPrefix(from)}-${chapterPrefix(to)}`;
+    if (exportStep.exitCode !== 0 || missingExportFiles.length) {
+      report.finalStatus = FINAL_STATUS.export;
+      report.stopReason = missingExportFiles.length
+        ? `missing exported chapter file: ${missingExportFiles.map((file) => path.relative(root, file)).join(", ")}`
+        : `export-fanqie failed for ${chapterPrefix(from)}-${chapterPrefix(to)}`;
+      if (missingExportFiles.length) {
+        report.exportMissingFiles = missingExportFiles.map((file) => path.relative(root, file));
+      }
+      for (const chapter of report.chapters) {
+        if (chapter.finalStatus === FINAL_STATUS.ready) chapter.finalStatus = FINAL_STATUS.export;
+      }
     }
   }
 
