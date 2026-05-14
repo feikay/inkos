@@ -818,6 +818,33 @@ describe("StateManager", () => {
       expect(currentFocus).not.toContain("# Current Focus");
     });
 
+    it("does not overwrite existing non-empty control documents", async () => {
+      const bookDir = manager.bookDir("non-empty-control-docs");
+      const storyDir = join(bookDir, "story");
+      await mkdir(storyDir, { recursive: true });
+      await writeFile(
+        join(storyDir, "author_intent.md"),
+        "# 作者意图\n\n用户已经写好的长期方向。\n",
+        "utf-8",
+      );
+      await writeFile(
+        join(storyDir, "current_focus.md"),
+        "# 当前聚焦\n\n用户已经写好的当前重点。\n",
+        "utf-8",
+      );
+
+      await manager.ensureControlDocumentsAt(
+        bookDir,
+        "zh",
+        "# 作者意图\n\n不应该覆盖。\n",
+      );
+
+      await expect(readFile(join(storyDir, "author_intent.md"), "utf-8"))
+        .resolves.toContain("用户已经写好的长期方向");
+      await expect(readFile(join(storyDir, "current_focus.md"), "utf-8"))
+        .resolves.toContain("用户已经写好的当前重点");
+    });
+
     it("initializes foreshadow_registry.json for webnovel template books", async () => {
       await manager.ensureControlDocuments(
         "template-book",

@@ -12,6 +12,14 @@ import {
   TRANSITION_METHODS,
   WORLD_ENGINE_METHOD,
 } from "../story-methods/index.js";
+import {
+  buildAuthorIntentContent,
+  buildCharacterMatrixContent,
+  buildCurrentFocusContent,
+  buildEmotionalArcsContent,
+  buildSubplotBoardContent,
+  type FoundationDocumentMeta,
+} from "./foundation-documents.js";
 
 export interface ArchitectOutput {
   readonly storyBible: string;
@@ -719,6 +727,7 @@ ${finalRequirementsPrompt}`;
     numericalSystem: boolean = true,
     language: "zh" | "en" = "zh",
     webnovelTemplate?: "xuanhuan",
+    documentMeta: FoundationDocumentMeta = {},
   ): Promise<void> {
     const storyDir = join(bookDir, "story");
     await mkdir(storyDir, { recursive: true });
@@ -771,24 +780,28 @@ ${finalRequirementsPrompt}`;
     // Initialize new truth files
     writes.push(
       writeFile(
+        join(storyDir, "author_intent.md"),
+        buildAuthorIntentContent(output, documentMeta, language),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "current_focus.md"),
+        buildCurrentFocusContent(output, documentMeta, language),
+        "utf-8",
+      ),
+      writeFile(
         join(storyDir, "subplot_board.md"),
-        language === "en"
-          ? "# Subplot Board\n\n| Subplot ID | Subplot | Related Characters | Start Chapter | Last Active Chapter | Chapters Since | Status | Progress Summary | Payoff ETA |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
-          : "# 支线进度板\n\n| 支线ID | 支线名 | 相关角色 | 起始章 | 最近活跃章 | 距今章数 | 状态 | 进度概述 | 回收ETA |\n|--------|--------|----------|--------|------------|----------|------|----------|---------|\n",
+        buildSubplotBoardContent(output, documentMeta, language),
         "utf-8",
       ),
       writeFile(
         join(storyDir, "emotional_arcs.md"),
-        language === "en"
-          ? "# Emotional Arcs\n\n| Character | Chapter | Emotional State | Trigger Event | Intensity (1-10) | Arc Direction |\n| --- | --- | --- | --- | --- | --- |\n"
-          : "# 情感弧线\n\n| 角色 | 章节 | 情绪状态 | 触发事件 | 强度(1-10) | 弧线方向 |\n|------|------|----------|----------|------------|----------|\n",
+        buildEmotionalArcsContent(output, documentMeta, language),
         "utf-8",
       ),
       writeFile(
         join(storyDir, "character_matrix.md"),
-        language === "en"
-          ? "# Character Matrix\n\n<!-- One ## section per character. Add new characters as new ## blocks. -->\n"
-          : "# 角色矩阵\n\n<!-- 每个角色一个 ## 块，新角色追加新 ## 即可。 -->\n",
+        buildCharacterMatrixContent(output, documentMeta, language),
         "utf-8",
       ),
     );

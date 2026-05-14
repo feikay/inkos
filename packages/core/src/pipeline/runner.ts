@@ -605,6 +605,7 @@ export class PipelineRunner {
         gp.numericalSystem,
         book.language ?? gp.language,
         book.webnovelTemplate,
+        book,
       );
 
       this.logStage(stageLanguage, { zh: "初始化控制文档", en: "initializing control documents" });
@@ -614,6 +615,14 @@ export class PipelineRunner {
         options.authorIntent ?? this.config.externalContext,
         book.webnovelTemplate,
       );
+      const authorIntentOverride = options.authorIntent ?? this.config.externalContext;
+      if (authorIntentOverride?.trim()) {
+        await writeFile(
+          join(stagingBookDir, "story", "author_intent.md"),
+          authorIntentOverride.trimEnd() + "\n",
+          "utf-8",
+        );
+      }
       if (options.currentFocus?.trim()) {
         await writeFile(
           join(stagingBookDir, "story", "current_focus.md"),
@@ -703,6 +712,7 @@ export class PipelineRunner {
       gp.numericalSystem,
       book.language ?? gp.language,
       book.webnovelTemplate,
+      book,
     );
     this.logStage(stageLanguage, { zh: "初始化控制文档", en: "initializing control documents" });
     await this.state.ensureControlDocuments(book.id, this.config.externalContext, book.webnovelTemplate);
@@ -2255,6 +2265,8 @@ ${matrix}`,
           foundation,
           gp.numericalSystem,
           resolvedLanguage,
+          undefined,
+          book,
         );
         await this.resetImportReplayTruthFiles(bookDir, resolvedLanguage);
         await this.state.saveChapterIndex(input.bookId, []);

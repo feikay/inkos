@@ -455,4 +455,5 @@ inkos 2.0：故事性的大升级
 1. inkos 2.0 任务一——沉淀 story-methods 方法论知识库
 2. inkos 2.0 任务二——增强 create 阶段故事骨架
 3. inkos 2.0 任务三——增强 FoundationReviewerAgent 审核故事发动机质量
-4. 
+4. inkos 2.0 任务二点五——create 阶段反哺旧控制文档
+5. inkos 2.0 任务二点六——优化 create 反哺文档的结构化

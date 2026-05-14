@@ -890,4 +890,282 @@ describe("ArchitectAgent", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("backfills legacy control documents from story skeletons during foundation writing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-architect-control-docs-"));
+    const agent = new ArchitectAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+
+    try {
+      await agent.writeFoundationFiles(
+        root,
+        {
+          storyBible: [
+            "# Story Bible",
+            "## 02_主角",
+            "林烬，系统底层任务的唯一异常执行者。",
+          ].join("\n"),
+          volumeOutline: "# Volume Outline\n\n第1卷：系统惩罚与反杀。",
+          bookRules: [
+            "# Book Rules",
+            "- name: 林烬",
+            "- personalityLock: 冷静、嘴欠、护短",
+            "- behavioralConstraints: 不主动伤害无辜",
+          ].join("\n"),
+          currentState: [
+            "# Current State",
+            "- 当前目标：活过第一次找死任务",
+            "- 当前限制：系统惩罚随时触发",
+            "- 当前冲突：宗门认为他是灾星",
+          ].join("\n"),
+          pendingHooks: "# Pending Hooks\n\n| hook_id | 起始章节 | 类型 | 状态 | 最近推进 | 预期回收 | 回收节奏 | 备注 |\n|---|---|---|---|---|---|---|---|\n| sys-secret | 1 | 系统 | open | 0 | 系统真相 | 中程 | 找死任务来源不明 |",
+          genreArchitecture: [
+            "# 题材架构",
+            "## 1. 题材定位",
+            "- 目标读者：番茄玄幻爽文读者",
+            "- 核心卖点：找死任务反向成神",
+            "- 核心情绪：荒诞压迫后的反杀爽感",
+            "## 2. 读者承诺",
+            "- 这本书承诺给读者什么爽感？每次找死都变成打脸。",
+            "## 4. 章节节奏模板",
+            "- 每2章一个小爽点",
+            "- 每5章一次反转",
+          ].join("\n"),
+          worldEngine: [
+            "# 世界发动机",
+            "## 5. 主角异常性",
+            "- 主角为什么是世界规则里的异常？系统奖励与世界惩罚方向相反。",
+            "## 6. 自动产出冲突的方式",
+            "- 资源争夺",
+            "- 规则惩罚",
+            "- 群体误解",
+          ].join("\n"),
+          antagonistMap: [
+            "# 反派结构",
+            "## 1. 核心反派",
+            "- 姓名/代号：司命院主",
+            "- 表层身份：宗门戒律掌控者",
+            "- 反派类型：谋局者",
+            "## 4. 反派压力递进",
+            "- 初期如何压迫主角？用戒律审判逼他认罪。",
+          ].join("\n"),
+          motivationMatrix: [
+            "# 人物动机矩阵",
+            "## 1. 主角动机",
+            "- 表层目标：活过第一次找死任务",
+            "- 深层欲望：证明命运不能被系统和宗门定义",
+            "- 最大恐惧：重要的人替他付代价",
+            "- 底线：不牺牲无辜者",
+            "## 2. 核心反派动机",
+            "- 深层欲望：维持司命院权威",
+            "- 最大恐惧：秩序被一个底层弟子证明无效",
+            "## 3. 重要配角动机表",
+            "| 角色 | 表层目标 | 深层欲望 | 恐惧 | 底线 | 会背叛什么 | 绝不背叛什么 | 与主角利益关系 |",
+            "|---|---|---|---|---|---|---|---|",
+            "| 沈青禾 | 查清系统异常 | 摆脱家族棋子命运 | 被家族召回 | 不害平民 | 家族命令 | 自我判断 | 暂时同盟 |",
+            "| 韩照 | 升入内门 | 被所有人看见 | 再次失败 | 不背刺兄弟 | 面子 | 林烬 | 同伴 |",
+          ].join("\n"),
+          first10ChapterPlan: [
+            "# 前10章规划",
+            "## 1. 黄金三章目标",
+            "### 第1章",
+            "- 主钩子类型：极度反差",
+            "- 前500字冲突：系统要求林烬当众找死。",
+            "### 第2章",
+            "- 核心功能：展示越找死越变强。",
+            "### 第3章",
+            "- 核心功能：司命院主的阶段爪牙出现。",
+            "## 2. 前10章章节表",
+            "| 章数 | 章节功能 | 情绪事件 | 主角目标 | 阻碍困境 | 解决方法 | 爽点/反转 | 结尾钩子 |",
+            "|---|---|---|---|---|---|---|---|",
+            "| 1 | 入局 | 当众受审 | 活下来 | 戒律压迫 | 反用任务规则 | 反杀 | 司命院盯上他 |",
+            "| 2 | 展示差异 | 惩罚降临 | 弄懂系统 | 众人围观 | 试探规则 | 小爽 | 奖励异常 |",
+            "| 3 | 树敌 | 爪牙出手 | 查清任务来源 | 阶段敌人 | 借力破局 | 反转 | 核心反派露影 |",
+          ].join("\n"),
+        },
+        false,
+        "zh",
+        undefined,
+        { title: "我的系统只发布找死任务", genre: "system", platform: "tomato" },
+      );
+
+      const storyDir = join(root, "story");
+      await expect(readFile(join(storyDir, "author_intent.md"), "utf-8"))
+        .resolves.toContain("找死任务反向成神");
+      await expect(readFile(join(storyDir, "current_focus.md"), "utf-8"))
+        .resolves.toContain("第1章必须完成");
+
+      const characterMatrix = await readFile(join(storyDir, "character_matrix.md"), "utf-8");
+      expect(characterMatrix).toContain("## 主角：");
+      expect(characterMatrix).toContain("司命院主");
+      expect(characterMatrix).toContain("## 重要配角：沈青禾");
+
+      const emotionalArcs = await readFile(join(storyDir, "emotional_arcs.md"), "utf-8");
+      expect(emotionalArcs).toContain("## 1. 主角前10章情绪弧线");
+      expect(emotionalArcs).toContain("| 1 | 当众受审 | 戒律压迫 |");
+
+      const subplotBoard = await readFile(join(storyDir, "subplot_board.md"), "utf-8");
+      expect(subplotBoard).toContain("system-secret");
+      expect(subplotBoard).toContain("core-antagonist-plot");
+      expect(subplotBoard).toContain("world-resource-monopoly");
+      expect(subplotBoard.split("\n").filter((line) => line.startsWith("|") && !line.includes("---")).length)
+        .toBeGreaterThanOrEqual(4);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("normalizes backfilled control documents into compact readable indexes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-architect-control-docs-normalized-"));
+    const agent = new ArchitectAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+
+    try {
+      await agent.writeFoundationFiles(
+        root,
+        {
+          storyBible: [
+            "# Story Bible",
+            "## 02_主角",
+            "- 姓名：林墨",
+            "- 身份：江南市底层打工人，靠奶奶留下的吊坠激活系统。",
+          ].join("\n"),
+          volumeOutline: "# Volume Outline",
+          bookRules: [
+            "---",
+            "version: \"1.0\"",
+            "protagonist:",
+            "  name: 林墨",
+            "  personalityLock: [抠门, 嘴硬, 心软, 守序]",
+            "  behavioralConstraints: [绝不伤害普通人, 朋友出事必帮]",
+            "---",
+          ].join("\n"),
+          currentState: "# Current State",
+          pendingHooks: [
+            "# Pending Hooks",
+            "| hook_id | 起始章节 | 类型 | 状态 | 最近推进 | 预期回收 | 回收节奏 | 备注 |",
+            "|---|---|---|---|---|---|---|---|",
+            "| system-garbled | 1 | 世界观 | open | 0 | 系统乱码其实是奶奶留言 | 180 | 每次升级都会弹出乱码字符 |",
+            "| su-abnormal | 1 | 人物 | open | 0 | 苏晚晴见过规则类能力 | 35 | 她看到技能时眼神异常 |",
+          ].join("\n"),
+          genreArchitecture: "# 题材架构\n\n- 核心卖点：系统打脸爽文",
+          worldEngine: [
+            "# 世界发动机",
+            "## 5. 主角异常性",
+            "- 主角为什么是世界规则里的异常：不依赖灵气也能变强，威胁灵气垄断秩序。",
+          ].join("\n"),
+          antagonistMap: [
+            "# 反派结构",
+            "## 1. 核心反派",
+            "- 姓名/代号：无面",
+            "- 表层身份：江南市首富，知名慈善家。",
+            "- 真实身份：旧时代存活的SS级邪修，黑曜会首领。",
+            "- 反派类型：谋局者+殉道者混合型。",
+            "- 公开目标：推动灵气复苏。",
+            "- 隐藏目标：收集规则碎片，成神改写生死规则。",
+            "- 维护的秩序：弱肉强食，强者有权支配弱者生命。",
+            "- 为什么不能容忍主角：主角系统是完整规则神器，会打断成神计划。",
+            "- 与主角的价值观冲突：主角保护普通人，无面愿为目标牺牲普通人。",
+            "- 他的胜利会导致什么？全城普通人成为复苏祭品。",
+            "- 他的失败会导致什么？黑曜会转入地下。",
+            "## 2. 核心反派的计划链",
+            "- 计划 A：伪装慈善家收集规则碎片。",
+            "- 计划 B：利用主角暴露系统位置。",
+            "- 计划 C：献祭城市重启旧时代阵法。",
+            "## 4. 反派压力递进",
+            "- 初期如何压迫主角？用舆论和金钱封锁主角。",
+          ].join("\n"),
+          motivationMatrix: [
+            "# 人物动机矩阵",
+            "## 1. 主角动机",
+            "- 表层目标：凑房租活下去，后续赚大钱并保护身边的人。",
+            "- 深层欲望：不再被人看不起，有能力保护自己在乎的人。",
+            "- 最大恐惧：身边的人因自己出事，奶奶的吊坠被毁。",
+            "- 底线：绝不伤害普通人，绝不牺牲无辜者。",
+            "## 2. 核心反派动机",
+            "- 深层欲望：复活死在旧时代的家人。",
+            "- 最大恐惧：计划失败，家人永远无法复活。",
+          ].join("\n"),
+          first10ChapterPlan: [
+            "# 前10章规划",
+            "## 1. 黄金三章目标",
+            "### 第1章",
+            "- 主钩子类型：极度反差",
+            "- 前500字冲突：林墨为了省钱参加慈善晚宴，却被系统要求当众拆穿首富。",
+            "- 主角困境：拆穿会被保安拖走，不拆穿就会触发系统惩罚。",
+            "- 章节结尾钩子：无面第一次注意到林墨。",
+            "### 第2章",
+            "- 核心功能：展示系统反向奖励。",
+            "- 金手指/核心差异如何展示：林墨越像找死，越能拿到反制技能。",
+            "- 阻碍如何升级：全网开始骂他碰瓷。",
+            "- 章节结尾钩子：系统乱码出现奶奶声音。",
+            "### 第3章",
+            "- 核心功能：明确长期目标。",
+            "- 长期目标如何明确：林墨决定查清吊坠和系统来源。",
+            "- 第一个阶段敌人如何出现：无面的秘书开始监控他。",
+            "- 章节结尾钩子：苏晚晴认出规则类能力。",
+            "## 2. 前10章章节表",
+            "| 章数 | 章节功能 | 情绪事件 | 主角目标 | 阻碍困境 | 解决方法 | 爽点/反转 | 结尾钩子 |",
+            "|---|---|---|---|---|---|---|---|",
+            "| 4 | 线索追踪 | 苏晚晴试探 | 找到乱码来源 | 黑曜会盯梢 | 假装无知 | 信息差 | 秘书现身 |",
+            "| 5 | 小爽点 | 林墨反坑秘书 | 逼出幕后线索 | 舆论压迫 | 系统技能反制 | 打脸 | 无面加码 |",
+          ].join("\n"),
+        },
+        false,
+        "zh",
+      );
+
+      const storyDir = join(root, "story");
+      const emotionalArcs = await readFile(join(storyDir, "emotional_arcs.md"), "utf-8");
+      expect(emotionalArcs).toContain("| 1 | 林墨为了省钱参加慈善晚宴");
+      expect(emotionalArcs).toContain("| 2 | 林墨越像找死");
+      expect(emotionalArcs).toContain("| 3 | 林墨决定查清吊坠和系统来源");
+      expect(emotionalArcs).toContain("| 4 | 苏晚晴试探 | 黑曜会盯梢 |");
+
+      const characterMatrix = await readFile(join(storyDir, "character_matrix.md"), "utf-8");
+      expect(characterMatrix).toContain("## 主角：林墨");
+      expect(characterMatrix).toContain("## 核心反派：无面");
+      expect(characterMatrix).not.toContain("## 主角：主角");
+      expect(characterMatrix).not.toContain("## 2. 核心反派的计划链");
+      expect(characterMatrix).toContain("- 表层身份：江南市首富");
+      const protagonistConflictLine = characterMatrix
+        .split("\n")
+        .find((line) => line.startsWith("- 与核心反派的冲突："));
+      expect(protagonistConflictLine?.length ?? 0).toBeLessThan(220);
+
+      const subplotBoard = await readFile(join(storyDir, "subplot_board.md"), "utf-8");
+      expect(subplotBoard).toContain("| hook-system-garbled | 世界观伏笔：system-garbled |");
+      expect(subplotBoard).toContain("| hook-su-abnormal | 人物伏笔：su-abnormal |");
+      expect(subplotBoard).not.toContain("/ hook_id / 起始章节 / 类型 /");
+      expect(subplotBoard).not.toContain("| initial-hooks |");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
