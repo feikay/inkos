@@ -5,6 +5,13 @@ import { readGenreProfile } from "./rules-reader.js";
 import { writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { renderHookSnapshot } from "../utils/memory-retrieval.js";
+import {
+  ANTAGONIST_TEMPLATES,
+  OPENING_HOOK_METHODS,
+  SIX_STEP_PLOT_METHOD,
+  TRANSITION_METHODS,
+  WORLD_ENGINE_METHOD,
+} from "../story-methods/index.js";
 
 export interface ArchitectOutput {
   readonly storyBible: string;
@@ -12,6 +19,11 @@ export interface ArchitectOutput {
   readonly bookRules: string;
   readonly currentState: string;
   readonly pendingHooks: string;
+  readonly genreArchitecture?: string;
+  readonly worldEngine?: string;
+  readonly antagonistMap?: string;
+  readonly motivationMatrix?: string;
+  readonly first10ChapterPlan?: string;
 }
 
 interface WebnovelTemplateFiles {
@@ -19,6 +31,408 @@ interface WebnovelTemplateFiles {
   readonly arcMap: string;
   readonly powerSystem: string;
 }
+
+type StorySkeletonSection =
+  | "genre_architecture"
+  | "world_engine"
+  | "antagonist_map"
+  | "motivation_matrix"
+  | "first_10_chapter_plan";
+
+const STORY_SKELETON_TITLES: Record<StorySkeletonSection, Record<"zh" | "en", string>> = {
+  genre_architecture: { zh: "题材架构", en: "Genre Architecture" },
+  world_engine: { zh: "世界发动机", en: "World Engine" },
+  antagonist_map: { zh: "反派结构", en: "Antagonist Structure" },
+  motivation_matrix: { zh: "人物动机矩阵", en: "Motivation Matrix" },
+  first_10_chapter_plan: { zh: "前10章规划", en: "First 10 Chapter Plan" },
+};
+
+const STORY_SKELETON_FALLBACK_TEMPLATES: Record<StorySkeletonSection, Record<"zh" | "en", string>> = {
+  genre_architecture: {
+    zh: `## 1. 题材定位
+- 主分类：
+- 子题材：
+- 目标平台：
+- 目标读者：
+- 核心卖点：
+- 核心情绪：
+- 核心爽点：
+
+## 2. 读者承诺
+- 这本书承诺给读者什么爽感？
+- 这本书承诺给读者什么情绪？
+- 这本书承诺给读者什么反转？
+- 这本书承诺给读者什么成长？
+
+## 3. 开局打法
+- 主钩子类型：悬念留白 / 极度反差 / 矛盾前置 / 颠覆世界观先行 / 极致情绪
+- 为什么适合本书？
+- 第一章前500字应该如何体现？
+- 黄金三章分别承担什么功能？
+
+## 4. 章节节奏模板
+- 每章核心冲突密度：
+- 每几章一个小爽点：
+- 每几章一次反转：
+- 每几章一次阶段收益：
+- 每卷结尾应该形成什么变化：
+
+## 5. 发布卖点
+- 书名方向：
+- 简介方向：
+- 标签方向：
+- 封面关键词：
+- 番茄发布注意点：`,
+    en: `## 1. Genre Positioning
+- Primary category:
+- Subgenre:
+- Target platform:
+- Target readers:
+- Core selling point:
+- Core emotion:
+- Core gratification:
+
+## 2. Reader Promise
+- What gratification does this book promise?
+- What emotion does this book promise?
+- What reversal does this book promise?
+- What growth does this book promise?
+
+## 3. Opening Strategy
+- Main hook type: suspense gap / extreme contrast / conflict first / worldview bomb / extreme emotion
+- Why does it fit this book?
+- How should the first 500 words show it?
+- What does each golden first-three chapter do?
+
+## 4. Chapter Rhythm Template
+- Core conflict density per chapter:
+- Small gratification every how many chapters:
+- Reversal every how many chapters:
+- Stage reward every how many chapters:
+- What change should each volume ending create?
+
+## 5. Publishing Selling Points
+- Title direction:
+- Blurb direction:
+- Tag direction:
+- Cover keywords:
+- Tomato/Fanqie publishing notes:`,
+  },
+  world_engine: {
+    zh: `## 1. 核心稀缺资源
+- 这个世界所有人最想要什么？
+- 它为什么稀缺？
+- 谁垄断它？
+- 普通人获取它要付出什么代价？
+
+## 2. 资源分配与权力循环
+- 资源如何转化为权力？
+- 权力如何继续垄断资源？
+- 哪些阶层因此受益？
+- 哪些阶层因此被压迫？
+
+## 3. 链式反应
+- 生产力：
+- 经济结构：
+- 战争/暴力模式：
+- 宗门/家族/朝廷/组织结构：
+- 职业地位：
+- 普通人日常生活：
+
+## 4. 文明共识
+- 这个世界默认尊敬什么？
+- 默认鄙视什么？
+- 什么行为被视为合理？
+- 什么行为会被全世界惩罚？
+- 主角为什么会冒犯这套共识？
+
+## 5. 主角异常性
+- 主角为什么是世界规则里的异常？
+- 主角的存在威胁了谁？
+- 世界会如何自动排斥/修正主角？
+
+## 6. 自动产出冲突的方式
+- 资源争夺
+- 阶层压迫
+- 制度审判
+- 价值观冲突
+- 身份暴露
+- 规则惩罚
+- 反派围剿
+- 群体误解`,
+    en: `## 1. Core Scarce Resource
+- What does everyone in this world want most?
+- Why is it scarce?
+- Who monopolizes it?
+- What price do ordinary people pay to obtain it?
+
+## 2. Resource Distribution And Power Cycle
+- How does resource become power?
+- How does power keep monopolizing resource?
+- Which classes benefit?
+- Which classes are oppressed?
+
+## 3. Chain Reactions
+- Productivity:
+- Economy:
+- War/violence mode:
+- Sect/family/court/organization structure:
+- Occupational status:
+- Ordinary daily life:
+
+## 4. Civilization Consensus
+- What does this world respect by default?
+- What does it despise by default?
+- What behavior is considered reasonable?
+- What behavior will the whole world punish?
+- Why does the protagonist offend this consensus?
+
+## 5. Protagonist Anomaly
+- Why is the protagonist an anomaly under world rules?
+- Whom does the protagonist threaten?
+- How will the world automatically reject or correct the protagonist?
+
+## 6. Reusable Conflict Sources
+- Resource struggle
+- Class oppression
+- Institutional judgment
+- Value conflict
+- Identity exposure
+- Rule punishment
+- Antagonist siege
+- Group misunderstanding`,
+  },
+  antagonist_map: {
+    zh: `## 1. 核心反派
+- 姓名/代号：
+- 表层身份：
+- 真实身份：
+- 反派类型：谋局者 / 殉道者 / 伪态者 / 混合型
+- 公开目标：
+- 隐藏目标：
+- 掌握的资源：
+- 维护的秩序：
+- 为什么不能容忍主角：
+- 与主角的价值观冲突：
+- 他的胜利会导致什么？
+- 他的失败会导致什么？
+
+## 2. 核心反派的计划链
+- 计划 A：
+- 计划 B：
+- 计划 C：
+- 如果计划 A 被主角破坏，如何转入计划 B？
+- 主角第一次以为自己赢了，实际上推动了什么更深计划？
+
+## 3. 阶段反派
+| 阶段/卷 | 阶段反派 | 类型 | 表层冲突 | 背后秩序 | 与核心反派关系 | 失败后的后果 |
+|---|---|---|---|---|---|---|
+
+## 4. 反派压力递进
+- 初期如何压迫主角？
+- 中期如何围剿主角？
+- 后期如何在制度/世界规则层面压制主角？
+
+## 5. 反派不降智规则
+- 不能无理由送经验
+- 不能突然犯低级错误
+- 不能明明能杀却不杀还解释一堆
+- 主角胜利必须靠伏笔、智慧、代价或微小变量`,
+    en: `## 1. Core Antagonist
+- Name/code:
+- Surface identity:
+- Real identity:
+- Antagonist type: strategist / martyr / masquerader / hybrid
+- Public goal:
+- Hidden goal:
+- Resources controlled:
+- Order defended:
+- Why they cannot tolerate the protagonist:
+- Value conflict with protagonist:
+- What happens if they win?
+- What happens if they fail?
+
+## 2. Core Antagonist Plan Chain
+- Plan A:
+- Plan B:
+- Plan C:
+- If Plan A is broken, how does it trigger Plan B?
+- When the protagonist first thinks they have won, what deeper plan did they advance?
+
+## 3. Stage Antagonists
+| Stage/Volume | Stage Antagonist | Type | Surface Conflict | Backing Order | Link To Core Antagonist | Consequence After Defeat |
+|---|---|---|---|---|---|---|
+
+## 4. Antagonist Pressure Escalation
+- Early pressure:
+- Mid-story siege:
+- Late-stage institutional/world-rule suppression:
+
+## 5. No-Dumbing-Down Rules
+- No free experience without reason
+- No sudden low-level mistakes
+- No sparing the protagonist while explaining everything
+- Protagonist victories must come from foreshadowing, intelligence, cost, or tiny variables`,
+  },
+  motivation_matrix: {
+    zh: `## 1. 主角动机
+- 表层目标：
+- 深层欲望：
+- 最大恐惧：
+- 当前最缺的东西：
+- 不能失去的东西：
+- 底线：
+- 会为了目标牺牲什么：
+- 绝不会牺牲什么：
+- 每卷目标如何升级：
+
+## 2. 核心反派动机
+- 表层目标：
+- 深层欲望：
+- 最大恐惧：
+- 他认为自己正确的理由：
+- 他不能退让的原因：
+- 他最害怕主角证明什么：
+
+## 3. 重要配角动机表
+| 角色 | 表层目标 | 深层欲望 | 恐惧 | 底线 | 会背叛什么 | 绝不背叛什么 | 与主角利益关系 |
+|---|---|---|---|---|---|---|---|
+
+## 4. 人物关系张力
+- 主角与核心反派的张力
+- 主角与重要同伴的张力
+- 主角与潜在背叛者的张力
+- 主角与世界共识的张力
+
+## 5. 后续续写约束
+- 人物行动必须由表层目标、深层欲望、恐惧或底线驱动。
+- 配角不能只为给主角送信息而出现。
+- 背叛、牺牲、结盟必须符合本矩阵中的利益关系。`,
+    en: `## 1. Protagonist Motivation
+- Surface goal:
+- Deep desire:
+- Greatest fear:
+- Current lack:
+- Cannot lose:
+- Bottom line:
+- Will sacrifice:
+- Will never sacrifice:
+- How each volume goal upgrades:
+
+## 2. Core Antagonist Motivation
+- Surface goal:
+- Deep desire:
+- Greatest fear:
+- Why they believe they are right:
+- Why they cannot retreat:
+- What proof from the protagonist scares them most:
+
+## 3. Important Supporting Character Motivation Table
+| Character | Surface Goal | Deep Desire | Fear | Bottom Line | Will Betray | Will Never Betray | Interest Relation With Protagonist |
+|---|---|---|---|---|---|---|---|
+
+## 4. Relationship Tension
+- Protagonist vs core antagonist:
+- Protagonist vs important ally:
+- Protagonist vs potential betrayer:
+- Protagonist vs world consensus:
+
+## 5. Future Writing Constraints
+- Character action must be driven by surface goal, deep desire, fear, or bottom line.
+- Supporting characters cannot appear only to deliver information.
+- Betrayal, sacrifice, and alliance must match the interest relationships above.`,
+  },
+  first_10_chapter_plan: {
+    zh: `## 1. 黄金三章目标
+### 第1章
+- 主钩子类型：
+- 前500字冲突：
+- 主角困境：
+- 章节结尾钩子：
+
+### 第2章
+- 核心功能：
+- 金手指/核心差异如何展示：
+- 阻碍如何升级：
+- 章节结尾钩子：
+
+### 第3章
+- 核心功能：
+- 长期目标如何明确：
+- 第一个阶段敌人如何出现：
+- 章节结尾钩子：
+
+## 2. 前10章章节表
+| 章数 | 章节功能 | 情绪事件 | 主角目标 | 阻碍困境 | 解决方法 | 爽点/反转 | 结尾钩子 |
+|---|---|---|---|---|---|---|---|
+| 1 |  |  |  |  |  |  |  |
+| 2 |  |  |  |  |  |  |  |
+| 3 |  |  |  |  |  |  |  |
+| 4 |  |  |  |  |  |  |  |
+| 5 |  |  |  |  |  |  |  |
+| 6 |  |  |  |  |  |  |  |
+| 7 |  |  |  |  |  |  |  |
+| 8 |  |  |  |  |  |  |  |
+| 9 |  |  |  |  |  |  |  |
+| 10 |  |  |  |  |  |  |  |
+
+## 3. 前10章反派压力安排
+- 核心反派或阶段反派的压力如何逐步显现：
+- 如何避免反派无脑送经验：
+
+## 4. 前10章伏笔安排
+| 伏笔 | 埋设章节 | 表层表现 | 真实含义 | 预计回收章节 |
+|---|---|---|---|---|
+
+## 5. 前10章追读风险
+- 风险：
+- 规避策略：`,
+    en: `## 1. Golden First Three Chapters
+### Chapter 1
+- Main hook type:
+- First 500-word conflict:
+- Protagonist dilemma:
+- Ending hook:
+
+### Chapter 2
+- Core function:
+- How core edge/difference appears:
+- How obstacle escalates:
+- Ending hook:
+
+### Chapter 3
+- Core function:
+- How long-term goal becomes clear:
+- How first stage enemy appears:
+- Ending hook:
+
+## 2. First 10 Chapter Table
+| Chapter | Chapter Function | Emotion Event | Protagonist Goal | Obstacle/Dilemma | Solution | Gratification/Reversal | Ending Hook |
+|---|---|---|---|---|---|---|---|
+| 1 |  |  |  |  |  |  |  |
+| 2 |  |  |  |  |  |  |  |
+| 3 |  |  |  |  |  |  |  |
+| 4 |  |  |  |  |  |  |  |
+| 5 |  |  |  |  |  |  |  |
+| 6 |  |  |  |  |  |  |  |
+| 7 |  |  |  |  |  |  |  |
+| 8 |  |  |  |  |  |  |  |
+| 9 |  |  |  |  |  |  |  |
+| 10 |  |  |  |  |  |  |  |
+
+## 3. First 10 Chapter Antagonist Pressure
+- How core or stage antagonist pressure gradually appears:
+- How to avoid free experience delivery:
+
+## 4. First 10 Chapter Foreshadowing
+| Foreshadowing | Setup Chapter | Surface Appearance | Real Meaning | Expected Payoff Chapter |
+|---|---|---|---|---|
+
+## 5. First 10 Chapter Retention Risks
+- Risk:
+- Avoidance strategy:`,
+  },
+};
 
 export class ArchitectAgent extends BaseAgent {
   get name(): string {
@@ -222,6 +636,9 @@ Rules for the hook table:
 - 第7列必须填写：立即 / 近期 / 中程 / 慢烧 / 终局 之一
 - 如果要说明“初始线索/最初信号”，写进备注，不要写进第5列`;
 
+    const storyMethodPrompt = this.buildStoryMethodPrompt(resolvedLanguage);
+    const storySkeletonPrompt = this.buildStorySkeletonPrompt(resolvedLanguage);
+
     const finalRequirementsPrompt = resolvedLanguage === "en"
       ? `Generated content must:
 1. Fit the ${book.platform} platform taste
@@ -254,6 +671,10 @@ ${eraBlock}
 
 ${genreBody}
 
+## inkos 2.0 故事方法论
+
+${storyMethodPrompt}
+
 ## 生成要求
 
 你需要生成以下内容，每个部分用 === SECTION: <name> === 分隔：
@@ -273,10 +694,12 @@ ${currentStatePrompt}
 === SECTION: pending_hooks ===
 ${pendingHooksPrompt}
 
+${storySkeletonPrompt}
+
 ${finalRequirementsPrompt}`;
 
     const langPrefix = resolvedLanguage === "en"
-      ? `【LANGUAGE OVERRIDE】ALL output (story_bible, volume_outline, book_rules, current_state, pending_hooks) MUST be written in English. Character names, place names, and all prose must be in English. The === SECTION: === tags remain unchanged.\n\n`
+      ? `【LANGUAGE OVERRIDE】ALL output (story_bible, volume_outline, book_rules, current_state, pending_hooks, genre_architecture, world_engine, antagonist_map, motivation_matrix, first_10_chapter_plan) MUST be written in English. Character names, place names, and all prose must be in English. The === SECTION: === tags remain unchanged.\n\n`
       : "";
     const userMessage = resolvedLanguage === "en"
       ? `Generate the complete foundation for a ${gp.name} novel titled "${book.title}". Write everything in English.`
@@ -306,6 +729,31 @@ ${finalRequirementsPrompt}`;
       writeFile(join(storyDir, "book_rules.md"), output.bookRules, "utf-8"),
       writeFile(join(storyDir, "current_state.md"), output.currentState, "utf-8"),
       writeFile(join(storyDir, "pending_hooks.md"), output.pendingHooks, "utf-8"),
+      writeFile(
+        join(storyDir, "genre_architecture.md"),
+        this.contentOrFallback(output.genreArchitecture, "genre_architecture", language),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "world_engine.md"),
+        this.contentOrFallback(output.worldEngine, "world_engine", language),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "antagonist_map.md"),
+        this.contentOrFallback(output.antagonistMap, "antagonist_map", language),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "motivation_matrix.md"),
+        this.contentOrFallback(output.motivationMatrix, "motivation_matrix", language),
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "first_10_chapter_plan.md"),
+        this.contentOrFallback(output.first10ChapterPlan, "first_10_chapter_plan", language),
+        "utf-8",
+      ),
     ];
 
     if (numericalSystem) {
@@ -437,6 +885,447 @@ ${finalRequirementsPrompt}`;
         "",
       ].join("\n"),
     };
+  }
+
+  private buildStoryMethodPrompt(language: "zh" | "en"): string {
+    const worldQuestions = WORLD_ENGINE_METHOD.requiredQuestions?.slice(0, 6).join("\n- ") ?? "";
+    const hookNames = OPENING_HOOK_METHODS.map((hook) => hook.name).join(" / ");
+    const antagonistNames = ANTAGONIST_TEMPLATES.map((template) => template.name).join(" / ");
+    const transitionNames = TRANSITION_METHODS.map((method) => method.name).join(" / ");
+    const plotSteps = SIX_STEP_PLOT_METHOD.steps.map((step) => step.name).join(" -> ");
+
+    if (language === "en") {
+      return `Use these reusable story methods when designing the new skeleton files:
+- World engine: define scarcity, monopoly, chain reactions, shared civilization values, protagonist anomaly, and reusable conflict sources. Key questions: ${worldQuestions}
+- Six-step plot loop: ${plotSteps}. Use it to design the first 10 chapters and chapter-level pursuit.
+- Antagonist templates: ${antagonistNames}. Choose one core antagonist type or a deliberate hybrid.
+- Opening hooks: ${hookNames}. Pick at least one main hook for Chapter 1.
+- Transition methods: ${transitionNames}. Use them only as rhythm guidance for the first-10 plan; do not change write-next behavior.`;
+    }
+
+    return `请把这些可复用故事方法论用于新增故事骨架文件：
+- 世界发动机：围绕稀缺、垄断、链式反应、文明共识、主角异常性、可复用冲突源建模。关键问题：${worldQuestions}
+- 六步剧情闭环：${plotSteps}。用于规划前10章的章节追读和每章目标/阻碍/反馈。
+- 高智商反派模板：${antagonistNames}。选择一种核心反派类型，或设计有意图的混合型。
+- 开头钩子：${hookNames}。第1章必须至少选择一种主钩子。
+- 万能转场：${transitionNames}。仅作为前10章节奏规划参考，不改变后续 write next 行为。`;
+  }
+
+  private buildStorySkeletonPrompt(language: "zh" | "en"): string {
+    if (language === "en") {
+      return `=== SECTION: genre_architecture ===
+# Genre Architecture
+
+## 1. Genre Positioning
+- Primary category:
+- Subgenre:
+- Target platform:
+- Target readers:
+- Core selling point:
+- Core emotion:
+- Core gratification:
+
+## 2. Reader Promise
+- What gratification does this book promise?
+- What emotion does this book promise?
+- What reversal does this book promise?
+- What growth does this book promise?
+
+## 3. Opening Strategy
+Choose at least one main opening hook from: suspense gap / extreme contrast / conflict first / worldview bomb / extreme emotion.
+- Why does it fit this book?
+- How should the first 500 words show it?
+- What does each golden first-three chapter do?
+
+## 4. Chapter Rhythm Template
+- Core conflict density per chapter:
+- Small gratification every how many chapters:
+- Reversal every how many chapters:
+- Stage reward every how many chapters:
+- What change should each volume ending create?
+
+## 5. Publishing Selling Points
+- Title direction:
+- Blurb direction:
+- Tag direction:
+- Cover keywords:
+- Tomato/Fanqie publishing notes:
+
+=== SECTION: world_engine ===
+# World Engine
+
+## 1. Core Scarce Resource
+- What does everyone in this world want most?
+- Why is it scarce?
+- Who monopolizes it?
+- What price do ordinary people pay to obtain it?
+
+## 2. Resource Distribution And Power Cycle
+- How does resource become power?
+- How does power keep monopolizing resource?
+- Which classes benefit?
+- Which classes are oppressed?
+
+## 3. Chain Reactions
+Infer impact on:
+- Productivity
+- Economy
+- War/violence mode
+- Sect/family/court/organization structure
+- Occupational status
+- Ordinary daily life
+
+## 4. Civilization Consensus
+- What does this world respect by default?
+- What does it despise by default?
+- What behavior is considered reasonable?
+- What behavior will the whole world punish?
+- Why does the protagonist offend this consensus?
+
+## 5. Protagonist Anomaly
+- Why is the protagonist an anomaly under world rules?
+- Whom does the protagonist threaten?
+- How will the world automatically reject or correct the protagonist?
+
+## 6. Reusable Conflict Sources
+List at least 8 reusable conflict sources.
+
+=== SECTION: antagonist_map ===
+# Antagonist Structure
+
+## 1. Core Antagonist
+- Name/code:
+- Surface identity:
+- Real identity:
+- Antagonist type: strategist / martyr / masquerader / hybrid
+- Public goal:
+- Hidden goal:
+- Resources controlled:
+- Order defended:
+- Why they cannot tolerate the protagonist:
+- Value conflict with protagonist:
+- What happens if they win?
+- What happens if they fail?
+
+## 2. Core Antagonist Plan Chain
+- Plan A:
+- Plan B:
+- Plan C:
+- If Plan A is broken, how does it trigger Plan B?
+- When the protagonist first thinks they have won, what deeper plan did they advance?
+
+## 3. Stage Antagonists
+| Stage/Volume | Stage Antagonist | Type | Surface Conflict | Backing Order | Link To Core Antagonist | Consequence After Defeat |
+|---|---|---|---|---|---|---|
+
+## 4. Antagonist Pressure Escalation
+- Early pressure:
+- Mid-story siege:
+- Late-stage institutional/world-rule suppression:
+
+## 5. No-Dumbing-Down Rules
+- No free experience without reason
+- No sudden low-level mistakes
+- No sparing the protagonist while explaining everything
+- Protagonist victories must come from foreshadowing, intelligence, cost, or tiny variables
+
+=== SECTION: motivation_matrix ===
+# Motivation Matrix
+
+## 1. Protagonist Motivation
+- Surface goal:
+- Deep desire:
+- Greatest fear:
+- Current lack:
+- Cannot lose:
+- Bottom line:
+- Will sacrifice:
+- Will never sacrifice:
+- How each volume goal upgrades:
+
+## 2. Core Antagonist Motivation
+- Surface goal:
+- Deep desire:
+- Greatest fear:
+- Why they believe they are right:
+- Why they cannot retreat:
+- What proof from the protagonist scares them most:
+
+## 3. Important Supporting Character Motivation Table
+| Character | Surface Goal | Deep Desire | Fear | Bottom Line | Will Betray | Will Never Betray | Interest Relation With Protagonist |
+|---|---|---|---|---|---|---|---|
+
+## 4. Relationship Tension
+- Protagonist vs core antagonist:
+- Protagonist vs important ally:
+- Protagonist vs potential betrayer:
+- Protagonist vs world consensus:
+
+## 5. Future Writing Constraints
+List character behavior constraints that write-next must obey later.
+
+=== SECTION: first_10_chapter_plan ===
+# First 10 Chapter Plan
+
+## 1. Golden First Three Chapters
+### Chapter 1
+- Main hook type:
+- First 500-word conflict:
+- Protagonist dilemma:
+- Ending hook:
+
+### Chapter 2
+- Core function:
+- How core edge/difference appears:
+- How obstacle escalates:
+- Ending hook:
+
+### Chapter 3
+- Core function:
+- How long-term goal becomes clear:
+- How first stage enemy appears:
+- Ending hook:
+
+## 2. First 10 Chapter Table
+| Chapter | Chapter Function | Emotion Event | Protagonist Goal | Obstacle/Dilemma | Solution | Gratification/Reversal | Ending Hook |
+|---|---|---|---|---|---|---|---|
+
+Requirements: every chapter has a goal, obstacle, and ending hook; at least 3 small gratification beats; at least 2 reversals; Chapter 10 creates a stage situation change.
+
+## 3. First 10 Chapter Antagonist Pressure
+Explain how core or stage antagonist pressure gradually appears without free experience delivery.
+
+## 4. First 10 Chapter Foreshadowing
+| Foreshadowing | Setup Chapter | Surface Appearance | Real Meaning | Expected Payoff Chapter |
+|---|---|---|---|---|
+
+## 5. First 10 Chapter Retention Risks
+List possible reader drop-off risks and avoidance strategies.`;
+    }
+
+    return `=== SECTION: genre_architecture ===
+# 题材架构
+
+## 1. 题材定位
+- 主分类：
+- 子题材：
+- 目标平台：
+- 目标读者：
+- 核心卖点：
+- 核心情绪：
+- 核心爽点：
+
+## 2. 读者承诺
+- 这本书承诺给读者什么爽感？
+- 这本书承诺给读者什么情绪？
+- 这本书承诺给读者什么反转？
+- 这本书承诺给读者什么成长？
+
+## 3. 开局打法
+必须从 opening hooks 中选择至少一种主钩子：悬念留白 / 极度反差 / 矛盾前置 / 颠覆世界观先行 / 极致情绪。
+- 为什么适合本书？
+- 第一章前500字应该如何体现？
+- 黄金三章分别承担什么功能？
+
+## 4. 章节节奏模板
+- 每章核心冲突密度：
+- 每几章一个小爽点：
+- 每几章一次反转：
+- 每几章一次阶段收益：
+- 每卷结尾应该形成什么变化：
+
+## 5. 发布卖点
+- 书名方向：
+- 简介方向：
+- 标签方向：
+- 封面关键词：
+- 番茄发布注意点：
+
+=== SECTION: world_engine ===
+# 世界发动机
+
+## 1. 核心稀缺资源
+- 这个世界所有人最想要什么？
+- 它为什么稀缺？
+- 谁垄断它？
+- 普通人获取它要付出什么代价？
+
+## 2. 资源分配与权力循环
+- 资源如何转化为权力？
+- 权力如何继续垄断资源？
+- 哪些阶层因此受益？
+- 哪些阶层因此被压迫？
+
+## 3. 链式反应
+必须推演核心设定对以下方面的影响：
+- 生产力
+- 经济结构
+- 战争/暴力模式
+- 宗门/家族/朝廷/组织结构
+- 职业地位
+- 普通人日常生活
+
+## 4. 文明共识
+- 这个世界默认尊敬什么？
+- 默认鄙视什么？
+- 什么行为被视为合理？
+- 什么行为会被全世界惩罚？
+- 主角为什么会冒犯这套共识？
+
+## 5. 主角异常性
+- 主角为什么是世界规则里的异常？
+- 主角的存在威胁了谁？
+- 世界会如何自动排斥/修正主角？
+
+## 6. 自动产出冲突的方式
+列出至少 8 种可复用冲突来源，例如资源争夺、阶层压迫、制度审判、价值观冲突、身份暴露、规则惩罚、反派围剿、群体误解。
+
+=== SECTION: antagonist_map ===
+# 反派结构
+
+## 1. 核心反派
+- 姓名/代号：
+- 表层身份：
+- 真实身份：
+- 反派类型：谋局者 / 殉道者 / 伪态者 / 混合型
+- 公开目标：
+- 隐藏目标：
+- 掌握的资源：
+- 维护的秩序：
+- 为什么不能容忍主角：
+- 与主角的价值观冲突：
+- 他的胜利会导致什么？
+- 他的失败会导致什么？
+
+## 2. 核心反派的计划链
+- 计划 A：
+- 计划 B：
+- 计划 C：
+- 如果计划 A 被主角破坏，如何转入计划 B？
+- 主角第一次以为自己赢了，实际上推动了什么更深计划？
+
+## 3. 阶段反派
+| 阶段/卷 | 阶段反派 | 类型 | 表层冲突 | 背后秩序 | 与核心反派关系 | 失败后的后果 |
+|---|---|---|---|---|---|---|
+
+## 4. 反派压力递进
+- 初期如何压迫主角？
+- 中期如何围剿主角？
+- 后期如何在制度/世界规则层面压制主角？
+
+## 5. 反派不降智规则
+- 不能无理由送经验
+- 不能突然犯低级错误
+- 不能明明能杀却不杀还解释一堆
+- 主角胜利必须靠伏笔、智慧、代价或微小变量
+
+=== SECTION: motivation_matrix ===
+# 人物动机矩阵
+
+## 1. 主角动机
+- 表层目标：
+- 深层欲望：
+- 最大恐惧：
+- 当前最缺的东西：
+- 不能失去的东西：
+- 底线：
+- 会为了目标牺牲什么：
+- 绝不会牺牲什么：
+- 每卷目标如何升级：
+
+## 2. 核心反派动机
+- 表层目标：
+- 深层欲望：
+- 最大恐惧：
+- 他认为自己正确的理由：
+- 他不能退让的原因：
+- 他最害怕主角证明什么：
+
+## 3. 重要配角动机表
+| 角色 | 表层目标 | 深层欲望 | 恐惧 | 底线 | 会背叛什么 | 绝不背叛什么 | 与主角利益关系 |
+|---|---|---|---|---|---|---|---|
+
+## 4. 人物关系张力
+- 主角与核心反派的张力
+- 主角与重要同伴的张力
+- 主角与潜在背叛者的张力
+- 主角与世界共识的张力
+
+## 5. 后续续写约束
+列出 write next 阶段必须遵守的人物行为约束。
+
+=== SECTION: first_10_chapter_plan ===
+# 前10章规划
+
+## 1. 黄金三章目标
+### 第1章
+- 主钩子类型：
+- 前500字冲突：
+- 主角困境：
+- 章节结尾钩子：
+
+### 第2章
+- 核心功能：
+- 金手指/核心差异如何展示：
+- 阻碍如何升级：
+- 章节结尾钩子：
+
+### 第3章
+- 核心功能：
+- 长期目标如何明确：
+- 第一个阶段敌人如何出现：
+- 章节结尾钩子：
+
+## 2. 前10章章节表
+| 章数 | 章节功能 | 情绪事件 | 主角目标 | 阻碍困境 | 解决方法 | 爽点/反转 | 结尾钩子 |
+|---|---|---|---|---|---|---|---|
+
+要求：每章都有明确目标、阻碍和结尾钩子；至少 3 章有小爽点；至少 2 章有反转；第10章必须形成阶段性局势变化。
+
+## 3. 前10章反派压力安排
+说明核心反派或阶段反派的压力如何逐步显现，不能让反派直接无脑送经验。
+
+## 4. 前10章伏笔安排
+| 伏笔 | 埋设章节 | 表层表现 | 真实含义 | 预计回收章节 |
+|---|---|---|---|---|
+
+## 5. 前10章追读风险
+列出可能导致读者流失的风险，并给出规避策略。`;
+  }
+
+  private contentOrFallback(
+    content: string | undefined,
+    section: StorySkeletonSection,
+    language: "zh" | "en",
+  ): string {
+    const trimmed = content?.trim();
+    if (trimmed) return trimmed;
+    return this.buildStorySkeletonFallback(section, language);
+  }
+
+  private buildStorySkeletonFallback(
+    section: StorySkeletonSection,
+    language: "zh" | "en",
+  ): string {
+    const title = STORY_SKELETON_TITLES[section][language];
+    const template = STORY_SKELETON_FALLBACK_TEMPLATES[section][language];
+    if (language === "en") {
+      return `# ${title}
+
+> Generated by inkos 2.0 create-stage fallback.
+> Reason: the LLM did not return the corresponding section.
+> You can regenerate the foundation or complete this file manually later.
+
+${template}`;
+    }
+
+    return `# ${title}
+
+> 本文件由 inkos 2.0 create 阶段 fallback 生成。
+> 原因：LLM 未返回对应 section。
+> 后续可通过重新生成骨架或人工补全。
+
+${template}`;
   }
 
   /**
@@ -919,6 +1808,11 @@ ${trimmed}\n`;
       bookRules: extract("book_rules"),
       currentState: extract("current_state"),
       pendingHooks: extract("pending_hooks"),
+      genreArchitecture: parsedSections.get(this.normalizeSectionName("genre_architecture")),
+      worldEngine: parsedSections.get(this.normalizeSectionName("world_engine")),
+      antagonistMap: parsedSections.get(this.normalizeSectionName("antagonist_map")),
+      motivationMatrix: parsedSections.get(this.normalizeSectionName("motivation_matrix")),
+      first10ChapterPlan: parsedSections.get(this.normalizeSectionName("first_10_chapter_plan")),
     };
   }
 

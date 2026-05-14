@@ -752,4 +752,142 @@ describe("ArchitectAgent", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("parses story skeleton sections and includes story methods in create prompt", async () => {
+    const agent = new ArchitectAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+    const book: BookConfig = {
+      id: "story-skeleton-book",
+      title: "故事骨架测试",
+      platform: "tomato",
+      genre: "other",
+      status: "active",
+      targetChapters: 100,
+      chapterWordCount: 2200,
+      createdAt: "2026-05-14T00:00:00.000Z",
+      updatedAt: "2026-05-14T00:00:00.000Z",
+    };
+    const chat = vi.spyOn(agent as unknown as { chat: (...args: unknown[]) => Promise<unknown> }, "chat")
+      .mockResolvedValue({
+        content: [
+          "=== SECTION: story_bible ===",
+          "# Story Bible",
+          "",
+          "=== SECTION: volume_outline ===",
+          "# Volume Outline",
+          "",
+          "=== SECTION: book_rules ===",
+          "# Book Rules",
+          "",
+          "=== SECTION: current_state ===",
+          "# Current State",
+          "",
+          "=== SECTION: pending_hooks ===",
+          "# Pending Hooks",
+          "",
+          "=== SECTION: genre_architecture ===",
+          "# 题材架构\n\n## 1. 题材定位",
+          "",
+          "=== SECTION: world_engine ===",
+          "# 世界发动机\n\n## 1. 核心稀缺资源",
+          "",
+          "=== SECTION: antagonist_map ===",
+          "# 反派结构\n\n## 1. 核心反派",
+          "",
+          "=== SECTION: motivation_matrix ===",
+          "# 人物动机矩阵\n\n## 1. 主角动机",
+          "",
+          "=== SECTION: first_10_chapter_plan ===",
+          "# 前10章规划\n\n## 1. 黄金三章目标",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    const result = await agent.generateFoundation(book);
+
+    const messages = chat.mock.calls[0]?.[0] as Array<{ role: string; content: string }>;
+    expect(messages[0]?.content).toContain("世界发动机");
+    expect(messages[0]?.content).toContain("六步剧情闭环");
+    expect(messages[0]?.content).toContain("谋局者");
+    expect(messages[0]?.content).toContain("=== SECTION: first_10_chapter_plan ===");
+    expect(result.genreArchitecture).toContain("# 题材架构");
+    expect(result.worldEngine).toContain("# 世界发动机");
+    expect(result.antagonistMap).toContain("# 反派结构");
+    expect(result.motivationMatrix).toContain("# 人物动机矩阵");
+    expect(result.first10ChapterPlan).toContain("# 前10章规划");
+  });
+
+  it("writes story skeleton files and falls back when sections are missing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-architect-story-skeleton-"));
+    const agent = new ArchitectAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+
+    try {
+      await agent.writeFoundationFiles(
+        root,
+        {
+          storyBible: "# Story Bible",
+          volumeOutline: "# Volume Outline",
+          bookRules: "# Book Rules",
+          currentState: "# Current State",
+          pendingHooks: "# Pending Hooks",
+          genreArchitecture: "# 题材架构\n\n自定义题材骨架",
+        },
+        false,
+        "zh",
+      );
+
+      await expect(readFile(join(root, "story", "story_bible.md"), "utf-8"))
+        .resolves.toContain("# Story Bible");
+      await expect(readFile(join(root, "story", "volume_outline.md"), "utf-8"))
+        .resolves.toContain("# Volume Outline");
+      await expect(readFile(join(root, "story", "book_rules.md"), "utf-8"))
+        .resolves.toContain("# Book Rules");
+      await expect(readFile(join(root, "story", "current_state.md"), "utf-8"))
+        .resolves.toContain("# Current State");
+      await expect(readFile(join(root, "story", "pending_hooks.md"), "utf-8"))
+        .resolves.toContain("# Pending Hooks");
+      await expect(readFile(join(root, "story", "genre_architecture.md"), "utf-8"))
+        .resolves.toContain("自定义题材骨架");
+
+      const worldEngine = await readFile(join(root, "story", "world_engine.md"), "utf-8");
+      const antagonistMap = await readFile(join(root, "story", "antagonist_map.md"), "utf-8");
+      const motivationMatrix = await readFile(join(root, "story", "motivation_matrix.md"), "utf-8");
+      const first10 = await readFile(join(root, "story", "first_10_chapter_plan.md"), "utf-8");
+
+      expect(worldEngine).toContain("fallback 生成");
+      expect(worldEngine).toContain("## 1. 核心稀缺资源");
+      expect(antagonistMap).toContain("## 1. 核心反派");
+      expect(motivationMatrix).toContain("## 1. 主角动机");
+      expect(first10).toContain("## 2. 前10章章节表");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
