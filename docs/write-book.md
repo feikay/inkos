@@ -2,7 +2,7 @@
 
 # 新书
 
-```
+```bash
 inkos book create --title "重生2003：深圳往事" --genre rebirth --platform tomato
 ```
 
@@ -15,6 +15,85 @@ node scripts/fanqie/write-publish-export.mjs 葬渊魔经 --count 1
 # 写N章
 node scripts/fanqie/write-publish-export.mjs 葬渊魔经 --count n
 ```
+
+# 真实业务验证命令基准
+
+真实业务验证必须实际运行程序产生新输出，不能只读取旧文件得出结论。长跑命令不要直接在前台 console 跑，统一后台运行并记录 pid / log / exit。
+
+推荐后台模板：
+
+```bash
+mkdir -p .ai_workflow/runs/<RUN_ID>/logs
+nohup sh -c '<REAL_COMMAND>; echo $? > .ai_workflow/runs/<RUN_ID>/logs/<name>.exit' \
+  > .ai_workflow/runs/<RUN_ID>/logs/<name>.log 2>&1 \
+  & echo $! > .ai_workflow/runs/<RUN_ID>/logs/<name>.pid
+```
+
+轮询：
+
+```bash
+cat .ai_workflow/runs/<RUN_ID>/logs/<name>.pid
+ps -p $(cat .ai_workflow/runs/<RUN_ID>/logs/<name>.pid)
+tail -n 120 .ai_workflow/runs/<RUN_ID>/logs/<name>.log
+cat .ai_workflow/runs/<RUN_ID>/logs/<name>.exit
+```
+
+一键完成续写 / publish-ready / export-fanqie，优先使用 `write-publish-export`：
+
+```bash
+# 写新章、发布前检查、必要修复、导出番茄版
+node scripts/fanqie/write-publish-export.mjs <书名> --count 1
+
+# 连写 N 章
+node scripts/fanqie/write-publish-export.mjs <书名> --count <n>
+
+# 处理已有章节范围
+node scripts/fanqie/write-publish-export.mjs <书名> --from <起始章> --to <结束章>
+
+# 只跑写作和检查，不导出
+node scripts/fanqie/write-publish-export.mjs <书名> --count 1 --no-export
+
+# 从最近失败报告继续
+node scripts/fanqie/write-publish-export.mjs <书名> --resume-last
+```
+
+一步一步操作时使用这条链路：
+
+```bash
+# 1. 写下一章
+node packages/cli/dist/index.js write next <书名>
+
+# 2. 如果 write next 结果不适合保留，可走 review reject，再重新 write next
+node packages/cli/dist/index.js review reject <书名> <章节号>
+node packages/cli/dist/index.js write next <书名>
+
+# 3. 连续性检测与自动修复
+node packages/cli/dist/index.js review continuity-auto --book <书名> --chapter <章节号> --max-fix-attempts 2
+
+# 4. 发布前闭环检查
+node packages/cli/dist/index.js review publish-ready --book <书名> --chapter <章节号>
+
+# 5. 番茄质量润色
+node packages/cli/dist/index.js review fanqie-polish --book <书名> --chapter <章节号> --max-polish-attempts 2
+
+# 6. 六段节奏修复
+node scripts/fanqie/repair-fanqie.mjs <书名> --chapter <章节号> --apply
+
+# 7. 导出番茄版
+node scripts/fanqie/export-fanqie.mjs <书名> --incremental --use-reviewed --title "<书名或发布标题>"
+```
+
+分工原则：
+
+- `write next` 负责生成章节并执行会污染状态的硬约束检查，例如 Resource Engine / Resource Plan / chapter_intent 基础一致性。它不应被要求一次性达到最终发布质量。
+- `review reject` 用于丢弃不应保留的章节，再重新生成。
+- `continuity-auto` 处理连续性、衔接、轻重修复。
+- `publish-ready` 做发布前闭环判断，汇总连续性、质量、资源闭合和最终候选稿。
+- `fanqie-polish` 处理番茄风格、节奏、爽点表达。
+- `repair-fanqie` 处理六段节奏类结构问题。
+- `export-fanqie` 只负责导出，不应掩盖上游系统性缺陷。
+
+因此，真实业务验证可以根据目标选择一键链路或分步链路：验证完整生产流程时用 `write-publish-export`；定位单个环节时用 `write next / review reject / continuity-auto / publish-ready / fanqie-polish / repair-fanqie / export-fanqie` 分步执行。
 
 # 自然语言选题
 

@@ -27,3 +27,4 @@ tests/
 .claude/
 reports/
 .ai_workflow/
+packages/core/logs/
