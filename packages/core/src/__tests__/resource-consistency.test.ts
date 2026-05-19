@@ -285,4 +285,43 @@ describe("classifyClosureStatus", () => {
     });
     expect(result).toBe("resource_failed");
   });
+
+  it("should never return no_change_closed when blocking, FAILED, WARN, or plan violations exist", () => {
+    const blockingCases: Array<{
+      blocking: boolean;
+      status: "PASS" | "FAILED" | "WARN" | "FIXED";
+      hasResourcePlanViolations: boolean;
+    }> = [
+      { blocking: true, status: "PASS", hasResourcePlanViolations: false },
+      { blocking: false, status: "FAILED", hasResourcePlanViolations: false },
+      { blocking: false, status: "WARN", hasResourcePlanViolations: false },
+      { blocking: false, status: "PASS", hasResourcePlanViolations: true },
+    ];
+    for (const tc of blockingCases) {
+      const result = classifyClosureStatus({
+        hasResourcePlan: true,
+        hasEvents: false,
+        hasIssues: false,
+        ...tc,
+      });
+      expect(result).not.toBe("no_change_closed");
+      expect(result).toBe("resource_failed");
+    }
+  });
+
+  it("no_change_closed implies non-blocking PASS status by construction", () => {
+    // The only way to get no_change_closed is:
+    // !blocking && status !== "FAILED" && status !== "WARN" && !hasResourcePlanViolations
+    // && hasResourcePlan && !hasEvents && !hasIssues
+    const result = classifyClosureStatus({
+      hasResourcePlan: true,
+      hasEvents: false,
+      hasIssues: false,
+      hasResourcePlanViolations: false,
+      blocking: false,
+      status: "PASS",
+    });
+    expect(result).toBe("no_change_closed");
+    // The caller can trust that no_change_closed means the chapter is safe for downstream
+  });
 });

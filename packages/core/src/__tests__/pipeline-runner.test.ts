@@ -1976,6 +1976,7 @@ describe("PipelineRunner", () => {
       const resourceReport = JSON.parse(await readFile(join(state.bookDir(bookId), "reviews", "resource-consistency", "0001.report.json"), "utf-8")) as {
         status: string;
         blocking: boolean;
+        closureStatus: string;
         issues: ReadonlyArray<{ code: string }>;
       };
       const intentReport = JSON.parse(await readFile(join(state.bookDir(bookId), "reviews", "intent-alignment", "0001.report.json"), "utf-8")) as IntentAlignmentReport;
@@ -1986,6 +1987,7 @@ describe("PipelineRunner", () => {
       expect(currentState.trim()).toBe("| 当前资源 | 民望值=0；联邦币=0 |");
       expect(resourceReport.status).toBe("FAILED");
       expect(resourceReport.blocking).toBe(true);
+      expect(resourceReport.closureStatus).toBe("resource_failed");
       expect(resourceReport.issues).toEqual(expect.arrayContaining([
         expect.objectContaining({ code: "unauthorized-resource-rule" }),
         expect.objectContaining({ code: "negative-balance" }),
@@ -2044,6 +2046,7 @@ describe("PipelineRunner", () => {
       const resourceReport = JSON.parse(await readFile(join(state.bookDir(bookId), "reviews", "resource-consistency", "0001.report.json"), "utf-8")) as {
         status: string;
         blocking: boolean;
+        closureStatus: string;
         recoveryAttempted: boolean;
         recoveryPlan: string;
         secondValidation: string;
@@ -2059,6 +2062,7 @@ describe("PipelineRunner", () => {
       expect(currentState).toContain("联邦币=1200");
       expect(resourceReport.status).toBe("FIXED");
       expect(resourceReport.blocking).toBe(false);
+      expect(resourceReport.closureStatus).toBe("normal_closed");
       expect(resourceReport.recoveryAttempted).toBe(true);
       expect(resourceReport.recoveryPlan).toBe("add_earned_resource_before_spend");
       expect(resourceReport.secondValidation).toBe("PASS");
@@ -2124,6 +2128,7 @@ describe("PipelineRunner", () => {
       const resourceReport = JSON.parse(await readFile(join(state.bookDir(bookId), "reviews", "resource-consistency", "0001.report.json"), "utf-8")) as {
         status: string;
         blocking: boolean;
+        closureStatus: string;
         recoveryAttempted: boolean;
         recoveryPlan: string;
         recoveryPlanResult: string;
@@ -2150,6 +2155,7 @@ describe("PipelineRunner", () => {
       expect(currentState).toContain("联邦币=200");
       expect(resourceReport.status).toBe("FIXED");
       expect(resourceReport.blocking).toBe(false);
+      expect(resourceReport.closureStatus).toBe("normal_closed");
       expect(resourceReport.recoveryAttempted).toBe(true);
       expect(resourceReport.recoveryPlan).toBe("add_earned_resource_before_spend");
       expect(resourceReport.recoveryPlanResult).toBe("FAILED");
@@ -2214,6 +2220,7 @@ describe("PipelineRunner", () => {
       const resourceReport = JSON.parse(await readFile(join(state.bookDir(bookId), "reviews", "resource-consistency", "0001.report.json"), "utf-8")) as {
         status: string;
         blocking: boolean;
+        closureStatus: string;
         fallbackSecondValidation: string;
         templatePatchAttempted: boolean;
         templatePatchApplied: boolean;
@@ -2241,6 +2248,7 @@ describe("PipelineRunner", () => {
       expect(currentState).toContain("已解锁技能=初级辩论技能");
       expect(resourceReport.status).toBe("FIXED");
       expect(resourceReport.blocking).toBe(false);
+      expect(resourceReport.closureStatus).toBe("normal_closed");
       expect(resourceReport.fallbackSecondValidation).toBe("FAILED");
       expect(resourceReport.templatePatchAttempted).toBe(true);
       expect(resourceReport.templatePatchApplied).toBe(true);
