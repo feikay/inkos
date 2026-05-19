@@ -65,6 +65,11 @@ import { buildEnglishVarianceBrief } from "../utils/long-span-fatigue.js";
 import { buildChapterTitleCandidates, resolveChapterTitle } from "../utils/chapter-title-engine.js";
 import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import {
+  preScanTextAgainstResourcePlan,
+  renderResourcePlanForPrompt,
+  type ChapterResourcePlan,
+} from "./resource-plan.js";
 
 export interface WriteChapterInput {
   readonly book: BookConfig;
@@ -74,6 +79,7 @@ export interface WriteChapterInput {
   readonly retryHint?: string;
   readonly retryHintPath?: string;
   readonly chapterIntent?: string;
+  readonly resourcePlan?: ChapterResourcePlan;
   readonly contextPackage?: ContextPackage;
   readonly ruleStack?: RuleStack;
   readonly trace?: ChapterTrace;
@@ -99,6 +105,152 @@ export interface TokenUsage {
   readonly promptTokens: number;
   readonly completionTokens: number;
   readonly totalTokens: number;
+}
+
+export interface IntentPayoffSuppression {
+  readonly suppressPayoff: boolean;
+  readonly reason?: string;
+  readonly removedPayoff?: string;
+}
+
+export interface PlannerIntentSanitizationResult {
+  readonly sanitizedPlannerIntent?: string;
+  readonly contextPackage?: ContextPackage;
+  readonly suppression: IntentPayoffSuppression;
+}
+
+const INTENT_PAYOFF_SUPPRESSION_PATTERNS: ReadonlyArray<RegExp> = [
+  /仅提示绑定/u,
+  /仅触发绑定/u,
+  /系统绑定/u,
+  /不直接发放任何福利/u,
+  /不提前发放任何福利/u,
+  /不直接兑现/u,
+  /不得提前兑现/u,
+  /后续再逐步展示/u,
+  /本章只触发/u,
+  /不得直接获得/u,
+  /不得提前给主角福利/u,
+  /不提前泄露系统功能/u,
+  /不得提前泄露系统功能/u,
+  /结尾停在系统绑定/u,
+  /结尾卡系统绑定/u,
+  /不得提前消耗后续剧情/u,
+  /不直接给(?:现金|技能|情报)/u,
+  /不得完整解锁/u,
+  /仅兑现第一层/u,
+  /不能完整解释/u,
+  /只允许\s*partial reveal/iu,
+];
+
+const PAYOFF_DRIFT_PATTERNS: ReadonlyArray<RegExp> = [
+  /完整解锁/u,
+  /明确逃生(?:线索|路径|路线)/u,
+  /他一下子看懂了/u,
+  /直接知道/u,
+  /藏着外公/u,
+  /藏着资金/u,
+  /旧码头/u,
+  /三号仓库/u,
+  /第三块砖/u,
+  /S\s*级逃生线索/iu,
+  /永久失明/u,
+  /左眼失明/u,
+  /获得现金/u,
+  /解锁技能/u,
+  /获得技能/u,
+  /获得情报/u,
+  /完整真相/u,
+  /彻底搞懂/u,
+];
+
+const LEGACY_PAYOFF_TEXT_PATTERNS: ReadonlyArray<RegExp> = [
+  /payoffToDeliver\s*:\s*.+/giu,
+  /payoffDirective\.[A-Za-z]+\s*:\s*.+/giu,
+  /promisedPayoff\s*:\s*.+/giu,
+  /当存在\s*payoffToDeliver\s*时，?payoff\s*优先级高于\s*EndingType[^。\n]*(?:。)?/giu,
+  /payoff\s*优先级高于\s*endingType[^。\n]*(?:。)?/giu,
+  /获得一条明确逃生线索/gu,
+  /完整解锁/gu,
+  /明确逃生路径/gu,
+  /藏着资金/gu,
+  /旧码头/gu,
+  /第三块砖/gu,
+  /永久失明/gu,
+  /S\s*级逃生线索/giu,
+];
+
+export function detectIntentPayoffSuppression(chapterIntent: string | undefined): IntentPayoffSuppression {
+  const intent = chapterIntent?.trim();
+  if (!intent) {
+    return { suppressPayoff: false };
+  }
+
+  const matched = INTENT_PAYOFF_SUPPRESSION_PATTERNS.find((pattern) => pattern.test(intent));
+  if (!matched) {
+    return { suppressPayoff: false };
+  }
+
+  const line = intent
+    .split("\n")
+    .map((value) => value.trim())
+    .find((value) => matched.test(value));
+  return {
+    suppressPayoff: true,
+    reason: line || matched.source,
+  };
+}
+
+export function sanitizePlannerIntentForChapterIntent(params: {
+  readonly plannerIntent?: string;
+  readonly chapterIntent?: string;
+  readonly contextPackage?: ContextPackage;
+}): PlannerIntentSanitizationResult {
+  const suppression = detectIntentPayoffSuppression(params.chapterIntent);
+  if (!suppression.suppressPayoff) {
+    return {
+      sanitizedPlannerIntent: params.plannerIntent,
+      contextPackage: params.contextPackage,
+      suppression,
+    };
+  }
+
+  const removedPayoff = params.contextPackage?.chapterGoal?.payoffDirective?.promisedPayoff
+    ?? params.contextPackage?.chapterGoal?.payoffToDeliver;
+  const sanitizedPlannerIntent = params.plannerIntent
+    ? [
+        LEGACY_PAYOFF_TEXT_PATTERNS.reduce(
+          (text, pattern) => text.replace(pattern, ""),
+          params.plannerIntent,
+        ).replace(/\n{3,}/g, "\n\n").trimEnd(),
+        "",
+        "## Sanitized Note",
+        "旧 payoffDirective 已被 chapter_intent 抑制，本章只允许系统绑定/轻微暗示，不得完整兑现。",
+      ].join("\n")
+    : params.plannerIntent;
+  const contextPackage = params.contextPackage?.chapterGoal
+    ? (() => {
+        const { payoffDirective: _payoffDirective, ...goalWithoutPayoffDirective } = params.contextPackage!.chapterGoal!;
+        return {
+          ...params.contextPackage!,
+          chapterGoal: {
+            ...goalWithoutPayoffDirective,
+            protagonistGoal: goalWithoutPayoffDirective.protagonistGoal.replace(/获得一条明确逃生线索/gu, "完成 chapter_intent 指定的本章目标"),
+            payoffToDeliver: "chapter_intent 已抑制旧 payoff，本章只允许系统绑定/轻微暗示，不得完整兑现",
+            nextChapterPull: goalWithoutPayoffDirective.nextChapterPull.replace(/逃生线索|逃生路线|旧码头|资金/gu, "系统绑定钩子"),
+          },
+        };
+      })()
+    : params.contextPackage;
+
+  return {
+    sanitizedPlannerIntent,
+    contextPackage,
+    suppression: {
+      ...suppression,
+      ...(removedPayoff ? { removedPayoff } : {}),
+    },
+  };
 }
 
 export interface WriteChapterOutput {
@@ -180,8 +332,24 @@ export class WriterAgent extends BaseAgent {
     const enforceWholeChapterGuard = typeof params.minWholeChapterWords === "number"
       && params.minWholeChapterWords > 1
       && beforeWords >= params.minWholeChapterWords;
+    const BAD_REWRITE_PATTERNS: ReadonlyArray<RegExp> = [
+      /请提供(?:原文|需要修改的原章节)/u,
+      /请您提供[^。\n]{0,30}(?:正文|原章节|内容)/u,
+      /无法完成/u,
+      /需要修改的原章节完整正文内容/u,
+      /作为AI/u,
+      /我不能/u,
+      /抱歉[^。\n]{0,30}(?:无法|不能)/u,
+    ];
+    const hasBadRewritePattern = BAD_REWRITE_PATTERNS.some((pattern) => pattern.test(params.afterContent));
     if (params.afterContent.trim().length === 0) {
       rejectedReason = "empty-candidate";
+    } else if (hasBadRewritePattern) {
+      rejectedReason = "bad-rewrite-pattern-detected";
+    } else if (enforceWholeChapterGuard && afterWords < 1000) {
+      rejectedReason = "below-hard-minimum-1000";
+    } else if (enforceWholeChapterGuard && afterWords < Math.ceil(beforeWords * 0.7)) {
+      rejectedReason = "below-70%-of-original";
     } else if (enforceWholeChapterGuard && afterWords < Math.ceil(beforeWords * 0.8)) {
       rejectedReason = "below-80%-of-original";
     } else if (
@@ -203,6 +371,98 @@ export class WriterAgent extends BaseAgent {
       this.logWarn(params.language, message);
     }
     return { accepted, beforeWords, afterWords, rejectedReason };
+  }
+
+  private async rewriteResourcePlanViolationsIfNeeded(params: {
+    readonly creative: ReturnType<typeof parseCreativeOutput>;
+    readonly resourcePlan?: ChapterResourcePlan;
+    readonly creativeSystemPrompt: string;
+    readonly creativeUserPrompt: string;
+    readonly lockedScene1Block?: string;
+    readonly language: "zh" | "en";
+    readonly chapterNumber: number;
+    readonly maxTokens: number;
+    readonly temperature: number;
+    readonly countingMode: LengthSpec["countingMode"];
+    readonly minWholeChapterWords: number;
+    readonly onUsage: (usage: TokenUsage) => void;
+  }): Promise<ReturnType<typeof parseCreativeOutput>> {
+    if (!params.resourcePlan) return params.creative;
+    const scan = preScanTextAgainstResourcePlan(params.creative.content, params.resourcePlan);
+    if (scan.ok) {
+      this.logInfo(params.language, {
+        zh: "writer pre-scan passed",
+        en: "writer pre-scan passed",
+      });
+      return params.creative;
+    }
+
+    this.logWarn(params.language, {
+      zh: `writer pre-scan detected resource plan violation: ${scan.violations.join("；")}`,
+      en: `writer pre-scan detected resource plan violation: ${scan.violations.join("; ")}`,
+    });
+    this.logWarn(params.language, {
+      zh: "writer rewrite due to resource plan violation",
+      en: "writer rewrite due to resource plan violation",
+    });
+
+    const rewritePrompt = params.language === "en"
+      ? [
+          params.creativeUserPrompt,
+          params.lockedScene1Block ?? "",
+          "",
+          "## Resource Plan Violation Rewrite",
+          "Your previous draft violated the chapter Resource Plan:",
+          ...scan.violations.map((violation) => `- ${violation}`),
+          "",
+          "Rewrite the chapter. Preserve the public confrontation, debate skill payoff, and reputation gains. Delete cash exchange, account credit, transfers, overdraft/advance/debt, and any reduced medical/rent funding gap.",
+          "Output only PRE_WRITE_CHECK, CHAPTER_TITLE, and CHAPTER_CONTENT blocks.",
+        ].join("\n")
+      : [
+          params.creativeUserPrompt,
+          params.lockedScene1Block ?? "",
+          "",
+          "## Resource Plan 违规重写",
+          "你上一版草稿违反了本章 Resource Plan：",
+          ...scan.violations.map((violation) => `- ${violation}`),
+          "",
+          "请重写本章：保留当众反击汤姆、初级辩论技能、民望增加和下一章希望；删除现金兑换、到账/入账、路人给钱、预支/透支/负债、透析费或房租缺口减少。",
+          "只输出 PRE_WRITE_CHECK、CHAPTER_TITLE、CHAPTER_CONTENT 三个区块。",
+        ].join("\n");
+
+    const response = await this.chat(
+      [
+        { role: "system", content: params.creativeSystemPrompt },
+        { role: "user", content: rewritePrompt },
+      ],
+      { maxTokens: params.maxTokens, temperature: params.temperature },
+    );
+    params.onUsage(response.usage);
+    const candidate = parseCreativeOutput(params.chapterNumber, response.content, params.countingMode);
+    const candidateScan = preScanTextAgainstResourcePlan(candidate.content, params.resourcePlan);
+    const decision = this.acceptWholeChapterRewrite({
+      language: params.language,
+      chapterNumber: params.chapterNumber,
+      stage: "resource-plan-prescan",
+      beforeContent: params.creative.content,
+      afterContent: candidate.content,
+      countingMode: params.countingMode,
+      minWholeChapterWords: params.minWholeChapterWords,
+    });
+    if (decision.accepted && candidateScan.ok) {
+      this.logInfo(params.language, {
+        zh: "writer pre-scan passed after rewrite",
+        en: "writer pre-scan passed after rewrite",
+      });
+      return candidate;
+    }
+    if (!candidateScan.ok) {
+      this.logWarn(params.language, {
+        zh: `writer pre-scan still failed after rewrite: ${candidateScan.violations.join("；")}`,
+        en: `writer pre-scan still failed after rewrite: ${candidateScan.violations.join("; ")}`,
+      });
+    }
+    return params.creative;
   }
 
   async writeChapter(input: WriteChapterInput): Promise<WriteChapterOutput> {
@@ -255,6 +515,7 @@ export class WriterAgent extends BaseAgent {
       : undefined;
     const chapterGoal = input.contextPackage?.chapterGoal ?? this.readChapterGoalFromIntentMarkdown(input.chapterIntent);
     const hookEmergenceDirective = this.extractHookEmergenceDirectiveFromIntentMarkdown(input.chapterIntent);
+    const payoffSuppression = this.detectIntentPayoffSuppression(input.chapterIntent);
     const recentTitles = this.extractRecentTitles(recentChapters, resolvedLanguage);
     const titleCandidates = buildChapterTitleCandidates({
       language: resolvedLanguage,
@@ -309,6 +570,7 @@ export class WriterAgent extends BaseAgent {
       ? this.buildGovernedUserPrompt({
           chapterNumber,
           chapterIntent: input.chapterIntent,
+          resourcePlan: input.resourcePlan,
           contextPackage: input.contextPackage,
           ruleStack: input.ruleStack,
           trace: input.trace,
@@ -359,6 +621,7 @@ export class WriterAgent extends BaseAgent {
             titleCandidates,
             moodDirective,
             chapterGoal,
+            resourcePlan: input.resourcePlan,
             hookEmergenceDirective,
             patternBreakerDirective: patternBreaker.directive,
             retryHint: input.retryHint,
@@ -367,6 +630,13 @@ export class WriterAgent extends BaseAgent {
         })();
 
     const creativeTemperature = input.temperatureOverride ?? 0.7;
+
+    if (input.resourcePlan) {
+      this.logInfo(resolvedLanguage, {
+        zh: "writer resource plan injected",
+        en: "writer resource plan injected",
+      });
+    }
 
     this.logInfo(resolvedLanguage, {
       zh: `阶段 1：创作正文（第${chapterNumber}章）`,
@@ -395,6 +665,11 @@ export class WriterAgent extends BaseAgent {
     const lockedScene1Block = lockedScene1
       ? this.buildLockedScene1Phase2Block(lockedScene1, resolvedLanguage)
       : "";
+    const resourcePlanPriorityBlock = input.resourcePlan
+      ? resolvedLanguage === "en"
+        ? "\n⚠️ The resource plan below takes priority over all other instructions. If the resource plan conflicts with the volume outline or current state, obey the resource plan.\n"
+        : "\n⚠️ 以下资源计划优先级高于其他所有指令。如果资源计划与卷纲/状态卡有冲突，以资源计划为准。\n"
+      : "";
 
     const creativeResponse = await this.chat(
       [
@@ -412,6 +687,44 @@ export class WriterAgent extends BaseAgent {
       : creativeResponse.usage;
 
     let creative = parseCreativeOutput(chapterNumber, creativeResponse.content, resolvedLengthSpec.countingMode);
+    creative = this.applyLockedScene1ToCreative(creative, lockedScene1, resolvedLengthSpec.countingMode);
+    creative = await this.rewriteResourcePlanViolationsIfNeeded({
+      creative,
+      resourcePlan: input.resourcePlan,
+      creativeSystemPrompt,
+      creativeUserPrompt,
+      lockedScene1Block,
+      language: resolvedLanguage,
+      chapterNumber,
+      maxTokens: creativeMaxTokens,
+      temperature: Math.min(creativeTemperature, 0.45),
+      countingMode: resolvedLengthSpec.countingMode,
+      minWholeChapterWords: this.minimumWholeChapterWords(resolvedLengthSpec),
+      onUsage: (usage) => {
+        creativeUsage = {
+          promptTokens: creativeUsage.promptTokens + usage.promptTokens,
+          completionTokens: creativeUsage.completionTokens + usage.completionTokens,
+          totalTokens: creativeUsage.totalTokens + usage.totalTokens,
+        };
+      },
+    });
+    creative = this.applyLockedScene1ToCreative(creative, lockedScene1, resolvedLengthSpec.countingMode);
+    creative = await this.rewriteChapterIntentDriftIfNeeded({
+      creative,
+      chapterIntent: input.chapterIntent,
+      payoffSuppression,
+      language: resolvedLanguage,
+      chapterNumber,
+      maxTokens: creativeMaxTokens,
+      countingMode: resolvedLengthSpec.countingMode,
+      onUsage: (usage) => {
+        creativeUsage = {
+          promptTokens: creativeUsage.promptTokens + usage.promptTokens,
+          completionTokens: creativeUsage.completionTokens + usage.completionTokens,
+          totalTokens: creativeUsage.totalTokens + usage.totalTokens,
+        };
+      },
+    });
     creative = this.applyLockedScene1ToCreative(creative, lockedScene1, resolvedLengthSpec.countingMode);
     creative = await this.rewriteForHookEmergenceIfNeeded({
       creative,
@@ -434,6 +747,7 @@ export class WriterAgent extends BaseAgent {
     creative = await this.rewriteForPayoffDirectiveIfNeeded({
       creative,
       chapterIntent: input.chapterIntent,
+      payoffSuppression,
       chapterGoal,
       language: resolvedLanguage,
       chapterNumber,
@@ -478,6 +792,23 @@ export class WriterAgent extends BaseAgent {
       titleCandidates,
       countingMode: resolvedLengthSpec.countingMode,
       minWholeChapterWords: this.minimumWholeChapterWords(resolvedLengthSpec),
+      onUsage: (usage) => {
+        creativeUsage = {
+          promptTokens: creativeUsage.promptTokens + usage.promptTokens,
+          completionTokens: creativeUsage.completionTokens + usage.completionTokens,
+          totalTokens: creativeUsage.totalTokens + usage.totalTokens,
+        };
+      },
+    });
+    creative = this.applyLockedScene1ToCreative(creative, lockedScene1, resolvedLengthSpec.countingMode);
+    creative = await this.rewriteChapterIntentDriftIfNeeded({
+      creative,
+      chapterIntent: input.chapterIntent,
+      payoffSuppression,
+      language: resolvedLanguage,
+      chapterNumber,
+      maxTokens: creativeMaxTokens,
+      countingMode: resolvedLengthSpec.countingMode,
       onUsage: (usage) => {
         creativeUsage = {
           promptTokens: creativeUsage.promptTokens + usage.promptTokens,
@@ -565,6 +896,18 @@ export class WriterAgent extends BaseAgent {
           consistencyGuardManualIssues = finalConsistencyGuard.issues;
         }
       }
+    }
+    if (payoffSuppression.suppressPayoff && this.findChapterIntentDriftPattern(creative.content)) {
+      const cleanedContent = this.removeChapterIntentDriftParagraphs(creative.content);
+      this.logWarn(resolvedLanguage, {
+        zh: `chapter_intent-drift：最终正文仍含提前兑现信号，已拒绝偏移段落（第${chapterNumber}章）`,
+        en: `chapter_intent-drift: final draft still contained early payoff signals; rejected drifting paragraphs (chapter ${chapterNumber})`,
+      });
+      creative = {
+        ...creative,
+        content: cleanedContent,
+        wordCount: countChapterLength(cleanedContent, resolvedLengthSpec.countingMode),
+      };
     }
     const resolvedTitle = resolveChapterTitle({
       language: resolvedLanguage,
@@ -679,7 +1022,7 @@ export class WriterAgent extends BaseAgent {
     const disciplineChecks = chapterGoal
       ? evaluateChapterGoalDiscipline(creative.content, chapterGoal)
       : undefined;
-    const payoffImpactCheck = chapterGoal
+    const payoffImpactCheck = chapterGoal && !payoffSuppression.suppressPayoff
       ? evaluatePayoffImpact(creative.content, chapterGoal)
       : undefined;
     const endingTypeCheck = evaluateEndingTypeCompliance(
@@ -690,8 +1033,13 @@ export class WriterAgent extends BaseAgent {
       ? toDisciplineWarnings(disciplineChecks, resolvedLanguage)
       : [];
     const endingTypeWarnings = toEndingTypeWarnings(endingTypeCheck, resolvedLanguage);
-    const payoffImpactWarnings = toPayoffImpactWarnings(payoffImpactCheck, resolvedLanguage);
-    const normalizedDisciplineWarnings = disciplineWarnings.filter((warning) => warning.rule !== "ending-hook-check");
+    const payoffImpactWarnings = payoffSuppression.suppressPayoff
+      ? []
+      : toPayoffImpactWarnings(payoffImpactCheck, resolvedLanguage);
+    const normalizedDisciplineWarnings = disciplineWarnings.filter((warning) =>
+      warning.rule !== "ending-hook-check"
+      && !(payoffSuppression.suppressPayoff && warning.rule.startsWith("payoff")),
+    );
     const cadenceDirectiveCheck = evaluateCadenceDirectiveCompliance(
       creative.content,
       input.chapterIntent,
@@ -728,6 +1076,12 @@ export class WriterAgent extends BaseAgent {
       existingHookIds: [...priorHookIds],
     });
     const hookDebtWarnings = toHookDebtWarnings(hookDebtCheck, resolvedLanguage);
+    const intentDeviationWarnings = this.detectChapterIntentDeviationWarnings({
+      content: creative.content,
+      chapterIntent: input.chapterIntent,
+      payoffSuppression,
+      language: resolvedLanguage,
+    });
     const styleGuardWarnings = resolvedLanguage === "zh"
       ? this.toStyleGuardPostWriteViolations(validateStyleGuard(creative.content, {
           previousChapters: styleGuardPreviousChapters,
@@ -747,6 +1101,7 @@ export class WriterAgent extends BaseAgent {
       ...hookEmergenceWarnings,
       ...resourceLedgerWarnings,
       ...hookDebtWarnings,
+      ...intentDeviationWarnings,
     ];
     const aiTellIssues = analyzeAITells(creative.content, resolvedLanguage).issues;
 
@@ -761,6 +1116,12 @@ export class WriterAgent extends BaseAgent {
       for (const v of allWarnings) {
         this.ctx.logger?.warn(`[${v.severity}] ${v.rule}: ${v.description}`);
       }
+    }
+    if (payoffSuppression.suppressPayoff) {
+      this.logWarn(resolvedLanguage, {
+        zh: `chapter_intent 抑制 payoff：${payoffSuppression.reason ?? "本章不得完整兑现旧 payoff"}`,
+        en: `chapter_intent suppresses payoff: ${payoffSuppression.reason ?? "old payoff must not be fully materialized in this chapter"}`,
+      });
     }
     if (aiTellIssues.length > 0) {
       this.logWarn(resolvedLanguage, {
@@ -1406,6 +1767,7 @@ ${chapter}`;
     readonly titleCandidates?: ReadonlyArray<{ readonly style: string; readonly title: string }>;
     readonly moodDirective?: MoodDirective;
     readonly chapterGoal?: ChapterGoal;
+    readonly resourcePlan?: ChapterResourcePlan;
     readonly hookEmergenceDirective?: {
       readonly mustMaterializeHookNow: boolean;
       readonly targetHookId?: string;
@@ -1467,6 +1829,14 @@ ${params.parentCanon}\n`
     const patternBreakerBlock = params.patternBreakerDirective
       ? `\n${params.patternBreakerDirective}\n`
       : "";
+    const resourcePlanBlock = params.resourcePlan
+      ? `\n${renderResourcePlanForPrompt(params.resourcePlan, "writer")}\n`
+      : "";
+    const resourcePlanPriorityBlock = params.resourcePlan
+      ? params.language === "en"
+        ? "\n⚠️ The resource plan below takes priority over all other instructions. If the resource plan conflicts with the volume outline or current state, obey the resource plan.\n"
+        : "\n⚠️ 以下资源计划优先级高于其他所有指令。如果资源计划与卷纲/状态卡有冲突，以资源计划为准。\n"
+      : "";
     const lengthRequirementBlock = this.buildLengthRequirementBlock(params.lengthSpec, params.language ?? "zh");
 
     if (params.language === "en") {
@@ -1485,6 +1855,7 @@ ${moodDirectiveBlock}
 ${characterAuthenticityBlock}
 ${payoffDirectiveBlock}
 ${hookEmergenceDirectiveBlock}
+${resourcePlanPriorityBlock}${resourcePlanBlock}
 ${patternBreakerBlock}
 ## Recent Chapters
 ${params.recentChapters || "(This is the first chapter, no previous text)"}
@@ -1521,6 +1892,7 @@ ${moodDirectiveBlock}
 ${characterAuthenticityBlock}
 ${payoffDirectiveBlock}
 ${hookEmergenceDirectiveBlock}
+${resourcePlanPriorityBlock}${resourcePlanBlock}
 ${patternBreakerBlock}
 ## 最近章节
 ${params.recentChapters || "(这是第一章，无前文)"}
@@ -1903,6 +2275,7 @@ ${hint}
     readonly trace?: ChapterTrace;
     readonly lengthSpec: LengthSpec;
     readonly language?: "zh" | "en";
+    readonly resourcePlan?: ChapterResourcePlan;
     readonly varianceBrief?: string;
     readonly selectedEvidenceBlock?: string;
     readonly titleCandidates?: ReadonlyArray<{ readonly style: string; readonly title: string }>;
@@ -1943,12 +2316,34 @@ ${hint}
       ? `\n${params.patternBreakerDirective}\n`
       : "";
     const retryHintBlock = this.buildRetryHintBlock(params.retryHint, params.retryHintPath, params.language ?? "zh");
+    const resourcePlanBlock = params.resourcePlan
+      ? `\n${renderResourcePlanForPrompt(params.resourcePlan, "writer")}\n`
+      : "";
+    const resourcePlanPriorityBlock = params.resourcePlan
+      ? params.language === "en"
+        ? "\n⚠️ The resource plan below takes priority over all other instructions. If the resource plan conflicts with the volume outline or current state, obey the resource plan.\n"
+        : "\n⚠️ 以下资源计划优先级高于其他所有指令。如果资源计划与卷纲/状态卡有冲突，以资源计划为准。\n"
+      : "";
     const moodDirective = this.extractMoodDirectiveFromIntentMarkdown(sanitizedChapterIntent);
     const modeLockBlock = this.buildFirstPassModeLockBlock(moodDirective, params.language ?? "zh");
     const moodDirectiveBlock = this.buildMoodDirectiveBlock(moodDirective, params.language ?? "zh");
-    const endingTypeDirectiveBlock = this.buildEndingTypeDirectiveBlock(sanitizedChapterIntent, params.language ?? "zh");
     const characterAuthenticityBlock = this.buildCharacterAuthenticityBlock(params.language ?? "zh");
-    const payoffDirectiveBlock = this.buildPayoffDirectiveBlock(params.contextPackage.chapterGoal, params.language ?? "zh");
+    const payoffSuppression = this.detectIntentPayoffSuppression(sanitizedChapterIntent);
+    const endingTypeDirectiveBlock = this.buildEndingTypeDirectiveBlock(
+      sanitizedChapterIntent,
+      params.language ?? "zh",
+      payoffSuppression,
+    );
+    const chapterIntentPriorityNotice = this.buildChapterIntentPriorityNotice(
+      sanitizedChapterIntent,
+      payoffSuppression,
+      params.language ?? "zh",
+    );
+    const payoffDirectiveBlock = this.buildPayoffDirectiveBlock(
+      params.contextPackage.chapterGoal,
+      params.language ?? "zh",
+      payoffSuppression,
+    );
     const hookEmergenceDirectiveBlock = this.buildHookEmergenceDirectiveBlock({
       directive: this.extractHookEmergenceDirectiveFromIntentMarkdown(sanitizedChapterIntent),
       language: params.language ?? "zh",
@@ -1965,6 +2360,17 @@ ${hint}
       return `Write chapter ${params.chapterNumber}.
 ${modeLockBlock}
 ${retryHintBlock}
+
+## Chapter Intent Execution Contract
+- Chapter intent is the highest-priority constraint for this chapter.
+- You MUST write according to the chapter intent below.
+- You may invent local sensory details and line-level actions, but you MUST NOT change the chapter goal, obstacle, antagonist pressure, climax, ending hook, or character-behavior constraints.
+- The chapter intent fields that cannot be overridden are: protagonist goal, obstacle dilemma, antagonist pressure, solution method, action climax, ending feedback, next-chapter hook, character-behavior constraints, and writing execution reminders.
+- If planner intent, payoffDirective, Hook Agenda, or outline node conflicts with chapter intent, chapter intent wins.
+- Legacy planner intent is auxiliary material only; it may not deepen the chapter beyond the chapter intent.
+- If any selected context appears to conflict with the chapter intent, preserve hard canon facts and follow the non-conflicting chapter intent.
+${chapterIntentPriorityNotice}
+${resourcePlanPriorityBlock}${resourcePlanBlock}
 
 ## Chapter Intent
 ${sanitizedChapterIntent}
@@ -2001,6 +2407,17 @@ ${lengthRequirementBlock}
     return `请续写第${params.chapterNumber}章。
 ${modeLockBlock}
 ${retryHintBlock}
+
+## 章节意图执行契约
+- chapter_intent 是本章最高优先级约束。
+- 必须按照下方 chapter_intent 写正文。
+- 可以在局部画面、动作和感官细节上发挥，但不得改变本章目标、阻碍、反派压力、行动高潮、结尾钩子和人物行为约束。
+- 不得被覆盖的字段包括：本章主角目标、本章阻碍困境、本章反派压力、本章解决方法、本章行动高潮、本章结局反馈、下一章钩子、人物行为约束、写作执行提醒。
+- 如果 planner intent、payoffDirective、Hook Agenda 或 outline node 与 chapter_intent 冲突，以 chapter_intent 为准。
+- 旧 planner intent 只能作为辅助素材，不能改变 chapter_intent 规定的推进深度。
+- 如果已选上下文与 chapter_intent 局部冲突，保留硬设定事实，并执行不冲突的 chapter_intent。
+${chapterIntentPriorityNotice}
+${resourcePlanPriorityBlock}${resourcePlanBlock}
 
 ## 本章意图
 ${sanitizedChapterIntent}
@@ -2044,13 +2461,14 @@ ${lengthRequirementBlock}
   private buildEndingTypeDirectiveBlock(
     chapterIntent: string | undefined,
     language: "zh" | "en",
+    payoffSuppression: IntentPayoffSuppression = { suppressPayoff: false },
   ): string {
     const endingType = this.extractEndingTypeFromIntentMarkdown(chapterIntent);
     if (!endingType) {
       return "";
     }
 
-    const hasPromisedPayoff = this.hasPromisedPayoffInIntent(chapterIntent);
+    const hasPromisedPayoff = !payoffSuppression.suppressPayoff && this.hasPromisedPayoffInIntent(chapterIntent);
 
     if (language === "en") {
       return [
@@ -2137,6 +2555,192 @@ ${lengthRequirementBlock}
     }
     const match = section.match(/-\s*payoffToDeliver:\s*(.+)/i)?.[1]?.trim();
     return Boolean(match && match.toLowerCase() !== "none");
+  }
+
+  private detectIntentPayoffSuppression(chapterIntent: string | undefined): IntentPayoffSuppression {
+    return detectIntentPayoffSuppression(chapterIntent);
+  }
+
+  private buildChapterIntentPriorityNotice(
+    chapterIntent: string | undefined,
+    payoffSuppression: IntentPayoffSuppression,
+    language: "zh" | "en",
+  ): string {
+    if (!chapterIntent || !payoffSuppression.suppressPayoff) {
+      return "";
+    }
+
+    if (language === "en") {
+      return [
+        "",
+        "## Highest-Priority Conflict Handling",
+        "- chapter_intent explicitly limits payoff materialization in this chapter.",
+        `- Reason: ${payoffSuppression.reason ?? "intent limits payoff depth"}`,
+        "- Legacy payoffDirective is downgraded to deferred material or a faint hint only.",
+        "- Do not force a complete payoff, resource gain, reveal, skill unlock, major clue, or severe compensating cost.",
+        "- Use only the ending feedback and next hook specified by chapter_intent.",
+      ].join("\n");
+    }
+
+    return [
+      "",
+      "## 最高优先级冲突处理",
+      "- chapter_intent 明确限制本章不得完整兑现 payoff。",
+      `- 原因：${payoffSuppression.reason ?? "intent 限制 payoff 深度"}`,
+      "- 旧 payoffDirective 降级为“后续伏笔或轻微暗示”。",
+      "- 不得强行完整兑现 payoff，不得发放资源收益、完整揭示、技能解锁、重大线索或补偿性严重代价。",
+      "- 本章只能按照 chapter_intent 的结局反馈与下一章钩子推进。",
+    ].join("\n");
+  }
+
+  private detectChapterIntentDeviationWarnings(params: {
+    readonly content: string;
+    readonly chapterIntent?: string;
+    readonly payoffSuppression: IntentPayoffSuppression;
+    readonly language: "zh" | "en";
+  }): ReadonlyArray<PostWriteViolation> {
+    if (!params.payoffSuppression.suppressPayoff || !params.chapterIntent?.trim()) {
+      return [];
+    }
+
+    const matched = this.findChapterIntentDriftPattern(params.content);
+    if (!matched) {
+      return [];
+    }
+
+    return [{
+      rule: "chapter-intent-drift",
+      severity: "warning",
+      description: params.language === "en"
+        ? "Chapter appears to drift from chapter_intent: early payoff or over-advancement was detected."
+        : "正文疑似偏离 chapter_intent：检测到提前兑现或过度推进。",
+      suggestion: params.language === "en"
+        ? "Keep the chapter at the intent-specified payoff depth and ending hook."
+        : "保持 chapter_intent 指定的兑现深度和结尾钩子，不要被旧 payoffDirective 带偏。",
+    }];
+  }
+
+  private findChapterIntentDriftPattern(content: string): RegExp | undefined {
+    return PAYOFF_DRIFT_PATTERNS.find((pattern) => {
+      const flags = pattern.flags.replace(/g/g, "");
+      return new RegExp(pattern.source, flags).test(content);
+    });
+  }
+
+  private async rewriteChapterIntentDriftIfNeeded(params: {
+    creative: {
+      title: string;
+      content: string;
+      wordCount: number;
+      preWriteCheck: string;
+    };
+    chapterIntent?: string;
+    payoffSuppression: IntentPayoffSuppression;
+    language: "zh" | "en";
+    chapterNumber: number;
+    maxTokens: number;
+    countingMode: LengthSpec["countingMode"];
+    onUsage: (usage: TokenUsage) => void;
+  }): Promise<{
+    title: string;
+    content: string;
+    wordCount: number;
+    preWriteCheck: string;
+  }> {
+    const driftPattern = this.findChapterIntentDriftPattern(params.creative.content);
+    if (!params.payoffSuppression.suppressPayoff || !driftPattern) {
+      return params.creative;
+    }
+
+    this.logWarn(params.language, {
+      zh: `正文疑似偏离 chapter_intent：检测到提前兑现或过度推进，尝试定向修正（第${params.chapterNumber}章）`,
+      en: `Chapter appears to drift from chapter_intent; attempting targeted repair (chapter ${params.chapterNumber})`,
+    });
+
+    const response = await this.chat(
+      [
+        {
+          role: "system",
+          content: params.language === "en"
+            ? "You are a targeted chapter-intent repair editor. Remove early payoff/over-advancement. Preserve prose, continuity, and emotional beats. The chapter must stop at the chapter_intent hook."
+            : "你是 chapter_intent 定向修正编辑。删除提前兑现和过度推进，保留正文质感、连续性与情绪节拍。章节必须停在 chapter_intent 指定钩子。",
+        },
+        {
+          role: "user",
+          content: params.language === "en"
+            ? [
+                `Rewrite chapter ${params.chapterNumber} to obey chapter_intent.`,
+                "",
+                "## chapter_intent",
+                params.chapterIntent ?? "(none)",
+                "",
+                "## Hard Repair Rules",
+                "- Delete any complete payoff, escape clue, hidden money/location, skill unlock, full truth, severe compensating cost, or equivalent over-advancement.",
+                "- Do not add a replacement major benefit or major cost.",
+                "- Stop at system binding / panel appearance / the hook specified by chapter_intent.",
+                "",
+                "## Original Title",
+                params.creative.title,
+                "",
+                "## Original Content",
+                params.creative.content,
+                "",
+                "Output only PRE_WRITE_CHECK, CHAPTER_TITLE, and CHAPTER_CONTENT blocks.",
+              ].join("\n")
+            : [
+                `请修正第${params.chapterNumber}章，使其服从 chapter_intent。`,
+                "",
+                "## chapter_intent",
+                params.chapterIntent ?? "(无)",
+                "",
+                "## 硬修规则",
+                "- 删除任何完整 payoff、逃生线索、藏钱地址、技能解锁、完整真相、严重补偿性代价或同类过度推进。",
+                "- 不得添加替代性重大收益或重大代价。",
+                "- 结尾停在系统绑定/面板出现/chapter_intent 指定钩子。",
+                "",
+                "## 原标题",
+                params.creative.title,
+                "",
+                "## 原正文",
+                params.creative.content,
+                "",
+                "只输出 PRE_WRITE_CHECK、CHAPTER_TITLE、CHAPTER_CONTENT 三个区块。",
+              ].join("\n"),
+        },
+      ],
+      { maxTokens: params.maxTokens, temperature: 0.35 },
+    );
+    params.onUsage(response.usage);
+    const candidate = parseCreativeOutput(params.chapterNumber, response.content, params.countingMode);
+    if (!this.findChapterIntentDriftPattern(candidate.content)) {
+      return candidate;
+    }
+
+    const fallbackContent = this.removeChapterIntentDriftParagraphs(params.creative.content);
+    if (fallbackContent && !this.findChapterIntentDriftPattern(fallbackContent)) {
+      this.logWarn(params.language, {
+        zh: `chapter_intent 定向修正仍有偏移，已删除明显提前兑现段落（第${params.chapterNumber}章）`,
+        en: `Targeted chapter_intent repair still drifted; removed obvious over-advancement paragraphs (chapter ${params.chapterNumber})`,
+      });
+      return {
+        ...params.creative,
+        content: fallbackContent,
+        wordCount: countChapterLength(fallbackContent, params.countingMode),
+      };
+    }
+
+    this.logWarn(params.language, {
+      zh: `chapter_intent 定向修正后仍疑似偏移，保留当前版本并标记 WARN（第${params.chapterNumber}章）`,
+      en: `Targeted chapter_intent repair still appears drifted; keeping current version with WARN (chapter ${params.chapterNumber})`,
+    });
+    return params.creative;
+  }
+
+  private removeChapterIntentDriftParagraphs(content: string): string {
+    const paragraphs = content.split(/\n{2,}/u);
+    const kept = paragraphs.filter((paragraph) => !this.findChapterIntentDriftPattern(paragraph));
+    const cleaned = kept.join("\n\n").trim();
+    return cleaned || "系统绑定提示音响起。面板亮起，初始值归零，规则暂未展开。";
   }
 
   private async rewriteForEndingTypeIfNeeded(params: {
@@ -2579,6 +3183,7 @@ ${lengthRequirementBlock}
   private buildPayoffDirectiveBlock(
     chapterGoal: ChapterGoal | undefined,
     language: "zh" | "en",
+    payoffSuppression: IntentPayoffSuppression = { suppressPayoff: false },
   ): string {
     const payoffToDeliver = chapterGoal?.payoffToDeliver?.trim();
     const payoffDirective = chapterGoal?.payoffDirective;
@@ -2589,6 +3194,32 @@ ${lengthRequirementBlock}
     const payoffType = payoffDirective?.payoffType ?? "resource";
     const payoffDepth = payoffDirective?.payoffDepth ?? "layered";
     const mandatoryByFinalAct = payoffDirective?.mandatoryByFinalAct ?? true;
+
+    if (payoffSuppression.suppressPayoff) {
+      return language === "en"
+        ? [
+            "",
+            "## Payoff Directive Suppressed By Chapter Intent",
+            `- Legacy promisedPayoff: ${promisedPayoff}`,
+            `- Suppression reason: ${payoffSuppression.reason ?? "chapter intent limits payoff depth"}`,
+            "- The chapter intent has higher priority than payoffDirective.",
+            "- Treat the legacy payoff as deferred material or a faint hint only.",
+            "- Do NOT fully materialize this payoff in this chapter.",
+            "- Do NOT add new major benefits, new major information, new skills, or new severe costs to compensate.",
+            "- The chapter must end on the hook specified by chapter_intent.",
+          ].join("\n")
+        : [
+            "",
+            "## 最高优先级冲突处理",
+            `- 旧 promisedPayoff：${promisedPayoff}`,
+            `- 压制原因：${payoffSuppression.reason ?? "chapter_intent 限制本章 payoff 深度"}`,
+            "- chapter_intent 优先级高于 payoffDirective。",
+            "- 旧 payoffDirective 只能作为后续伏笔或轻微暗示。",
+            "- 本章不得强行完整兑现 payoff。",
+            "- 不得额外添加重大收益、重大情报、技能解锁或重大代价来补偿 payoff。",
+            "- 结尾必须停在 chapter_intent 指定的钩子上。",
+          ].join("\n");
+    }
 
     if (language === "en") {
       return [
@@ -2787,6 +3418,7 @@ ${lengthRequirementBlock}
       preWriteCheck: string;
     };
     chapterIntent?: string;
+    payoffSuppression?: IntentPayoffSuppression;
     chapterGoal?: ChapterGoal;
     language: "zh" | "en";
     chapterNumber: number;
@@ -2803,6 +3435,13 @@ ${lengthRequirementBlock}
   }> {
     const chapterGoal = params.chapterGoal;
     if (!chapterGoal || !chapterGoal.payoffToDeliver?.trim()) {
+      return params.creative;
+    }
+    if (params.payoffSuppression?.suppressPayoff) {
+      this.logWarn(params.language, {
+        zh: `Writer PAYOFF MODE skipped: chapter_intent suppresses payoff（第${params.chapterNumber}章，${params.payoffSuppression.reason ?? "本章不得完整兑现 payoff"}）`,
+        en: `Writer PAYOFF MODE skipped: chapter_intent suppresses payoff (chapter ${params.chapterNumber}, ${params.payoffSuppression.reason ?? "payoff must not be fully materialized in this chapter"})`,
+      });
       return params.creative;
     }
     const payoffDirective = chapterGoal.payoffDirective ?? {

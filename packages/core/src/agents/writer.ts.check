@@ -1,0 +1,461 @@
+import {
+  extractResourceEvents,
+  parseResourceRules,
+  validateResourceMath,
+  type ResourceEvent,
+  type ResourceRules,
+  type ResourceValidationResult,
+} from "./resource-consistency.js";
+
+export type ChapterResourcePlanMode = "normal" | "defer_exchange" | "cash_exchange_allowed" | "no_resource_change";
+
+export interface PlannedResourceEvent {
+  readonly order: number;
+  readonly kind: "gain" | "spend" | "unlock" | "exchange" | "balance_claim";
+  readonly resource: string;
+  readonly amount?: number;
+  readonly targetResource?: string;
+  readonly targetAmount?: number;
+  readonly skill?: string;
+  readonly reason: string;
+  readonly requiredInText: boolean;
+}
+
+export interface ChapterResourcePlan {
+  readonly chapter: number;
+  readonly mode: ChapterResourcePlanMode;
+  readonly source: "resource-engine";
+  readonly openingBalances: Readonly<Record<string, number>>;
+  readonly allowedEvents: ReadonlyArray<PlannedResourceEvent>;
+  readonly forbiddenEvents: ReadonlyArray<string>;
+  readonly expectedClosingBalances: Readonly<Record<string, number>>;
+  readonly unlockedSkills: ReadonlyArray<string>;
+  readonly resourceRules: ResourceRules;
+  readonly narrativeGuidance: ReadonlyArray<string>;
+  readonly blockingReason?: string;
+}
+
+export interface ResourcePlanTextScanResult {
+  readonly ok: boolean;
+  readonly violations: ReadonlyArray<string>;
+}
+
+export interface ChapterResourcePlanFinalValidation {
+  readonly passed: boolean;
+  readonly violations: ReadonlyArray<string>;
+  readonly missingRequiredEvents: ReadonlyArray<string>;
+  readonly forbiddenHits: ReadonlyArray<string>;
+  readonly expectedClosingBalances: Readonly<Record<string, number>>;
+  readonly actualClosingBalances: Readonly<Record<string, number>>;
+}
+
+const DEFER_EXCHANGE_FORBIDDEN_EVENTS = [
+  "兑换现金",
+  "兑换联邦币",
+  "100联邦币到账",
+  "1000联邦币到账",
+  "银行到账",
+  "手机到账",
+  "电子钱包",
+  "账户余额增加",
+  "一共1200联邦币",
+  "一共300联邦币",
+  "原来的200加上",
+  "刚兑换的一千",
+  "刚兑换的一百",
+  "扣掉这一千",
+  "资金缺口减少",
+  "透析费缺口缩小",
+  "房租压力暂时缓解",
+  "系统转账",
+  "匿名入账",
+  "路人转钱",
+  "路人打赏现金",
+  "合法劳务报酬到账",
+  "预支权限",
+  "透支",
+  "待还",
+  "负债",
+  "当前民望为负",
+  "新手临时预支权限",
+  "10民望兑换1000联邦币",
+  "10民望兑换现金",
+  "20民望同时兑换技能和现金",
+  "100民望换1000联邦币",
+  "1民望=100联邦币",
+] as const;
+
+const DEFER_EXCHANGE_VIOLATION_PATTERNS: ReadonlyArray<{ readonly label: string; readonly pattern: RegExp }> = [
+  { label: "正文出现现金兑换", pattern: /兑换(?:了)?(?:\s*\d+\s*)?(?:现金|联邦币)|换成(?:现金|联邦币)|换取(?:现金|联邦币)|\d+\s*(?:点)?民望(?:值)?兑换(?:了)?\s*\d+\s*联邦币/u },
+  { label: "正文出现到账/入账", pattern: /到账|入账|银行账户|电子钱包|系统转账|匿名入账|手机(?:里|账户|余额)/u },
+  { label: "正文出现1000联邦币或一千现金", pattern: /1000\s*(?:联邦币|现金|元)|一千(?:联邦币|现金|元)?|刚兑换的一千/u },
+  { label: "正文出现一共1200或一共300", pattern: /一共\s*(?:1200|300)|总共\s*(?:1200|300)|1200\s*联邦币|300\s*联邦币/u },
+  { label: "正文出现资金缺口减少", pattern: /资金缺口(?:减少|缩小|降到|少了)|透析费缺口(?:减少|缩小)|房租压力(?:暂时)?缓解|差额被扣减/u },
+  { label: "正文出现预支/透支/负债", pattern: /预支|透支|负债|待还|当前民望(?:值)?\s*[-－]\s*\d+|民望(?:值)?为负/u },
+  { label: "正文写错资源规则", pattern: /10\s*(?:点)?民望(?:值)?兑换\s*1000|10\s*(?:点)?民望(?:值)?兑换现金|20\s*(?:点)?民望(?:值)?[^。！？\n]{0,24}(?:技能|现金)[^。！？\n]{0,24}(?:技能|现金)|1\s*民望\s*[=:＝]\s*100\s*联邦币/u },
+];
+
+export function buildChapterResourcePlan(params: {
+  readonly chapter: number;
+  readonly bookRules: string;
+  readonly particleLedger: string;
+  readonly currentState: string;
+  readonly previousChapterSummary?: string;
+  readonly chapterGoal?: string;
+  readonly genre?: string;
+  readonly systemMode?: string;
+}): ChapterResourcePlan {
+  const resourceRules = parseResourceRules(params.bookRules, params.particleLedger, params.currentState);
+  const openingBalances = pickKnownBalances(resourceRules, ["民望值", "联邦币"]);
+  const hasCivicSystem = Object.hasOwn(resourceRules.resources, "民望值") && Object.hasOwn(resourceRules.resources, "联邦币");
+  const hasDebateSkillRule = resourceRules.skills.some((rule) => rule.skill.includes("初级辩论") && rule.resource === "民望值" && rule.amount === 10);
+  const firstTenSystemChapter = params.chapter === 2
+    && hasCivicSystem
+    && (hasDebateSkillRule || /初级辩论技能|汤姆|民望|联邦币/u.test([
+      params.bookRules,
+      params.currentState,
+      params.previousChapterSummary,
+      params.chapterGoal,
+    ].filter(Boolean).join("\n")));
+
+  if (!firstTenSystemChapter) {
+    return {
+      chapter: params.chapter,
+      mode: "no_resource_change",
+      source: "resource-engine",
+      openingBalances,
+      allowedEvents: [],
+      forbiddenEvents: [],
+      expectedClosingBalances: openingBalances,
+      unlockedSkills: [],
+      resourceRules,
+      narrativeGuidance: [
+        "本章未生成显式资源变化计划；如正文需要资源变化，必须仍服从 book_rules 与 particle_ledger。",
+      ],
+    };
+  }
+
+  const reputationOpening = openingBalances["民望值"] ?? 0;
+  const federalOpening = typeof openingBalances["联邦币"] === "number" ? openingBalances["联邦币"] : 200;
+  const expectedReputation = reputationOpening + 10 - 10 + 100;
+  const expectedClosingBalances = {
+    ...openingBalances,
+    民望值: expectedReputation,
+    联邦币: federalOpening,
+  };
+
+  return {
+    chapter: params.chapter,
+    mode: "defer_exchange",
+    source: "resource-engine",
+    openingBalances: {
+      ...openingBalances,
+      民望值: reputationOpening,
+      联邦币: federalOpening,
+    },
+    allowedEvents: [
+      { order: 1, kind: "balance_claim", resource: "民望值", amount: reputationOpening, reason: "本章期初民望值", requiredInText: false },
+      { order: 2, kind: "balance_claim", resource: "联邦币", amount: federalOpening, reason: "本章期初联邦币", requiredInText: false },
+      { order: 3, kind: "gain", resource: "民望值", amount: 10, reason: "林默扶老太太", requiredInText: true },
+      { order: 4, kind: "spend", resource: "民望值", amount: 10, reason: "兑换初级辩论技能", requiredInText: true },
+      { order: 5, kind: "unlock", resource: "技能", skill: "初级辩论技能", reason: "消耗10民望后解锁", requiredInText: true },
+      { order: 6, kind: "gain", resource: "民望值", amount: 100, reason: "围观路人认可", requiredInText: true },
+      { order: 7, kind: "balance_claim", resource: "民望值", amount: expectedReputation, reason: "本章结尾面板确认当前民望值", requiredInText: true },
+      { order: 8, kind: "balance_claim", resource: "联邦币", amount: federalOpening, reason: "本章结尾确认联邦币未变化", requiredInText: true },
+    ],
+    forbiddenEvents: [...DEFER_EXCHANGE_FORBIDDEN_EVENTS],
+    expectedClosingBalances,
+    unlockedSkills: ["初级辩论技能"],
+    resourceRules,
+    narrativeGuidance: [
+      "本章不兑换现金，不兑换联邦币，不减少资金缺口。",
+      "外婆透析费仍差2700，房租仍差800，总资金缺口仍是3500。",
+      "爽点来自当众怼回汤姆、路人开始相信林默、汤姆第一次吃瘪、系统面板显示民望值增加。",
+      "结尾留下下一章可通过民望兑换资源的希望，但不在本章兑现现金。",
+    ],
+  };
+}
+
+export function renderResourcePlanForPrompt(plan: ChapterResourcePlan, target: "chapter_intent" | "writer" = "chapter_intent"): string {
+  if (plan.mode === "no_resource_change") {
+    return [
+      "【本章资源计划，必须遵守】",
+      `mode: ${plan.mode}`,
+      "本章没有预设资源变化；不得擅自新增现金、余额、透支或规则改写。",
+    ].join("\n");
+  }
+
+  const allowed = plan.allowedEvents.map((event) => {
+    if (event.kind === "unlock") return `- 解锁 ${event.skill ?? event.resource}：${event.reason}`;
+    if (event.kind === "balance_claim") return `- 期末确认 ${event.resource}=${event.amount}`;
+    if (event.kind === "spend") return `- ${event.resource}-${event.amount}：${event.reason}`;
+    return `- ${event.resource}+${event.amount}：${event.reason}`;
+  });
+  const closing = Object.entries(plan.expectedClosingBalances).map(([resource, amount]) => `${resource}=${amount}`).join("，");
+  const hardLine = target === "writer"
+    ? "【资源计划是硬约束，不是建议】"
+    : "【本章资源计划，必须遵守】";
+  const writerPayoff = target === "writer"
+    ? [
+        "",
+        "如果想体现爽感，爽点来自：当众怼回汤姆、路人开始相信林默、汤姆第一次吃瘪、系统面板显示民望值增加、主角第一次看见翻身的可能。",
+        "爽点不是现金到账。",
+      ].join("\n")
+    : "";
+
+  return [
+    hardLine,
+    `mode: ${plan.mode}`,
+    "本章允许：",
+    ...allowed,
+    `本章结尾：${closing}${plan.unlockedSkills.length ? `，已解锁${plan.unlockedSkills.join("、")}` : ""}`,
+    "本章禁止：",
+    "- 任何现金兑换",
+    "- 任何联邦币到账",
+    "- 任何资金缺口减少",
+    "- 任何临时透支/预支/负债",
+    "- 任何路人给钱、打赏现金、合法劳务报酬到账",
+    "- 任何“刚兑换的一千/一百”“一共1200/300”等现金兑现表述",
+    "本章叙事目标：",
+    ...plan.narrativeGuidance.map((line) => `- ${line}`),
+    writerPayoff,
+  ].filter(Boolean).join("\n");
+}
+
+export function validateIntentAgainstResourcePlan(intentText: string, plan: ChapterResourcePlan): ResourcePlanTextScanResult {
+  return scanTextAgainstResourcePlan(intentText, plan, "chapter_intent");
+}
+
+export function preScanTextAgainstResourcePlan(chapterText: string, plan: ChapterResourcePlan): ResourcePlanTextScanResult {
+  return scanTextAgainstResourcePlan(chapterText, plan, "writer");
+}
+
+export function sanitizeIntentAgainstResourcePlan(intentText: string, plan: ChapterResourcePlan): string {
+  if (plan.mode !== "defer_exchange") return intentText;
+  let sanitized = intentText;
+  const replacements: ReadonlyArray<[RegExp, string]> = [
+    [/本章[^。\n]*?(?:获得|到账|入账|兑换)[^。\n]*?(?:1000|一千|现金|联邦币)[^。\n]*?[。\n]/gu, "本章不兑现现金，只留下下一章可兑换现金的希望。\n"],
+    [/(?:缓解|减少|缩小)[^。\n]*?(?:透析费|房租|资金缺口)[^。\n]*?[。\n]/gu, "资金缺口仍在，透析费和房租压力不在本章解决。\n"],
+    [/10\s*(?:点)?民望(?:值)?兑换\s*1000\s*(?:联邦币|现金)/gu, "10民望兑换初级辩论技能"],
+    [/当前联邦币(?:增加|余额增加|变为|达到)[^。\n]*/gu, "联邦币保持200不变"],
+  ];
+  for (const [pattern, replacement] of replacements) {
+    sanitized = sanitized.replace(pattern, replacement);
+  }
+  if (!sanitized.includes("## Resource Plan Sanitized")) {
+    sanitized = [
+      sanitized.trimEnd(),
+      "",
+      "## Resource Plan Sanitized",
+      "- [warning] chapter-intent-resource-plan: intent 已按 Resource Plan 降级为 defer_exchange。",
+      "- 本章只允许：民望+10，消耗10民望兑换初级辩论技能，民望+100，期末民望值100，联邦币保持200不变。",
+      "- 本章不兑换现金，不产生到账/入账，不减少透析费、房租或总资金缺口；结尾只留下下一章希望。",
+    ].join("\n");
+  }
+  return sanitized.trimEnd() + "\n";
+}
+
+export function findResourcePlanViolations(text: string, plan: ChapterResourcePlan): string[] {
+  if (plan.mode !== "defer_exchange") return [];
+  const scanText = text
+    .replace(/(?:没有|不|未)(?:立刻|马上|在本章|本章)?兑换现金/gu, "")
+    .replace(/(?:没有|不|未)(?:立刻|马上|在本章|本章)?兑换联邦币/gu, "");
+  return DEFER_EXCHANGE_VIOLATION_PATTERNS
+    .filter((entry) => entry.pattern.test(scanText))
+    .map((entry) => entry.label);
+}
+
+export function validateResourceEngineAgainstPlan(params: {
+  readonly text: string;
+  readonly validation: ResourceValidationResult;
+  readonly plan: ChapterResourcePlan;
+}): string[] {
+  return [...validateTextAgainstChapterResourcePlanFinal({
+    text: params.text,
+    plan: params.plan,
+    validation: params.validation,
+  }).violations];
+}
+
+export function validateTextAgainstChapterResourcePlanFinal(params: {
+  readonly text: string;
+  readonly plan?: ChapterResourcePlan;
+  readonly validation?: ResourceValidationResult;
+}): ChapterResourcePlanFinalValidation {
+  const plan = params.plan;
+  if (!plan || plan.mode === "no_resource_change") {
+    return {
+      passed: true,
+      violations: [],
+      missingRequiredEvents: [],
+      forbiddenHits: [],
+      expectedClosingBalances: {},
+      actualClosingBalances: {},
+    };
+  }
+
+  const validation = params.validation ?? buildValidationFromText(params.text, plan);
+  const expectedClosingBalances = plan.expectedClosingBalances;
+  const explicitBalanceClaims = extractExplicitBalanceClaims(params.text, Object.keys(expectedClosingBalances));
+  const actualClosingBalances: Record<string, number> = {
+    ...plan.openingBalances,
+    ...validation.closingBalances,
+    ...explicitBalanceClaims,
+  };
+  const forbiddenHits = findResourcePlanViolations(params.text, plan);
+  const missingRequiredEvents = findMissingRequiredEvents(params.text, validation.events, plan);
+  const violations: string[] = [...forbiddenHits, ...missingRequiredEvents];
+
+  for (const [resource, expected] of Object.entries(expectedClosingBalances)) {
+    const actual = actualClosingBalances[resource] ?? plan.openingBalances[resource] ?? 0;
+    if (actual !== expected) {
+      violations.push(`closingBalances ${resource} expected ${expected}, actual ${actual}`);
+    }
+  }
+
+  for (const issue of validation.issues) {
+    if (issue.code === "balance-mismatch") {
+      if (issue.actual !== undefined && issue.expected !== undefined) {
+        violations.push(`closingBalances ${issue.resource} expected ${issue.expected}, actual ${issue.actual}`);
+      }
+      violations.push(`${issue.resource} balance claim mismatch: expected ${issue.expected}, actual ${issue.actual}`);
+    }
+  }
+
+  if (plan.mode === "defer_exchange") {
+    if (/(?:当前|现在|此刻)?\s*民望值?\s*[：:=为是]\s*0(?:\D|$)|民望(?:值)?归零|当前民望归零/u.test(params.text)) {
+      violations.push("defer_exchange 结尾不得显示当前民望值0");
+    }
+    if (!/(当前|现在|此刻)?\s*民望值?\s*(?:=|＝|：|:|为|是|剩余|余额)?\s*100(?:点)?/u.test(params.text)) {
+      violations.push("defer_exchange 缺少期末当前民望值100");
+    }
+    if (/联邦币\s*(?:[+＋]|增加|涨到|变成|达到)|(?:到账|入账)[^。！？\n]{0,20}联邦币/u.test(params.text)) {
+      violations.push("defer_exchange 联邦币不能增加");
+    }
+  }
+
+  return {
+    passed: violations.length === 0,
+    violations: [...new Set(violations)],
+    missingRequiredEvents: [...new Set(missingRequiredEvents)],
+    forbiddenHits: [...new Set(forbiddenHits)],
+    expectedClosingBalances,
+    actualClosingBalances,
+  };
+}
+
+export function applyResourcePlanExpectedBalances(
+  validation: ResourceValidationResult,
+  plan?: ChapterResourcePlan,
+): ResourceValidationResult {
+  if (!plan || plan.mode === "no_resource_change") return validation;
+  const events = [...validation.events];
+  for (const [resource, expected] of Object.entries(plan.expectedClosingBalances)) {
+    if (!events.some((event) => event.resource === resource && (event.kind === "gain" || event.kind === "consume" || event.kind === "balance_jump"))) {
+      events.push({
+        kind: "gain",
+        resource,
+        amount: 0,
+        evidence: `Resource Plan: ${resource} remains ${expected}`,
+        index: Number.MAX_SAFE_INTEGER - events.length,
+        reason: "resource-plan-no-change",
+        confidence: 1,
+      });
+    }
+  }
+  return {
+    ...validation,
+    events,
+    openingBalances: { ...plan.openingBalances, ...validation.openingBalances },
+    closingBalances: { ...plan.openingBalances, ...validation.closingBalances, ...plan.expectedClosingBalances },
+    unlockedSkills: [...new Set([...validation.unlockedSkills, ...plan.unlockedSkills])],
+  };
+}
+
+function scanTextAgainstResourcePlan(text: string, plan: ChapterResourcePlan, target: "chapter_intent" | "writer"): ResourcePlanTextScanResult {
+  if (!text.trim() || plan.mode !== "defer_exchange") {
+    return { ok: true, violations: [] };
+  }
+  const violations = findResourcePlanViolations(text, plan);
+  if (target === "writer") {
+    if (!/(民望值?\s*[+＋]\s*10|获得\s*10\s*(?:点)?民望)/u.test(text)) {
+      violations.push("正文缺少民望+10");
+    }
+    if (!/初级辩论技能/u.test(text)) {
+      violations.push("正文缺少初级辩论技能");
+    }
+    if (!/(民望值?\s*[+＋]\s*100|获得\s*100\s*(?:点)?民望)/u.test(text)) {
+      violations.push("正文缺少民望+100");
+    }
+    if (!/(当前)?民望值?\s*(?:=|＝|：|为|是)?\s*100/u.test(text)) {
+      violations.push("正文缺少当前民望值100");
+    }
+  }
+  return { ok: violations.length === 0, violations: [...new Set(violations)] };
+}
+
+function pickKnownBalances(rules: ResourceRules, resources: ReadonlyArray<string>): Record<string, number> {
+  const balances: Record<string, number> = {};
+  for (const resource of resources) {
+    const rule = rules.resources[resource];
+    if (rule) balances[resource] = rule.initial;
+  }
+  return balances;
+}
+
+function buildValidationFromText(text: string, plan: ChapterResourcePlan): ResourceValidationResult {
+  const bookRules = [
+    "resourceTypes:",
+    ...Object.keys(plan.resourceRules.resources).map((resource) => `  - ${resource}`),
+  ].join("\n");
+  const currentLedger = Object.entries(plan.openingBalances)
+    .map(([resource, amount]) => `| ${resource} | ${amount} |`)
+    .join("\n");
+  return validateResourceMath({
+    events: extractResourceEvents(text, bookRules, currentLedger),
+    currentLedger,
+    rules: plan.resourceRules,
+    chapterText: text,
+  });
+}
+
+function findMissingRequiredEvents(
+  text: string,
+  events: ReadonlyArray<ResourceEvent>,
+  plan: ChapterResourcePlan,
+): string[] {
+  const missing: string[] = [];
+  for (const event of plan.allowedEvents.filter((candidate) => candidate.requiredInText)) {
+    if (event.kind === "gain" && !events.some((candidate) => candidate.kind === "gain" && candidate.resource === event.resource && candidate.amount === event.amount)) {
+      missing.push(`缺少 ${event.resource}+${event.amount}: ${event.reason}`);
+    } else if (event.kind === "spend" && !events.some((candidate) => candidate.kind === "consume" && candidate.resource === event.resource && candidate.amount === event.amount)) {
+      missing.push(`缺少 ${event.resource}-${event.amount}: ${event.reason}`);
+    } else if (event.kind === "unlock" && event.skill && !events.some((candidate) => candidate.kind === "unlock" && candidate.label === event.skill) && !text.includes(event.skill)) {
+      missing.push(`缺少解锁技能 ${event.skill}`);
+    } else if (event.kind === "balance_claim" && !hasBalanceClaim(text, event.resource, event.amount ?? Number.NaN)) {
+      missing.push(`缺少期末 ${event.resource}=${event.amount}`);
+    }
+  }
+  return missing;
+}
+
+function hasBalanceClaim(text: string, resource: string, amount: number): boolean {
+  if (!Number.isFinite(amount)) return false;
+  const escaped = resource.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:当前|现在|此刻)?\\s*${escaped.replace(/值$/u, "值?")}\\s*(?:=|＝|：|:|为|是|剩余|余额)?\\s*${amount}(?:点)?`, "u").test(text);
+}
+
+function extractExplicitBalanceClaims(text: string, resources: ReadonlyArray<string>): Record<string, number> {
+  const balances: Record<string, number> = {};
+  for (const resource of resources) {
+    const escaped = resource.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/值$/u, "值?");
+    const pattern = new RegExp(`(?:当前|现在|此刻|系统面板|面板)?[^。！？\\n]{0,16}${escaped}\\s*(?:=|＝|：|:|为|是|剩余|余额)?\\s*(-?\\d+)(?:点)?`, "gu");
+    for (const match of text.matchAll(pattern)) {
+      const value = Number.parseInt(match[1] ?? "", 10);
+      if (Number.isFinite(value)) {
+        balances[resource] = value;
+      }
+    }
+  }
+  return balances;
+}

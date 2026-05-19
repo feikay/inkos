@@ -8,6 +8,15 @@ import * as llmProvider from "../llm/provider.js";
 import { StateManager } from "../state/manager.js";
 import { ArchitectAgent } from "../agents/architect.js";
 import { PlannerAgent } from "../agents/planner.js";
+import { ChapterIntentAgent } from "../agents/chapter-intent.js";
+import {
+  applyIntentAlignmentHardScan,
+  INTENT_ALIGNMENT_DIMENSIONS,
+  IntentAlignmentReviewerAgent,
+  type IntentAlignmentReport,
+  type IntentAlignmentReviewInput,
+} from "../agents/intent-alignment-reviewer.js";
+import { ResourceBlockingRewriterAgent, ResourceConsistencyReviserAgent } from "../agents/resource-consistency.js";
 import { ComposerAgent } from "../agents/composer.js";
 import { WriterAgent, type WriteChapterOutput } from "../agents/writer.js";
 import { LengthNormalizerAgent } from "../agents/length-normalizer.js";
@@ -105,6 +114,33 @@ function createAnalyzedOutput(overrides: Partial<WriteChapterOutput> = {}): Writ
     updatedCharacterMatrix: "analyzed matrix",
     ...overrides,
   });
+}
+
+function createIntentAlignmentReport(
+  input: IntentAlignmentReviewInput,
+  overrides: Partial<IntentAlignmentReport> = {},
+): IntentAlignmentReport {
+  const dimensions = Object.fromEntries(INTENT_ALIGNMENT_DIMENSIONS.map((dimension) => [dimension, 90])) as IntentAlignmentReport["dimensions"];
+  const dimensionConclusions = Object.fromEntries(
+    INTENT_ALIGNMENT_DIMENSIONS.map((dimension) => [dimension, "符合 chapter_intent。"]),
+  ) as IntentAlignmentReport["dimensionConclusions"];
+  const {
+    dimensions: overrideDimensions,
+    dimensionConclusions: overrideConclusions,
+    ...restOverrides
+  } = overrides;
+  return {
+    chapter: input.chapter,
+    status: "PASS",
+    score: 90,
+    issues: [],
+    suggestions: [],
+    intentPath: input.intentPath,
+    chapterPath: input.chapterPath,
+    ...restOverrides,
+    dimensions: { ...dimensions, ...overrideDimensions },
+    dimensionConclusions: { ...dimensionConclusions, ...overrideConclusions },
+  };
 }
 
 function createStateCard(params: {
@@ -218,6 +254,45 @@ describe("PipelineRunner", () => {
     vi.spyOn(StateValidatorAgent.prototype, "validate").mockResolvedValue({
       warnings: [],
       passed: true,
+    });
+    vi.spyOn(ChapterIntentAgent.prototype, "generate").mockImplementation(async (input) => {
+      const runtimeDir = join(input.bookDir, "story", "runtime", "chapter-intents");
+      await mkdir(runtimeDir, { recursive: true });
+      const runtimePath = join(runtimeDir, `${String(input.chapterNumber).padStart(4, "0")}.md`);
+      const content = [
+        `# 第${input.chapterNumber}章 Chapter Intent`,
+        "",
+        "## 旧版 planner intent",
+        input.plannerIntent ?? "(无)",
+        "",
+      ].join("\n");
+      await writeFile(runtimePath, content, "utf-8");
+      return { chapterNumber: input.chapterNumber, content, runtimePath };
+    });
+    vi.spyOn(IntentAlignmentReviewerAgent.prototype, "review").mockImplementation(async (input) => {
+      if (!input.intentMarkdown?.trim()) {
+        return createIntentAlignmentReport(input, {
+          status: "MISSING_INTENT",
+          score: null,
+          issues: [{
+            severity: "warning",
+            dimension: "missing_intent",
+            message: "chapter_intent 缺失，无法判断最终正文是否符合预写意图。",
+          }],
+        });
+      }
+      if (!input.chapterContent?.trim()) {
+        return createIntentAlignmentReport(input, {
+          status: "MISSING_CHAPTER",
+          score: null,
+          issues: [{
+            severity: "critical",
+            dimension: "missing_chapter",
+            message: "最终正文缺失，无法执行 intent alignment 审核。",
+          }],
+        });
+      }
+      return createIntentAlignmentReport(input);
     });
   });
 
@@ -1224,7 +1299,7 @@ describe("PipelineRunner", () => {
   });
 
   it("logs explicit stage messages during book initialization", async () => {
-    const { logger, infos } = createCaptureLogger();
+    const { logger, infos, warnings } = createCaptureLogger();
     const { root, runner, state, bookId } = await createRunnerFixture({ logger });
     const book = await state.loadBookConfig(bookId);
 
@@ -1418,6 +1493,820 @@ describe("PipelineRunner", () => {
       const writeInput = writeChapter.mock.calls[0]?.[0];
       expect(writeInput?.chapterIntent).toContain("# Chapter Intent");
       expect(writeInput?.contextPackage?.selectedContext.length).toBeGreaterThan(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("generates and persists a chapter_intent card before writeNextChapter writes prose", async () => {
+    vi.mocked(ChapterIntentAgent.prototype.generate).mockRestore();
+    const { logger, infos, warnings } = createCaptureLogger();
+    const { root, runner, state, bookId } = await createRunnerFixture({
+      inputGovernanceMode: "v2",
+      logger,
+    });
+    const storyDir = join(state.bookDir(bookId), "story");
+
+    await Promise.all([
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n\n主角不能违背师债。", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 1\n追查商会账册。", "utf-8"),
+      writeFile(join(storyDir, "book_rules.md"), "# Book Rules\n\n系统不能免费开挂。", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# Current State\n\n- 当前目标：拿到账册。", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n\n- 上一章玉牌发热。", "utf-8"),
+      writeFile(join(storyDir, "genre_architecture.md"), "# Genre Architecture\n\n升级爽点来自制度压迫反打。", "utf-8"),
+      writeFile(join(storyDir, "world_engine.md"), "# world_engine\n\n资源稀缺会逼迫主角付出代价。", "utf-8"),
+      writeFile(join(storyDir, "antagonist_map.md"), "# antagonist_map\n\n商会执事用账册设局。", "utf-8"),
+      writeFile(join(storyDir, "motivation_matrix.md"), "# motivation_matrix\n\n主角救人前必须先判断师债收益。", "utf-8"),
+      writeFile(join(storyDir, "first_10_chapter_plan.md"), "| 章节 | 规划 |\n| 1 | 第一章公开羞辱后拿到账册线索 |\n", "utf-8"),
+      writeFile(join(storyDir, "current_focus.md"), "# Current Focus\n\n第一章要压住追读钩子。", "utf-8"),
+      writeFile(join(storyDir, "character_matrix.md"), "# Character Matrix\n\n林越：谨慎但记仇。", "utf-8"),
+      writeFile(join(storyDir, "emotional_arcs.md"), "# Emotional Arcs\n\n羞辱 -> 忍耐 -> 反打。", "utf-8"),
+      writeFile(join(storyDir, "subplot_board.md"), "# Subplot Board\n\n商会支线活跃。", "utf-8"),
+    ]);
+
+    const generatedIntent = [
+      "# 第1章 Chapter Intent",
+      "",
+      "## 1. 本章承接",
+      "- 上一章结尾钩子：玉牌发热",
+      "",
+      "## 2. 本章情绪事件",
+      "- 开场情绪：压迫",
+      "",
+      "## 3. 本章主角目标",
+      "- 表层目标：拿到账册线索",
+      "",
+      "## 4. 本章阻碍困境",
+      "- 具体阻碍：商会执事设局",
+      "",
+      "## 5. 本章反派压力",
+      "- 本章出场或间接施压的反派：商会执事",
+      "",
+      "## 7. 本章行动高潮",
+      "- 高潮场景：当众反打",
+      "",
+      "## 8. 本章结局反馈",
+      "- 系统初始民望值为0，仅触发绑定，不直接发放任何福利。",
+      "",
+      "## 9. 下一章钩子",
+      "- 结尾画面：账册缺了一页",
+      "",
+      "## 10. 人物行为约束",
+      "- 主角本章不能违背：师债收益逻辑",
+      "",
+    ].join("\n");
+    const chatCompletion = vi.spyOn(llmProvider, "chatCompletion").mockResolvedValue({
+      content: generatedIntent,
+      usage: ZERO_USAGE,
+    });
+    const writeChapter = vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
+      createWriterOutput({
+        chapterNumber: 1,
+        content: "Governed pipeline draft.",
+        wordCount: "Governed pipeline draft.".length,
+      }),
+    );
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(
+      createAuditResult({
+        passed: true,
+        issues: [],
+        summary: "clean",
+      }),
+    );
+
+    try {
+      await runner.writeNextChapter(bookId, 220);
+
+      const userPrompt = chatCompletion.mock.calls[0]?.[2]?.find((message) => message.role === "user")?.content ?? "";
+      expect(chatCompletion.mock.calls[0]?.[3]?.stage).toBe("chapter-intent");
+      expect(userPrompt).toContain("world_engine.md");
+      expect(userPrompt).toContain("antagonist_map.md");
+      expect(userPrompt).toContain("motivation_matrix.md");
+      expect(userPrompt).toContain("first_10_chapter_plan.md");
+      expect(userPrompt).toContain("current_focus.md");
+      expect(userPrompt).toContain("情绪事件");
+      expect(userPrompt).toContain("欲望目标");
+      expect(userPrompt).toContain("第一章公开羞辱后拿到账册线索");
+      expect(userPrompt).toContain("黄金三章");
+
+      const intentPath = join(storyDir, "runtime", "chapter-intents", "0001.md");
+      await expect(stat(intentPath)).resolves.toBeTruthy();
+      await expect(readFile(intentPath, "utf-8")).resolves.toContain("账册缺了一页");
+
+      const writeInput = writeChapter.mock.calls[0]?.[0];
+      expect(writeInput?.chapterIntent).toContain("账册缺了一页");
+      expect(writeInput?.chapterIntent).toContain("人物行为约束");
+      expect(writeInput?.contextPackage?.chapterGoal?.payoffToDeliver).toContain("chapter_intent 已抑制旧 payoff");
+      expect(writeInput?.contextPackage?.chapterGoal?.payoffDirective).toBeUndefined();
+      expect(infos).toEqual(expect.arrayContaining([
+        "阶段 0：生成章节意图卡（第1章）",
+        "章节意图卡已写入：story/runtime/chapter-intents/0001.md",
+      ]));
+      expect(warnings).toEqual(expect.arrayContaining([
+        expect.stringContaining("chapter_intent suppresses planner payoff; payoffDirective sanitized"),
+      ]));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses a fallback chapter_intent when intent generation fails and continues writeNextChapter", async () => {
+    vi.mocked(ChapterIntentAgent.prototype.generate).mockRestore();
+    const { logger, warnings } = createCaptureLogger();
+    const { root, runner, state, bookId } = await createRunnerFixture({
+      inputGovernanceMode: "v2",
+      logger,
+    });
+    const storyDir = join(state.bookDir(bookId), "story");
+
+    await Promise.all([
+      writeFile(join(storyDir, "current_focus.md"), "# Current Focus\n\n商会路线优先。", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 1\nTrack the merchant guild trail.\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# Current State\n\n- Current Goal: find the ledger.\n", "utf-8"),
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n\n- The jade seal cannot be destroyed.\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n\n- Why the mentor vanished.\n", "utf-8"),
+      writeFile(join(storyDir, "first_10_chapter_plan.md"), "| 1 | 第一章查商会账册 |\n", "utf-8"),
+      writeFile(join(storyDir, "world_engine.md"), "# world_engine\n\n资源稀缺。", "utf-8"),
+      writeFile(join(storyDir, "antagonist_map.md"), "# antagonist_map\n\n商会执事施压。", "utf-8"),
+      writeFile(join(storyDir, "motivation_matrix.md"), "# motivation_matrix\n\n林越不能无故救人。", "utf-8"),
+    ]);
+
+    vi.spyOn(llmProvider, "chatCompletion").mockRejectedValue(new Error("intent llm unavailable"));
+    const writeChapter = vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
+      createWriterOutput({
+        chapterNumber: 1,
+        content: "Governed pipeline draft.",
+        wordCount: "Governed pipeline draft.".length,
+      }),
+    );
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(
+      createAuditResult({
+        passed: true,
+        issues: [],
+        summary: "clean",
+      }),
+    );
+
+    try {
+      await runner.writeNextChapter(bookId, 220);
+
+      const intentPath = join(storyDir, "runtime", "chapter-intents", "0001.md");
+      const fallback = await readFile(intentPath, "utf-8");
+      expect(fallback).toContain("本文件为 fallback 生成");
+      expect(fallback).toContain("第一章查商会账册");
+      expect(fallback).toContain("简单六步结构");
+      expect(writeChapter).toHaveBeenCalledTimes(1);
+      expect(writeChapter.mock.calls[0]?.[0].chapterIntent).toContain("本文件为 fallback 生成");
+      expect(warnings).toEqual(expect.arrayContaining([
+        "章节意图卡生成失败，使用 fallback intent",
+      ]));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("runs intent alignment after final prose and writes markdown/json reports without blocking ready-for-review", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({ inputGovernanceMode: "legacy" });
+    const review = vi.mocked(IntentAlignmentReviewerAgent.prototype.review);
+    const writeChapter = vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
+      createWriterOutput({
+        chapterNumber: 1,
+        content: "林越拿到账册线索，商会执事施压，结尾账册缺了一页。",
+        wordCount: 30,
+      }),
+    );
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(createAuditResult({ passed: true, issues: [] }));
+
+    try {
+      const result = await runner.writeNextChapter(bookId, 220);
+
+      expect(writeChapter).toHaveBeenCalledTimes(1);
+      expect(review).toHaveBeenCalledTimes(1);
+      expect(result.status).toBe("ready-for-review");
+      const reportDir = join(state.bookDir(bookId), "reviews", "intent-alignment");
+      const json = JSON.parse(await readFile(join(reportDir, "0001.report.json"), "utf-8")) as IntentAlignmentReport;
+      const markdown = await readFile(join(reportDir, "0001.report.md"), "utf-8");
+      expect(json.status).toBe("PASS");
+      expect(Object.keys(json.dimensions).sort()).toEqual([...INTENT_ALIGNMENT_DIMENSIONS].sort());
+      expect(markdown).toContain("# 第1章 Intent Alignment Report");
+      expect(markdown).toContain("goal_alignment");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("adds WARN intent alignment issues to chapter auditIssues without blocking persistence", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({ inputGovernanceMode: "legacy" });
+    vi.mocked(IntentAlignmentReviewerAgent.prototype.review).mockImplementation(async (input) => createIntentAlignmentReport(input, {
+      status: "WARN",
+      score: 78,
+      dimensions: { ending_hook_alignment: 70 } as Partial<IntentAlignmentReport["dimensions"]> as IntentAlignmentReport["dimensions"],
+      issues: [{
+        severity: "warning",
+        dimension: "ending_hook_alignment",
+        message: "正文结尾钩子略弱。",
+        suggestion: "加强下一章拉力。",
+      }],
+    }));
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(createWriterOutput({ chapterNumber: 1, content: "正文。", wordCount: 3 }));
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(createAuditResult({ passed: true, issues: [] }));
+
+    try {
+      const result = await runner.writeNextChapter(bookId, 220);
+      const index = await state.loadChapterIndex(bookId);
+
+      expect(result.status).toBe("ready-for-review");
+      expect(index[0]?.auditIssues).toEqual(expect.arrayContaining([
+        "[warning] 正文结尾钩子略弱。",
+      ]));
+      const report = JSON.parse(await readFile(join(state.bookDir(bookId), "reviews", "intent-alignment", "0001.report.json"), "utf-8")) as IntentAlignmentReport;
+      expect(report.status).toBe("WARN");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps FAIL_REPORT_ONLY intent alignment non-blocking", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({ inputGovernanceMode: "legacy" });
+    vi.mocked(IntentAlignmentReviewerAgent.prototype.review).mockImplementation(async (input) => createIntentAlignmentReport(input, {
+      status: "FAIL_REPORT_ONLY",
+      score: 55,
+      dimensions: { climax_payoff_alignment: 40 } as Partial<IntentAlignmentReport["dimensions"]> as IntentAlignmentReport["dimensions"],
+      issues: [{
+        severity: "critical",
+        dimension: "climax_payoff_alignment",
+        message: "正文提前兑现了下一章 payoff。",
+      }],
+    }));
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(createWriterOutput({ chapterNumber: 1, content: "正文。", wordCount: 3 }));
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(createAuditResult({ passed: true, issues: [] }));
+
+    try {
+      const result = await runner.writeNextChapter(bookId, 220);
+      const index = await state.loadChapterIndex(bookId);
+
+      expect(result.status).toBe("ready-for-review");
+      expect(index[0]?.auditIssues).toEqual(expect.arrayContaining([
+        "[critical] 正文提前兑现了下一章 payoff。",
+      ]));
+      await expect(stat(join(state.bookDir(bookId), "chapters"))).resolves.toBeTruthy();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("writes a SKIPPED intent alignment report when reviewer fails and still saves the chapter", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({ inputGovernanceMode: "legacy" });
+    vi.mocked(IntentAlignmentReviewerAgent.prototype.review).mockRejectedValue(new Error("reviewer unavailable"));
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(createWriterOutput({ chapterNumber: 1, content: "正文。", wordCount: 3 }));
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(createAuditResult({ passed: true, issues: [] }));
+
+    try {
+      const result = await runner.writeNextChapter(bookId, 220);
+      const report = JSON.parse(await readFile(join(state.bookDir(bookId), "reviews", "intent-alignment", "0001.report.json"), "utf-8")) as IntentAlignmentReport;
+
+      expect(result.status).toBe("ready-for-review");
+      expect(report.status).toBe("SKIPPED");
+      expect(report.score).toBeNull();
+      expect(report.issues[0]?.dimension).toBe("reviewer_failed");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("writes a MISSING_INTENT report when the chapter_intent file is absent", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({ inputGovernanceMode: "legacy" });
+    vi.mocked(ChapterIntentAgent.prototype.generate).mockResolvedValue({
+      chapterNumber: 1,
+      content: "# 第1章 Chapter Intent\n\n未落盘。",
+      runtimePath: join(state.bookDir(bookId), "story", "runtime", "chapter-intents", "0001.md"),
+    });
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(createWriterOutput({ chapterNumber: 1, content: "正文。", wordCount: 3 }));
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(createAuditResult({ passed: true, issues: [] }));
+
+    try {
+      await runner.writeNextChapter(bookId, 220);
+      const report = JSON.parse(await readFile(join(state.bookDir(bookId), "reviews", "intent-alignment", "0001.report.json"), "utf-8")) as IntentAlignmentReport;
+
+      expect(report.status).toBe("MISSING_INTENT");
+      expect(report.score).toBeNull();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("builds a MISSING_CHAPTER intent alignment report when final prose is absent", async () => {
+    const input: IntentAlignmentReviewInput = {
+      chapter: 1,
+      intentMarkdown: "# 第1章 Chapter Intent\n\n本章停在系统绑定。",
+      chapterContent: "",
+      intentPath: "story/runtime/chapter-intents/0001.md",
+      chapterPath: "chapters/0001_Test.md",
+    };
+    const report = await new IntentAlignmentReviewerAgent({
+      client: {} as ConstructorParameters<typeof IntentAlignmentReviewerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: process.cwd(),
+    }).review(input);
+
+    expect(report.status).toBe("MISSING_CHAPTER");
+    expect(report.score).toBeNull();
+    expect(Object.keys(report.dimensions).sort()).toEqual([...INTENT_ALIGNMENT_DIMENSIONS].sort());
+    expect(report.issues[0]?.dimension).toBe("missing_chapter");
+  });
+
+  it("hard scan flags PRE_WRITE_CHECK residue in intent alignment reports", () => {
+    const input: IntentAlignmentReviewInput = {
+      chapter: 1,
+      intentMarkdown: "# intent",
+      chapterContent: "正文\n\nPRE_WRITE_CHECK\n检查项表格",
+      intentPath: "story/runtime/chapter-intents/0001.md",
+      chapterPath: "chapters/0001_Test.md",
+    };
+    const report = applyIntentAlignmentHardScan(createIntentAlignmentReport(input), input);
+
+    expect(report.status).toBe("FAIL_REPORT_ONLY");
+    expect(report.dimensions.behavior_safety_alignment).toBeLessThanOrEqual(50);
+    expect(report.issues.some((issue) => issue.message.includes("非正文检查块"))).toBe(true);
+  });
+
+  it("hard scan caps climax payoff score when suppressed intent gets early payoff keywords", () => {
+    const input: IntentAlignmentReviewInput = {
+      chapter: 1,
+      intentMarkdown: "# intent\n\nsuppress=true\n本章不得完整兑现 payoff。",
+      chapterContent: "系统完整解锁，主角获得现金，还拿到明确逃生线索。",
+      intentPath: "story/runtime/chapter-intents/0001.md",
+      chapterPath: "chapters/0001_Test.md",
+    };
+    const report = applyIntentAlignmentHardScan(createIntentAlignmentReport(input), input);
+
+    expect(report.status).toBe("WARN");
+    expect(report.dimensions.climax_payoff_alignment).toBeLessThanOrEqual(60);
+    expect(report.issues.some((issue) => issue.dimension === "climax_payoff_alignment")).toBe(true);
+  });
+
+  it("hard scan allows Resource Plan skill unlock but still flags forbidden cash payoff", () => {
+    const resourcePlan = {
+      chapter: 2,
+      mode: "defer_exchange" as const,
+      source: "resource-engine" as const,
+      openingBalances: { 民望值: 0, 联邦币: 200 },
+      expectedClosingBalances: { 民望值: 100, 联邦币: 200 },
+      allowedEvents: [
+        { order: 1, kind: "unlock" as const, resource: "技能", skill: "初级辩论技能", reason: "plan allowed", requiredInText: true },
+        { order: 2, kind: "gain" as const, resource: "民望值", amount: 100, reason: "plan allowed", requiredInText: true },
+      ],
+      forbiddenEvents: ["本章禁止银行到账", "本章禁止现金兑换", "1000联邦币到账"],
+      unlockedSkills: ["初级辩论技能"],
+      resourceRules: { resources: {}, aliases: {}, exchangeRates: [], skills: [] },
+      narrativeGuidance: [],
+    };
+    const allowedInput: IntentAlignmentReviewInput = {
+      chapter: 2,
+      intentMarkdown: "# intent\n\nsuppress=true\n本章不得提前兑现 payoff。",
+      chapterContent: "系统提示：初级辩论技能兑换成功。围观路人认可，民望值+100。",
+      intentPath: "story/runtime/chapter-intents/0002.md",
+      chapterPath: "chapters/0002_Test.md",
+      resourcePlan,
+    };
+    const allowedReport = applyIntentAlignmentHardScan(createIntentAlignmentReport(allowedInput), allowedInput);
+    expect(allowedReport.issues.some((issue) => issue.dimension === "climax_payoff_alignment")).toBe(false);
+
+    const forbiddenInput: IntentAlignmentReviewInput = {
+      ...allowedInput,
+      chapterContent: "系统提示：银行到账1000联邦币。",
+    };
+    const forbiddenReport = applyIntentAlignmentHardScan(createIntentAlignmentReport(forbiddenInput), forbiddenInput);
+    expect(forbiddenReport.issues.some((issue) => issue.dimension === "climax_payoff_alignment")).toBe(true);
+  });
+
+  it("auto-repairs resource math before final chapter persistence and updates the ledger/state", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({ inputGovernanceMode: "legacy" });
+    const storyDir = join(state.bookDir(bookId), "story");
+    await Promise.all([
+      writeFile(join(storyDir, "book_rules.md"), "resourceTypes:\n  - 民望值\n  - 联邦币\n\n1点民望=10联邦币\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# 当前状态\n\n| 字段 | 值 |\n|---|---|\n| 当前资源 | 民望值=0；联邦币=200 |\n", "utf-8"),
+      writeFile(join(storyDir, "particle_ledger.md"), "# 资源账本\n\n| 资源 | 当前值 | 最近更新章节 | 备注 |\n|---|---:|---:|---|\n| 民望值 | 0 | 0 | 初始 |\n| 联邦币 | 200 | 0 | 初始现金 |\n", "utf-8"),
+    ]);
+    const badChapter = [
+      "扶起老太太后，系统提示：获得10点民望。",
+      "他消耗10点民望兑换初级辩论技能。",
+      "赔偿外卖78联邦币后，路人的掌声让他获得100点民望。",
+      "民望值跳成100，扣除兑换技能的10点，正好余90点。",
+      "他消耗100点民望兑换1000联邦币。",
+    ].join("\n");
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(createWriterOutput({
+      chapterNumber: 1,
+      content: badChapter,
+      wordCount: badChapter.length,
+      updatedState: "# 当前状态\n\n| 字段 | 值 |\n|---|---|\n| 当前章节 | 1 |\n",
+      updatedLedger: "writer ledger",
+    }));
+    const analyze = vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockImplementation(async (input) =>
+      createAnalyzedOutput({
+        chapterNumber: input.chapterNumber,
+        title: input.chapterTitle,
+        content: input.chapterContent,
+        wordCount: input.chapterContent.length,
+        updatedState: "# 当前状态\n\n| 字段 | 值 |\n|---|---|\n| 当前章节 | 1 |\n",
+        updatedLedger: "analyzed ledger",
+      }));
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(createAuditResult({ passed: true, issues: [] }));
+
+    try {
+      const result = await runner.writeNextChapter(bookId, 220);
+      const files = await readdir(join(state.bookDir(bookId), "chapters"));
+      const chapterFile = files.find((file) => /^0001_.*\.md$/u.test(file));
+      expect(chapterFile).toBeTruthy();
+      const finalChapter = await readFile(join(state.bookDir(bookId), "chapters", chapterFile!), "utf-8");
+      const ledger = await readFile(join(storyDir, "particle_ledger.md"), "utf-8");
+      const currentState = await readFile(join(storyDir, "current_state.md"), "utf-8");
+      const index = await state.loadChapterIndex(bookId);
+
+      expect(result.status).toBe("ready-for-review");
+      expect(finalChapter).not.toContain("扣除兑换技能的10点，正好余90点");
+      expect(finalChapter).toContain("新增的100点民望就是当前余额");
+      expect(ledger).toContain("## 章节流水");
+      expect(ledger).toContain("| 1 | 民望值 | 0 | +10 +100 | -10 -100 | 0 |");
+      expect(ledger).toContain("| 1 | 联邦币 | 200 | +1000 | -78 | 1122 |");
+      expect(currentState).toContain("当前资源");
+      expect(currentState).toContain("民望值=0");
+      expect(currentState).toContain("联邦币=1122");
+      expect(index[0]?.auditIssues).toEqual(expect.arrayContaining([
+        expect.stringContaining("[info] resource-consistency: 已按程序账本修复资源数值表达。"),
+      ]));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks ready-for-review and avoids ledger/state pollution when resource repair fails", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({ inputGovernanceMode: "legacy" });
+    const storyDir = join(state.bookDir(bookId), "story");
+    await Promise.all([
+      writeFile(join(storyDir, "book_rules.md"), "resourceTypes:\n  - 民望值\n  - 联邦币\n\n1点民望=10联邦币\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "| 当前资源 | 民望值=0；联邦币=0 |\n", "utf-8"),
+      writeFile(join(storyDir, "particle_ledger.md"), "| 民望值 | 0 |\n| 联邦币 | 0 |\n", "utf-8"),
+    ]);
+    const badChapter = "系统提示可透支兑换，无负债封顶。他消耗90点民望兑换1000联邦币，当前民望值：-90。";
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(createWriterOutput({
+      chapterNumber: 1,
+      content: badChapter,
+      wordCount: badChapter.length,
+    }));
+    vi.spyOn(ResourceConsistencyReviserAgent.prototype, "revise").mockRejectedValue(new Error("resource reviser down"));
+    vi.spyOn(ResourceBlockingRewriterAgent.prototype, "rewrite").mockResolvedValue({
+      content: "系统提示可透支兑换，无负债封顶。他消耗90点民望兑换1000联邦币，当前民望值：-90。",
+      usage: ZERO_USAGE,
+    });
+    const analyze = vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockImplementation(async (input) =>
+      createAnalyzedOutput({
+        chapterNumber: input.chapterNumber,
+        title: input.chapterTitle,
+        content: input.chapterContent,
+        wordCount: input.chapterContent.length,
+      }));
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(createAuditResult({ passed: true, issues: [] }));
+
+    try {
+      const result = await runner.writeNextChapter(bookId, 220);
+      const index = await state.loadChapterIndex(bookId);
+      const ledger = await readFile(join(storyDir, "particle_ledger.md"), "utf-8");
+      const currentState = await readFile(join(storyDir, "current_state.md"), "utf-8");
+      const resourceReport = JSON.parse(await readFile(join(state.bookDir(bookId), "reviews", "resource-consistency", "0001.report.json"), "utf-8")) as {
+        status: string;
+        blocking: boolean;
+        issues: ReadonlyArray<{ code: string }>;
+      };
+      const intentReport = JSON.parse(await readFile(join(state.bookDir(bookId), "reviews", "intent-alignment", "0001.report.json"), "utf-8")) as IntentAlignmentReport;
+
+      expect(result.status).toBe("state-degraded");
+      expect(index[0]?.status).toBe("state-degraded");
+      expect(ledger).toBe("| 民望值 | 0 |\n| 联邦币 | 0 |\n");
+      expect(currentState.trim()).toBe("| 当前资源 | 民望值=0；联邦币=0 |");
+      expect(resourceReport.status).toBe("FAILED");
+      expect(resourceReport.blocking).toBe(true);
+      expect(resourceReport.issues).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "unauthorized-resource-rule" }),
+        expect.objectContaining({ code: "negative-balance" }),
+      ]));
+      expect(intentReport.status).toBe("SKIPPED_DUE_RESOURCE_FAILURE");
+      expect(index[0]?.auditIssues).toEqual(expect.arrayContaining([
+        expect.stringContaining("[critical] resource-consistency: 程序账本校验失败，本章不得继续续写"),
+      ]));
+      expect(index[0]?.auditIssues.some((issue) => issue.includes("已按程序账本修复"))).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers a blocking resource failure with program-constrained rewrite and resumes normal persistence", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({ inputGovernanceMode: "legacy" });
+    const storyDir = join(state.bookDir(bookId), "story");
+    await Promise.all([
+      writeFile(join(storyDir, "book_rules.md"), "resourceTypes:\n  - 民望值\n  - 联邦币\n\n1点民望=10联邦币\n初级辩论技能消耗10点民望\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "| 当前资源 | 民望值=0；联邦币=200 |\n", "utf-8"),
+      writeFile(join(storyDir, "particle_ledger.md"), "| 民望值 | 0 |\n| 联邦币 | 200 |\n", "utf-8"),
+    ]);
+    const badChapter = "他扶老太太获得10点民望，系统提示可透支兑换。他消耗10点民望兑换1000联邦币，当前民望值：-90。";
+    const fixedChapter = [
+      "他扶起老太太，系统提示获得10点民望。",
+      "他消耗10点民望兑换初级辩论技能，当前民望归零。",
+      "他用初级辩论技能反击汤姆，围观路人认可他的做法，系统累计新增100点民望。",
+      "他确认当前民望为100点，随后消耗100点民望兑换1000联邦币。",
+      "当前民望归零，手机到账1000联邦币。",
+    ].join("\n");
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(createWriterOutput({
+      chapterNumber: 1,
+      content: badChapter,
+      wordCount: badChapter.length,
+    }));
+    vi.spyOn(ResourceConsistencyReviserAgent.prototype, "revise").mockRejectedValue(new Error("resource reviser down"));
+    const rewrite = vi.spyOn(ResourceBlockingRewriterAgent.prototype, "rewrite").mockResolvedValue({
+      content: fixedChapter,
+      usage: ZERO_USAGE,
+    });
+    const analyze = vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockImplementation(async (input) =>
+      createAnalyzedOutput({
+        chapterNumber: input.chapterNumber,
+        title: input.chapterTitle,
+        content: input.chapterContent,
+        wordCount: input.chapterContent.length,
+        updatedState: "| 当前资源 | 民望值=0；联邦币=200 |",
+        updatedLedger: "analyzed ledger",
+      }));
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(createAuditResult({ passed: true, issues: [] }));
+
+    try {
+      const result = await runner.writeNextChapter(bookId, 220);
+      const ledger = await readFile(join(storyDir, "particle_ledger.md"), "utf-8");
+      const currentState = await readFile(join(storyDir, "current_state.md"), "utf-8");
+      const resourceReport = JSON.parse(await readFile(join(state.bookDir(bookId), "reviews", "resource-consistency", "0001.report.json"), "utf-8")) as {
+        status: string;
+        blocking: boolean;
+        recoveryAttempted: boolean;
+        recoveryPlan: string;
+        secondValidation: string;
+      };
+      const index = await state.loadChapterIndex(bookId);
+
+      expect(rewrite).toHaveBeenCalledTimes(1);
+      expect(result.status).toBe("ready-for-review");
+      expect(index[0]?.status).toBe("ready-for-review");
+      expect(ledger).toContain("| 1 | 民望值 | 0 | +10 +100 | -10 -100 | 0 |");
+      expect(ledger).toContain("| 1 | 联邦币 | 200 | +1000 | 0 | 1200 |");
+      expect(currentState).toContain("民望值=0");
+      expect(currentState).toContain("联邦币=1200");
+      expect(resourceReport.status).toBe("FIXED");
+      expect(resourceReport.blocking).toBe(false);
+      expect(resourceReport.recoveryAttempted).toBe(true);
+      expect(resourceReport.recoveryPlan).toBe("add_earned_resource_before_spend");
+      expect(resourceReport.secondValidation).toBe("PASS");
+      expect(index[0]?.auditIssues).toEqual(expect.arrayContaining([
+        expect.stringContaining("[info] resource-consistency: Resource Engine blocking 已通过程序约束重写修复。"),
+      ]));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to defer_exchange when the cash recovery rewrite still invents credit", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({ inputGovernanceMode: "legacy" });
+    const storyDir = join(state.bookDir(bookId), "story");
+    await Promise.all([
+      writeFile(join(storyDir, "book_rules.md"), "resourceTypes:\n  - 民望值\n  - 联邦币\n\n1点民望=10联邦币\n初级辩论技能消耗10点民望\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "| 当前资源 | 民望值=0；联邦币=200 |\n", "utf-8"),
+      writeFile(join(storyDir, "particle_ledger.md"), "| 民望值 | 0 |\n| 联邦币 | 200 |\n", "utf-8"),
+    ]);
+    const badChapter = "他扶老太太获得10点民望，系统提示可透支兑换。他消耗10点民望兑换1000联邦币，当前民望值：-90。";
+    const failedCashRewrite = [
+      "他扶起老太太，系统提示获得10点民望。",
+      "他消耗10点民望兑换初级辩论技能，当前民望归零。",
+      "系统提示支持临时透支兑换，剩余90点民望缺口记为待还。",
+      "当前民望值为-90点，手机到账1000联邦币。",
+    ].join("\n");
+    const deferExchangeRewrite = [
+      "他扶起老太太，系统提示获得10点民望。",
+      "他消耗10点民望兑换初级辩论技能，当前民望归零。",
+      "他用初级辩论技能反击汤姆，围观路人认可他的做法，系统新增100点民望。",
+      "当前民望为100点。外婆的透析费和房租仍压在胸口，他没有立刻换钱，只看见下一章把民望换成救命钱的可能。",
+    ].join("\n");
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(createWriterOutput({
+      chapterNumber: 1,
+      content: badChapter,
+      wordCount: badChapter.length,
+    }));
+    vi.spyOn(ResourceConsistencyReviserAgent.prototype, "revise").mockRejectedValue(new Error("resource reviser down"));
+    const rewrite = vi.spyOn(ResourceBlockingRewriterAgent.prototype, "rewrite")
+      .mockResolvedValueOnce({
+        content: failedCashRewrite,
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: deferExchangeRewrite,
+        usage: ZERO_USAGE,
+      });
+    const analyze = vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockImplementation(async (input) =>
+      createAnalyzedOutput({
+        chapterNumber: input.chapterNumber,
+        title: input.chapterTitle,
+        content: input.chapterContent,
+        wordCount: input.chapterContent.length,
+        updatedState: "| 当前资源 | 民望值=100；联邦币=200 |",
+        updatedLedger: "analyzed ledger",
+      }));
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(createAuditResult({ passed: true, issues: [] }));
+
+    try {
+      const result = await runner.writeNextChapter(bookId, 220);
+      const ledger = await readFile(join(storyDir, "particle_ledger.md"), "utf-8");
+      const currentState = await readFile(join(storyDir, "current_state.md"), "utf-8");
+      const resourceReport = JSON.parse(await readFile(join(state.bookDir(bookId), "reviews", "resource-consistency", "0001.report.json"), "utf-8")) as {
+        status: string;
+        blocking: boolean;
+        recoveryAttempted: boolean;
+        recoveryPlan: string;
+        recoveryPlanResult: string;
+        fallbackRecoveryAttempted: boolean;
+        fallbackRecoveryPlan: string;
+        fallbackSecondValidation: string;
+        secondValidation: string;
+      };
+      const index = await state.loadChapterIndex(bookId);
+
+      expect(rewrite).toHaveBeenCalledTimes(2);
+      expect(analyze.mock.calls[0]?.[0].resourceAuthoritySummary).toContain("民望值=100");
+      expect(analyze.mock.calls[0]?.[0].resourceAuthoritySummary).toContain("联邦币=200");
+      expect(analyze.mock.calls[0]?.[0].resourceAuthoritySummary).toContain("已延后现金兑换");
+      expect(rewrite.mock.calls[0]?.[0].recoveryPlan.planId).toBe("add_earned_resource_before_spend");
+      expect(rewrite.mock.calls[1]?.[0].recoveryPlan.planId).toBe("defer_exchange");
+      expect(result.status).toBe("ready-for-review");
+      expect(index[0]?.status).toBe("ready-for-review");
+      expect(ledger).toContain("| 民望值 | 100 | 1 |");
+      expect(ledger).toContain("| 联邦币 | 200 | 1 |");
+      expect(ledger).toContain("| 1 | 民望值 | 0 | +10 +100 | -10 | 100 |");
+      expect(ledger).not.toContain("+1000");
+      expect(currentState).toContain("民望值=100");
+      expect(currentState).toContain("联邦币=200");
+      expect(resourceReport.status).toBe("FIXED");
+      expect(resourceReport.blocking).toBe(false);
+      expect(resourceReport.recoveryAttempted).toBe(true);
+      expect(resourceReport.recoveryPlan).toBe("add_earned_resource_before_spend");
+      expect(resourceReport.recoveryPlanResult).toBe("FAILED");
+      expect(resourceReport.fallbackRecoveryAttempted).toBe(true);
+      expect(resourceReport.fallbackRecoveryPlan).toBe("defer_exchange");
+      expect(resourceReport.fallbackSecondValidation).toBe("PASS");
+      expect(resourceReport.secondValidation).toBe("PASS");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("applies a defer_exchange template patch when fallback rewrite still cashes out", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({ inputGovernanceMode: "legacy" });
+    const storyDir = join(state.bookDir(bookId), "story");
+    await Promise.all([
+      writeFile(join(storyDir, "book_rules.md"), "resourceTypes:\n  - 民望值\n  - 联邦币\n\n1点民望=10联邦币\n初级辩论技能消耗10点民望\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "| 当前资源 | 民望值=0；联邦币=200 |\n", "utf-8"),
+      writeFile(join(storyDir, "particle_ledger.md"), "| 民望值 | 0 |\n| 联邦币 | 200 |\n", "utf-8"),
+    ]);
+    const badChapter = "他扶老太太获得10点民望，系统提示可透支兑换。他消耗10点民望兑换1000联邦币，当前民望值：-90。";
+    const failedCashRewrite = [
+      "他扶起老太太，系统提示获得10点民望。",
+      "他消耗10点民望兑换初级辩论技能，当前民望归零。",
+      "系统提示支持临时透支兑换，剩余90点民望缺口记为待还。",
+      "当前民望值为-90点，手机到账1000联邦币。",
+    ].join("\n");
+    const failedDeferRewrite = [
+      "他扶起老太太，系统提示获得10点民望。",
+      "他消耗10点民望兑换初级辩论技能，当前民望归零。",
+      "他用初级辩论技能反击汤姆，围观路人认可他的做法，系统新增100点民望。",
+      "100点民望瞬间扣除，1000联邦币到账。",
+      "电子钱包余额变成1200，透析费缺口缩小。",
+    ].join("\n");
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(createWriterOutput({
+      chapterNumber: 1,
+      content: badChapter,
+      wordCount: badChapter.length,
+    }));
+    vi.spyOn(ResourceConsistencyReviserAgent.prototype, "revise").mockRejectedValue(new Error("resource reviser down"));
+    vi.spyOn(ResourceBlockingRewriterAgent.prototype, "rewrite")
+      .mockResolvedValueOnce({ content: failedCashRewrite, usage: ZERO_USAGE })
+      .mockResolvedValueOnce({ content: failedDeferRewrite, usage: ZERO_USAGE });
+    vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockImplementation(async (input) =>
+      createAnalyzedOutput({
+        chapterNumber: input.chapterNumber,
+        title: input.chapterTitle,
+        content: input.chapterContent,
+        wordCount: input.chapterContent.length,
+        updatedState: "| 当前资源 | 民望值=100；联邦币=200 |",
+        updatedLedger: "analyzed ledger",
+      }));
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(createAuditResult({ passed: true, issues: [] }));
+
+    try {
+      const result = await runner.writeNextChapter(bookId, 220);
+      const files = await readdir(join(state.bookDir(bookId), "chapters"));
+      const chapterFile = files.find((file) => /^0001_.*\.md$/u.test(file));
+      const finalChapter = await readFile(join(state.bookDir(bookId), "chapters", chapterFile!), "utf-8");
+      const ledger = await readFile(join(storyDir, "particle_ledger.md"), "utf-8");
+      const currentState = await readFile(join(storyDir, "current_state.md"), "utf-8");
+      const resourceReport = JSON.parse(await readFile(join(state.bookDir(bookId), "reviews", "resource-consistency", "0001.report.json"), "utf-8")) as {
+        status: string;
+        blocking: boolean;
+        fallbackSecondValidation: string;
+        templatePatchAttempted: boolean;
+        templatePatchApplied: boolean;
+        templatePatchValidation: string;
+        balanceClaimPatchAttempted: boolean;
+        balanceClaimPatchApplied: boolean;
+        balanceClaimPatchResource: string;
+        balanceClaimPatchFrom: number;
+        balanceClaimPatchTo: number;
+        removedCashFlowSnippets: string[];
+        unlockedSkills: string[];
+        closingBalances: Record<string, number>;
+      };
+
+      expect(result.status).toBe("ready-for-review");
+      expect(finalChapter).not.toContain("1000联邦币到账");
+      expect(finalChapter).not.toContain("电子钱包余额变成1200");
+      expect(finalChapter).toContain("没有立刻按下去");
+      expect(finalChapter).toContain("当前民望值：100");
+      expect(ledger).toContain("| 民望值 | 100 | 1 |");
+      expect(ledger).toContain("| 联邦币 | 200 | 1 |");
+      expect(ledger).toContain("| 技能 | 初级辩论技能 | 1 | 本章解锁 |");
+      expect(currentState).toContain("民望值=100");
+      expect(currentState).toContain("联邦币=200");
+      expect(currentState).toContain("已解锁技能=初级辩论技能");
+      expect(resourceReport.status).toBe("FIXED");
+      expect(resourceReport.blocking).toBe(false);
+      expect(resourceReport.fallbackSecondValidation).toBe("FAILED");
+      expect(resourceReport.templatePatchAttempted).toBe(true);
+      expect(resourceReport.templatePatchApplied).toBe(true);
+      expect(resourceReport.templatePatchValidation).toBe("PASS");
+      expect(resourceReport.balanceClaimPatchAttempted).toBe(true);
+      expect(resourceReport.balanceClaimPatchApplied).toBe(false);
+      expect(resourceReport.balanceClaimPatchResource).toBe("民望值");
+      expect(resourceReport.balanceClaimPatchTo).toBe(100);
+      expect(resourceReport.removedCashFlowSnippets.length).toBeGreaterThan(0);
+      expect(resourceReport.unlockedSkills).toContain("初级辩论技能");
+      expect(resourceReport.closingBalances["民望值"]).toBe(100);
+      expect(resourceReport.closingBalances["联邦币"]).toBe(200);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans non-narrative scratchpad prose before resource validation and writes a report", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({ inputGovernanceMode: "legacy" });
+    const storyDir = join(state.bookDir(bookId), "story");
+    await Promise.all([
+      writeFile(join(storyDir, "book_rules.md"), "resourceTypes:\n  - 民望值\n  - 联邦币\n\n1点民望=10联邦币\n初级辩论技能消耗10点民望\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "| 当前资源 | 民望值=0；联邦币=200 |\n", "utf-8"),
+      writeFile(join(storyDir, "particle_ledger.md"), "| 民望值 | 0 |\n| 联邦币 | 200 |\n", "utf-8"),
+    ]);
+    const chapter = [
+      "林默站在楼道口，盯着汤姆的背影，没有立刻开口。",
+      "",
+      "不对，哦，本章意图写的是压迫反击，这段应该调整一下，按提示词不能这么写。",
+      "",
+      "他把那句反驳压回喉咙里，等汤姆把话说完，才平静地抬起眼。",
+    ].join("\n");
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(createWriterOutput({
+      chapterNumber: 1,
+      content: chapter,
+      wordCount: chapter.length,
+    }));
+    vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockImplementation(async (input) =>
+      createAnalyzedOutput({
+        chapterNumber: input.chapterNumber,
+        title: input.chapterTitle,
+        content: input.chapterContent,
+        wordCount: input.chapterContent.length,
+        updatedState: "| 当前资源 | 民望值=100；联邦币=200；已解锁技能=初级辩论技能 |",
+        updatedLedger: "analyzed ledger",
+      }));
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(createAuditResult({ passed: true, issues: [] }));
+
+    try {
+      const result = await runner.writeNextChapter(bookId, 220);
+      const files = await readdir(join(state.bookDir(bookId), "chapters"));
+      const chapterFile = files.find((file) => /^0001_.*\.md$/u.test(file));
+      const finalChapter = await readFile(join(state.bookDir(bookId), "chapters", chapterFile!), "utf-8");
+      const cleanReport = JSON.parse(await readFile(join(state.bookDir(bookId), "reviews", "clean-narrative", "0001.report.json"), "utf-8")) as {
+        status: string;
+        changed: boolean;
+        removedSnippets: string[];
+      };
+
+      expect(result.status).toBe("ready-for-review");
+      expect(finalChapter).not.toContain("本章意图");
+      expect(finalChapter).not.toContain("按提示词");
+      expect(finalChapter).toContain("才平静地抬起眼");
+      expect(cleanReport.status).toBe("CLEANED");
+      expect(cleanReport.changed).toBe(true);
+      expect(cleanReport.removedSnippets.join("\n")).toContain("本章意图");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -2576,6 +3465,16 @@ describe("PipelineRunner", () => {
         summary: "clean",
       }),
     );
+    vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockImplementation(async (input) =>
+      createAnalyzedOutput({
+        chapterNumber: input.chapterNumber,
+        title: input.chapterTitle,
+        content: input.chapterContent,
+        wordCount: input.chapterContent.length,
+        updatedState: "fixed state",
+        updatedHooks: "fixed hooks",
+        updatedLedger: "fixed ledger",
+      }));
     vi.spyOn(StateValidatorAgent.prototype, "validate")
       .mockResolvedValueOnce({
         passed: false,
@@ -2597,7 +3496,6 @@ describe("PipelineRunner", () => {
     expect(settleSpy).toHaveBeenCalledWith(expect.objectContaining({
       chapterNumber: 1,
       title: "Test Chapter",
-      content: "Healthy chapter body with the copper token in his coat.",
       validationFeedback: expect.stringContaining("怀里的铜牌"),
     }));
     await expect(readFile(join(storyDir, "current_state.md"), "utf-8")).resolves.toBe("fixed state");
@@ -2650,6 +3548,16 @@ describe("PipelineRunner", () => {
         summary: "clean",
       }),
     );
+    vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockImplementation(async (input) =>
+      createAnalyzedOutput({
+        chapterNumber: input.chapterNumber,
+        title: input.chapterTitle,
+        content: input.chapterContent,
+        wordCount: input.chapterContent.length,
+        updatedState: "still broken state",
+        updatedHooks: "still broken hooks",
+        updatedLedger: "still broken ledger",
+      }));
     vi.spyOn(StateValidatorAgent.prototype, "validate")
       .mockResolvedValueOnce({
         passed: false,

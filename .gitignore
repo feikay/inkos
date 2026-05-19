@@ -23,3 +23,6 @@ _*.md
 my-novel/
 publish/
 tests/
+.github/
+.claude/
+reports/

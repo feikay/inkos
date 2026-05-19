@@ -2,7 +2,31 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { WriterAgent } from "../agents/writer.js";
+import { sanitizePlannerIntentForChapterIntent, WriterAgent } from "../agents/writer.js";
+import { stripNonProseArtifacts } from "../agents/writer-parser.js";
+import {
+  buildResourceLedgerUpdate,
+  buildResourceRecoveryPlans,
+  classifyResourceConsistency,
+  computeResourceLedger,
+  detectFilteredPseudoSkills,
+  applyDeferExchangeTemplatePatch,
+  extractResourceEvents,
+  hasForbiddenResourceRecoveryPhrase,
+  parseResourceRules,
+  repairResourceInconsistencies,
+  renderResourceRulesForPrompt,
+  syncBalanceClaimsWithLedger,
+  syncCurrentStateResources,
+  validateResourceMath,
+} from "../agents/resource-consistency.js";
+import {
+  buildChapterResourcePlan,
+  preScanTextAgainstResourcePlan,
+  renderResourcePlanForPrompt,
+  sanitizeIntentAgainstResourcePlan,
+  validateIntentAgainstResourcePlan,
+} from "../agents/resource-plan.js";
 import type { ChapterGoal } from "../models/input-governance.js";
 import type { LengthSpec } from "../models/length-governance.js";
 import { buildLengthSpec } from "../utils/length-metrics.js";
@@ -116,6 +140,263 @@ function createCaptureLogger() {
 describe("WriterAgent", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it("declares chapter_intent as highest priority and suppresses legacy payoff directives when intent limits payoff", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-intent-priority-test-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n\n- 系统绑定后民望值从0开始。\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 1\n系统绑定提示音响起。\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n\n- 克制。\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# Current State\n\n- 主角被辞退。\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n\n- 系统是否绑定。\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+      writeFile(join(storyDir, "subplot_board.md"), "# Subplots\n", "utf-8"),
+      writeFile(join(storyDir, "emotional_arcs.md"), "# Emotional Arcs\n", "utf-8"),
+      writeFile(join(storyDir, "character_matrix.md"), "# Character Matrix\n", "utf-8"),
+      writeFile(join(storyDir, "book_rules.md"), "# Book Rules\n", "utf-8"),
+    ]);
+
+    const { logger, warnings } = createCaptureLogger();
+    const agent = new WriterAgent({
+      client: { provider: "openai", apiFormat: "chat", stream: false, defaults: { temperature: 0.7, maxTokens: 4096, thinkingBudget: 0, maxTokensCap: null, extra: {} } },
+      model: "test-model",
+      projectRoot: root,
+      logger,
+    });
+    const chatSpy = vi.spyOn(WriterAgent.prototype as never, "chat" as never);
+    chatSpy.mockImplementation(async (...args: unknown[]) => {
+        const messages = args[0] as ReadonlyArray<{ readonly content?: string }>;
+        const joined = messages.map((message) => message.content ?? "").join("\n");
+        if (joined.includes("POST_SETTLEMENT") || joined.includes("真相文件") || joined.includes("Observer")) {
+          return defaultSettlementResponse(1, "系统绑定声");
+        }
+        return defaultCreativeResponse("系统绑定声", "刺耳的辞退声落下后，系统绑定提示音响起。面板亮起，初始民望值为0，兑换规则没有展开。");
+      });
+
+    try {
+      await agent.writeChapter({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "tomato",
+          genre: "xuanhuan",
+          status: "active",
+          targetChapters: 120,
+          chapterWordCount: 2200,
+          createdAt: "2026-03-23T00:00:00.000Z",
+          updatedAt: "2026-03-23T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 1,
+        chapterIntent: [
+          "# 第1章 Chapter Intent",
+          "",
+          "## 3. 本章主角目标",
+          "- 表层目标：撑过被栽赃与辞退。",
+          "",
+          "## 8. 本章结局反馈",
+          "- 系统初始民望值为0，仅提示绑定，不直接发放任何福利。",
+          "",
+          "## 9. 下一章钩子",
+          "- 结尾画面：系统绑定提示音响起。",
+        ].join("\n"),
+        contextPackage: {
+          chapter: 1,
+          selectedContext: [],
+          chapterGoal: {
+            mainConflict: "主角还没找到逃生线索。",
+            protagonistGoal: "获得一条明确逃生线索。",
+            activeCharacters: ["主角"],
+            foreshadowToTouch: [],
+            payoffToDeliver: "获得一条明确逃生线索",
+            payoffDirective: {
+              promisedPayoff: "获得一条明确逃生线索",
+              payoffType: "resource",
+              payoffDepth: "layered",
+              mandatoryByFinalAct: true,
+            },
+            endingHookType: "reveal",
+            nextChapterPull: "逃生路线继续推进。",
+          },
+        },
+        ruleStack: {
+          layers: [{ id: "L4", name: "current_task", precedence: 70, scope: "local" }],
+          sections: { hard: [], soft: [], diagnostic: [] },
+          overrideEdges: [],
+          activeOverrides: [],
+        },
+        lengthSpec: buildLengthSpec(220, "zh"),
+      });
+
+      const creativePrompt = (chatSpy.mock.calls[0]?.[0] as ReadonlyArray<{ content: string }> | undefined)?.[1]?.content ?? "";
+      expect(creativePrompt).toContain("chapter_intent 是本章最高优先级约束");
+      expect(creativePrompt).toContain("如果 planner intent、payoffDirective、Hook Agenda 或 outline node 与 chapter_intent 冲突，以 chapter_intent 为准");
+      expect(creativePrompt).toContain("旧 payoffDirective 降级为“后续伏笔或轻微暗示”");
+      expect(creativePrompt).toContain("不得强行完整兑现 payoff");
+      expect(findSystemPromptContaining(chatSpy.mock.calls, "materialize a missing promised payoff")).toBe("");
+      expect(warnings.some((warning) => warning.includes("Writer PAYOFF MODE skipped: chapter_intent suppresses payoff"))).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("sanitizes legacy planner payoff when chapter_intent suppresses payoff", () => {
+    const result = sanitizePlannerIntentForChapterIntent({
+      chapterIntent: "# 第1章 Chapter Intent\n\n- 系统绑定，仅触发绑定，不直接发放任何福利。\n",
+      plannerIntent: [
+        "# Chapter Intent",
+        "",
+        "## Chapter Goal",
+        "- payoffToDeliver: 获得一条明确逃生线索",
+        "- payoffDirective.promisedPayoff: 获得一条明确逃生线索",
+        "- 当存在 payoffToDeliver 时，payoff 优先级高于 EndingType，本章也必须至少部分兑现 payoff。",
+      ].join("\n"),
+      contextPackage: {
+        chapter: 1,
+        selectedContext: [],
+        chapterGoal: {
+          mainConflict: "被栽赃。",
+          protagonistGoal: "获得一条明确逃生线索。",
+          activeCharacters: ["主角"],
+          foreshadowToTouch: [],
+          payoffToDeliver: "获得一条明确逃生线索",
+          payoffDirective: {
+            promisedPayoff: "获得一条明确逃生线索",
+            payoffType: "resource",
+            payoffDepth: "layered",
+            mandatoryByFinalAct: true,
+          },
+          endingHookType: "reveal",
+          nextChapterPull: "逃生路线继续推进。",
+        },
+      },
+    });
+
+    expect(result.suppression.suppressPayoff).toBe(true);
+    expect(result.suppression.removedPayoff).toBe("获得一条明确逃生线索");
+    expect(result.sanitizedPlannerIntent).not.toContain("payoffToDeliver");
+    expect(result.sanitizedPlannerIntent).not.toContain("payoff 优先级高于 EndingType");
+    expect(result.sanitizedPlannerIntent).toContain("旧 payoffDirective 已被 chapter_intent 抑制");
+    expect(result.contextPackage?.chapterGoal?.payoffToDeliver).toContain("chapter_intent 已抑制旧 payoff");
+    expect(result.contextPackage?.chapterGoal?.payoffDirective).toBeUndefined();
+  });
+
+  it("repairs obvious early payoff drift when chapter_intent suppresses payoff", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-drift-repair-test-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+    await Promise.all([
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 1\n系统绑定提示音响起。\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# Current State\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+      writeFile(join(storyDir, "subplot_board.md"), "# Subplots\n", "utf-8"),
+      writeFile(join(storyDir, "emotional_arcs.md"), "# Emotional Arcs\n", "utf-8"),
+      writeFile(join(storyDir, "character_matrix.md"), "# Character Matrix\n", "utf-8"),
+      writeFile(join(storyDir, "book_rules.md"), "# Book Rules\n", "utf-8"),
+    ]);
+    const agent = new WriterAgent({
+      client: { provider: "openai", apiFormat: "chat", stream: false, defaults: { temperature: 0.7, maxTokens: 4096, thinkingBudget: 0, maxTokensCap: null, extra: {} } },
+      model: "test-model",
+      projectRoot: root,
+    });
+    const chatSpy = vi.spyOn(WriterAgent.prototype as never, "chat" as never);
+    chatSpy.mockImplementation(async (...args: unknown[]) => {
+      const messages = args[0] as ReadonlyArray<{ readonly content?: string }>;
+      const joined = messages.map((message) => message.content ?? "").join("\n");
+      if (joined.includes("POST_SETTLEMENT") || joined.includes("真相文件") || joined.includes("Observer")) {
+        return defaultSettlementResponse(1, "系统绑定声");
+      }
+      if (joined.includes("定向修正") || joined.includes("Hard Repair Rules") || joined.includes("删除任何完整 payoff")) {
+        return defaultCreativeResponse("系统绑定声", "系统绑定提示音响起。面板亮起，民望值为0。");
+      }
+      return defaultCreativeResponse("获得一条明确逃生线索之后", "系统完整解锁，他直接知道旧码头三号仓库第三块砖下藏着资金。");
+    });
+
+    try {
+      const output = await agent.writeChapter({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "tomato",
+          genre: "xuanhuan",
+          status: "active",
+          targetChapters: 120,
+          chapterWordCount: 2200,
+          createdAt: "2026-03-23T00:00:00.000Z",
+          updatedAt: "2026-03-23T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 1,
+        chapterIntent: "# 第1章 Chapter Intent\n\n- 仅触发绑定，不提前发放任何福利，结尾停在系统绑定。\n",
+        contextPackage: {
+          chapter: 1,
+          selectedContext: [],
+          chapterGoal: {
+            mainConflict: "被栽赃。",
+            protagonistGoal: "完成绑定。",
+            activeCharacters: ["主角"],
+            foreshadowToTouch: [],
+            payoffToDeliver: "获得一条明确逃生线索",
+            endingHookType: "reveal",
+            nextChapterPull: "系统绑定后继续。",
+          },
+        },
+        ruleStack: {
+          layers: [{ id: "L4", name: "current_task", precedence: 70, scope: "local" }],
+          sections: { hard: [], soft: [], diagnostic: [] },
+          overrideEdges: [],
+          activeOverrides: [],
+        },
+        lengthSpec: buildLengthSpec(220, "zh"),
+      });
+
+      expect(output.content).toContain("系统绑定提示音响起");
+      expect(output.content).not.toContain("旧码头");
+      expect(output.content).not.toContain("第三块砖");
+      expect(findSystemPromptContaining(chatSpy.mock.calls, "materialize a missing promised payoff")).toBe("");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("strips non-prose PRE_WRITE_CHECK blocks and inspection tables", () => {
+    const content = [
+      "他听见提示音响起。",
+      "",
+      "面板亮了。",
+      "",
+      "## PRE_WRITE_CHECK",
+      "- 这里不该进入正文",
+    ].join("\n");
+
+    expect(stripNonProseArtifacts(content)).toBe("他听见提示音响起。\n\n面板亮了。");
+
+    const tableContent = [
+      "他站在门口，没有立刻回答。",
+      "",
+      "| 检查项 | 本章记录 | 备注 |",
+      "| --- | --- | --- |",
+      "| hook | ok | remove |",
+      "",
+      "后续说明也不重要。",
+    ].join("\n");
+    expect(stripNonProseArtifacts(tableContent)).toBe("他站在门口，没有立刻回答。\n\n后续说明也不重要。");
+
+    expect(stripNonProseArtifacts("他听见提示音响起。\n\n===")).toBe("他听见提示音响起。");
+  });
+
+  it("does not strip ordinary prose paragraphs", () => {
+    const content = "他把旧账本摊开。\n\n这一页没有表格，只有被水泡开的墨痕。";
+    expect(stripNonProseArtifacts(content)).toBe(content);
   });
 
   it("uses compact summary context plus selected long-range evidence during governed settlement", async () => {
@@ -5761,5 +6042,736 @@ describe("WriterAgent", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it("extracts and validates system-resource events with exchange math", () => {
+    const chapter = [
+      "扶起老太太后，系统提示：获得10点民望。",
+      "他消耗10点民望兑换初级辩论技能。",
+      "路人的掌声让他获得100点民望。",
+      "民望值跳成100，扣除兑换技能的10点，正好余90点。",
+      "他消耗100点民望兑换1000联邦币。",
+    ].join("\n");
+    const events = extractResourceEvents(chapter, "resourceTypes:\n  - 民望值\n  - 联邦币\n", "# 资源账本\n| 民望值 | 0 |");
+    const validation = validateResourceMath({
+      events,
+      currentLedger: "# 资源账本\n| 民望值 | 0 |\n",
+      bookRules: "1点民望=10联邦币",
+    });
+
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "gain", resource: "民望值", amount: 10 }),
+      expect.objectContaining({ kind: "consume", resource: "民望值", amount: 10 }),
+      expect.objectContaining({ kind: "gain", resource: "民望值", amount: 100 }),
+      expect.objectContaining({ kind: "gain", resource: "联邦币", amount: 1000 }),
+      expect.objectContaining({ kind: "unlock", resource: "技能", label: "初级辩论技能" }),
+    ]));
+    expect(validation.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "balance-mismatch",
+        resource: "民望值",
+        expected: 100,
+        actual: 90,
+      }),
+    ]));
+  });
+
+  it("parses resource rules from plain book_rules text", () => {
+    const rules = parseResourceRules([
+      "resources:",
+      "  民望值:",
+      "    initial: 0",
+      "    min: 0",
+      "    aliases:",
+      "      - 民望",
+      "  联邦币:",
+      "    initial: 200",
+      "    aliases:",
+      "      - 现金",
+      "exchangeRates:",
+      "  - from: 民望值",
+      "    to: 联邦币",
+      "    rate: 10",
+      "skills:",
+      "  初级辩论技能:",
+      "    cost:",
+      "      resource: 民望值",
+      "      amount: 10",
+      "1点民望=10联邦币",
+      "初级辩论技能消耗10点民望",
+    ].join("\n"));
+
+    expect(rules.resources["民望值"]?.initial).toBe(0);
+    expect(rules.resources["联邦币"]?.initial).toBe(200);
+    expect(rules.aliases["现金"]).toBe("联邦币");
+    expect(rules.exchangeRates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ from: "民望值", to: "联邦币", rate: 10 }),
+    ]));
+    expect(rules.skills).toEqual(expect.arrayContaining([
+      expect.objectContaining({ skill: "初级辩论技能", resource: "民望值", amount: 10 }),
+    ]));
+    expect(renderResourceRulesForPrompt(rules)).toContain("1 民望值 = 10 联邦币");
+  });
+
+  it("builds a defer_exchange Resource Plan for chapter 2 before intent and writer", () => {
+    const bookRules = [
+      "resources:",
+      "  民望值:",
+      "    initial: 0",
+      "    min: 0",
+      "  联邦币:",
+      "    initial: 200",
+      "    min: 0",
+      "skills:",
+      "  初级辩论技能:",
+      "    cost:",
+      "      resource: 民望值",
+      "      amount: 10",
+    ].join("\n");
+    const plan = buildChapterResourcePlan({
+      chapter: 2,
+      bookRules,
+      particleLedger: "| 资源 | 当前 |\n| 民望值 | 0 |\n| 联邦币 | 200 |",
+      currentState: "林默将面对汤姆，需要初级辩论技能。",
+      chapterGoal: "扶老太太后反击汤姆，获得民望。",
+    });
+
+    expect(plan.mode).toBe("defer_exchange");
+    expect(plan.openingBalances).toMatchObject({ 民望值: 0, 联邦币: 200 });
+    expect(plan.expectedClosingBalances).toMatchObject({ 民望值: 100, 联邦币: 200 });
+    expect(plan.unlockedSkills).toContain("初级辩论技能");
+
+    const intentPrompt = renderResourcePlanForPrompt(plan, "chapter_intent");
+    expect(intentPrompt).toContain("mode: defer_exchange");
+    expect(intentPrompt).toContain("任何现金兑换");
+    expect(intentPrompt).toContain("民望值=100");
+    expect(intentPrompt).toContain("联邦币=200");
+
+    const writerPrompt = renderResourcePlanForPrompt(plan, "writer");
+    expect(writerPrompt).toContain("资源计划是硬约束，不是建议");
+    expect(writerPrompt).toContain("任何联邦币到账");
+    expect(writerPrompt).toContain("爽点不是现金到账");
+  });
+
+  it("rejects and sanitizes chapter_intent that violates Resource Plan", () => {
+    const plan = buildChapterResourcePlan({
+      chapter: 2,
+      bookRules: "resources:\n  民望值:\n    initial: 0\n  联邦币:\n    initial: 200\nskills:\n  初级辩论技能:\n    cost:\n      resource: 民望值\n      amount: 10\n",
+      particleLedger: "| 民望值 | 0 |\n| 联邦币 | 200 |",
+      currentState: "汤姆挑衅，林默需要用初级辩论技能反击。",
+    });
+    const badIntent = "本章获得1000联邦币，银行到账，缓解透析费和房租压力。10民望兑换1000联邦币。";
+
+    expect(validateIntentAgainstResourcePlan(badIntent, plan).ok).toBe(false);
+    const sanitized = sanitizeIntentAgainstResourcePlan(badIntent, plan);
+    expect(sanitized).toContain("下一章可兑换现金的希望");
+    expect(sanitized).toContain("联邦币保持200不变");
+    expect(sanitized).toContain("chapter-intent-resource-plan");
+  });
+
+  it("pre-scans writer drafts against defer_exchange Resource Plan", () => {
+    const plan = buildChapterResourcePlan({
+      chapter: 2,
+      bookRules: "resources:\n  民望值:\n    initial: 0\n  联邦币:\n    initial: 200\nskills:\n  初级辩论技能:\n    cost:\n      resource: 民望值\n      amount: 10\n",
+      particleLedger: "| 民望值 | 0 |\n| 联邦币 | 200 |",
+      currentState: "林默需要技能反击汤姆。",
+    });
+
+    const badDraft = "系统提示银行到账1000联邦币，电子钱包一共1200，资金缺口减少。";
+    expect(preScanTextAgainstResourcePlan(badDraft, plan).ok).toBe(false);
+
+    const goodDraft = [
+      "林默扶起老太太，系统面板亮起：民望值+10。",
+      "他消耗10点民望兑换初级辩论技能。",
+      "他用初级辩论技能当众反击汤姆。",
+      "围观路人认可他的说法，民望值+100。",
+      "当前民望值100，联邦币仍为200。没有立刻兑换现金，资金缺口仍在，但他看见了下一章翻身的希望。",
+    ].join("\n");
+    expect(preScanTextAgainstResourcePlan(goodDraft, plan).ok).toBe(true);
+  });
+
+  it("keeps ordinary no-resource chapters unaffected by Resource Plan", () => {
+    const plan = buildChapterResourcePlan({
+      chapter: 5,
+      bookRules: "# Book Rules\n\n- No numerical system here.",
+      particleLedger: "",
+      currentState: "主角整理旧信，准备拜访导师。",
+      chapterGoal: "安静推进人物关系。",
+    });
+
+    expect(plan.mode).toBe("no_resource_change");
+    expect(preScanTextAgainstResourcePlan("他整理旧信，决定明天去见导师。", plan).ok).toBe(true);
+  });
+
+  it("blocks resource rule conflicts between book_rules and chapter_intent", () => {
+    const validation = validateResourceMath({
+      events: extractResourceEvents("他获得10点民望。", "1点民望=10联邦币"),
+      bookRules: "1点民望=10联邦币",
+      chapterIntent: "本章系统规则：1点民望=100联邦币。",
+      chapterText: "他获得10点民望。",
+    });
+    const classified = classifyResourceConsistency({ validation, repaired: false });
+
+    expect(validation.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "resource-rule-conflict",
+        severity: "critical",
+        expected: 10,
+        actual: 100,
+      }),
+    ]));
+    expect(classified.status).toBe("FAILED");
+    expect(classified.blocking).toBe(true);
+  });
+
+  it("repairs repeated reputation balance subtraction without changing the plot", () => {
+    const chapter = "民望值跳成100，扣除兑换技能的10点，正好余90点。";
+    const events = extractResourceEvents(
+      "获得10点民望。消耗10点民望兑换初级辩论技能。获得100点民望。" + chapter,
+      "resourceTypes:\n  - 民望值\n",
+    );
+    const validation = validateResourceMath({ events });
+    const repaired = repairResourceInconsistencies(chapter, validation);
+
+    expect(repaired.repaired).toBe(true);
+    expect(repaired.content).not.toContain("正好余90点");
+    expect(repaired.content).toContain("新增的100点民望就是当前余额");
+  });
+
+  it("checks 1 reputation to 10 federal-coin exchange ratio", () => {
+    const validEvents = extractResourceEvents("他消耗100点民望兑换1000联邦币。", "resourceTypes:\n  - 民望值\n  - 联邦币\n");
+    const invalidEvents = extractResourceEvents("他消耗90点民望兑换1000联邦币。", "resourceTypes:\n  - 民望值\n  - 联邦币\n");
+
+    expect(validateResourceMath({ events: validEvents, currentState: "民望值=100", bookRules: "1点民望=10联邦币" }).issues).toEqual([]);
+    expect(validateResourceMath({ events: invalidEvents, currentState: "民望值=90", bookRules: "1点民望=10联邦币" }).issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "exchange-rate-mismatch",
+        expected: 900,
+        actual: 1000,
+        expectedFromAmount: 100,
+        actualFromAmount: 90,
+      }),
+    ]));
+  });
+
+  it("computes authoritative ledger values and infers exchange spend from rules", () => {
+    const events = extractResourceEvents(
+      "获得10点民望。消耗10点民望兑换初级辩论技能。获得100点民望。兑换1000联邦币。",
+      "1点民望=10联邦币\n初级辩论技能消耗10点民望",
+    );
+    const validation = computeResourceLedger({
+      bookRules: "1点民望=10联邦币\n初级辩论技能消耗10点民望",
+      previousLedger: "| 民望值 | 0 |\n| 联邦币 | 200 |",
+      currentState: "| 当前资源 | 民望值=0；联邦币=200 |",
+      events,
+      chapterNumber: 2,
+    });
+
+    expect(validation.closingBalances["民望值"]).toBe(0);
+    expect(validation.closingBalances["联邦币"]).toBe(1200);
+    expect(validation.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "consume", resource: "民望值", amount: 100, reason: expect.stringContaining("兑换规则") }),
+    ]));
+  });
+
+  it("blocks illegal negative balances by default", () => {
+    const chapter = "他消耗100点民望兑换1000联邦币，当前民望值：-90。";
+    const events = extractResourceEvents(chapter, "1点民望=10联邦币");
+    const validation = validateResourceMath({
+      events,
+      currentState: "民望值=10",
+      bookRules: "1点民望=10联邦币",
+      chapterText: chapter,
+    });
+    const classified = classifyResourceConsistency({ validation, repaired: false });
+
+    expect(validation.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "negative-balance", severity: "critical" }),
+    ]));
+    expect(classified.status).toBe("FAILED");
+    expect(classified.blocking).toBe(true);
+    expect(buildResourceLedgerUpdate({ chapterNumber: 2, currentLedger: "| 民望值 | 10 |", validation })).toBe("| 民望值 | 10 |");
+  });
+
+  it("allows negative balances only when book_rules explicitly allow them within credit limit", () => {
+    const bookRules = [
+      "resources:",
+      "  民望值:",
+      "    type: integer",
+      "    initial: 0",
+      "    allowNegative: true",
+      "    creditLimit: 100",
+    ].join("\n");
+    const events = extractResourceEvents("消耗50点民望。", bookRules);
+    const validation = validateResourceMath({
+      events,
+      bookRules,
+      chapterText: "消耗50点民望。",
+    });
+    const classified = classifyResourceConsistency({ validation, repaired: false });
+
+    expect(validation.closingBalances["民望值"]).toBe(-50);
+    expect(validation.issues).toEqual([]);
+    expect(classified.blocking).toBe(false);
+  });
+
+  it("blocks unauthorized overdraft rules invented in prose", () => {
+    const chapter = "系统提示可透支兑换，无负债封顶，当前民望值：-90。";
+    const events = extractResourceEvents(chapter, "1点民望=10联邦币");
+    const validation = validateResourceMath({
+      events,
+      bookRules: "1点民望=10联邦币",
+      chapterText: chapter,
+    });
+    const classified = classifyResourceConsistency({ validation, repaired: false });
+
+    expect(validation.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "unauthorized-resource-rule", severity: "critical" }),
+    ]));
+    expect(classified.status).toBe("FAILED");
+    expect(classified.blocking).toBe(true);
+  });
+
+  it("builds a blocking recovery plan that preserves 1000 federal coins after earned reputation", () => {
+    const chapter = "系统提示可透支兑换。他消耗10点民望兑换1000联邦币，当前民望值：-90。";
+    const events = extractResourceEvents(chapter, "1点民望=10联邦币\n初级辩论技能消耗10点民望");
+    const validation = validateResourceMath({
+      events,
+      currentState: "民望值=10；联邦币=200",
+      bookRules: "1点民望=10联邦币\n初级辩论技能消耗10点民望",
+      chapterText: chapter,
+    });
+    const [plan] = buildResourceRecoveryPlans({
+      validation,
+      chapterIntent: "本章首次使用民望系统打脸汤姆，并缓解房租和医药费压力。",
+    });
+    const planValidation = computeResourceLedger({
+      bookRules: "1点民望=10联邦币\n初级辩论技能消耗10点民望",
+      previousLedger: "| 民望值 | 0 |\n| 联邦币 | 200 |",
+      currentState: "民望值=0；联邦币=200",
+      events: plan.requiredEvents,
+      chapterNumber: 2,
+    });
+
+    expect(plan.strategy).toBe("add_earned_resource_before_spend");
+    expect(planValidation.closingBalances["民望值"]).toBe(0);
+    expect(planValidation.closingBalances["联邦币"]).toBe(1200);
+    expect(planValidation.unlockedSkills).toContain("初级辩论技能");
+    expect(planValidation.issues).toEqual([]);
+  });
+
+  it("rejects resource recovery text with forbidden overdraft phrases", () => {
+    const plan = buildResourceRecoveryPlans({
+      validation: validateResourceMath({ events: [] }),
+      chapterIntent: "现金缓解",
+    })[0]!;
+
+    expect(hasForbiddenResourceRecoveryPhrase("系统提示可透支兑换，当前民望值：-90。", plan)).toBe(true);
+    expect(hasForbiddenResourceRecoveryPhrase("他获得100点民望后，消耗100点民望兑换1000联邦币，当前民望归零。", plan)).toBe(false);
+  });
+
+  it("rejects all cash exchange or cash arrival in defer_exchange recovery text", () => {
+    const plan = buildResourceRecoveryPlans({
+      validation: validateResourceMath({ events: [] }),
+      chapterIntent: "只完成初次打脸，不兑换现金",
+    }).find((candidate) => candidate.strategy === "defer_exchange")!;
+
+    expect(hasForbiddenResourceRecoveryPhrase("他用1民望兑换10联邦币。", plan)).toBe(true);
+    expect(hasForbiddenResourceRecoveryPhrase("银行到账10联邦币。", plan)).toBe(true);
+    expect(hasForbiddenResourceRecoveryPhrase("原来的两百加上刚兑换的一千，一共一千二百联邦币。", plan)).toBe(true);
+    expect(hasForbiddenResourceRecoveryPhrase("扣掉这一千，还差一千七百。", plan)).toBe(true);
+    expect(hasForbiddenResourceRecoveryPhrase("资金缺口缩小，他终于松了一口气。", plan)).toBe(true);
+    expect(hasForbiddenResourceRecoveryPhrase("他没有立刻换钱，只看见下一章把民望换成救命钱的可能。", plan)).toBe(false);
+    expect(hasForbiddenResourceRecoveryPhrase("透析费还差两千七百，房租还差八百，缺口依然压在胸口。", plan)).toBe(false);
+  });
+
+  it("infers positive delta from balance jump panel text", () => {
+    const chapter = "民望+1，民望+1，民望+2。白色的数字跳得飞快，没一会儿就停在了110的位置，比之前的初始民望翻了十倍还多。随后消耗100点民望兑换1000联邦币。";
+    const events = extractResourceEvents(chapter, "1点民望=10联邦币");
+    const validation = validateResourceMath({
+      events,
+      currentState: "民望值=10；联邦币=200",
+      bookRules: "1点民望=10联邦币",
+      chapterText: chapter,
+    });
+    const jump = validation.events.find((event) => event.kind === "balance_jump");
+
+    expect(jump).toEqual(expect.objectContaining({
+      resource: "民望值",
+      amount: 110,
+      toAmount: 110,
+      inferredDelta: 100,
+    }));
+    expect(validation.closingBalances["民望值"]).toBe(10);
+    expect(validation.closingBalances["联邦币"]).toBe(1200);
+    expect(validation.issues).toEqual([]);
+    expect(validation.events.filter((event) => event.kind === "gain" && event.resource === "民望值" && (event.amount ?? 0) <= 2)).toEqual([]);
+  });
+
+  it("attributes bank balance jumps to federal coins instead of reputation", () => {
+    const chapter = "手机银行余额页面显示，原本的两百余额，变成了一千二百。";
+    const events = extractResourceEvents(chapter, "1点民望=10联邦币");
+    const validation = validateResourceMath({
+      events,
+      currentState: "民望值=0；联邦币=200",
+      bookRules: "1点民望=10联邦币",
+      chapterText: chapter,
+    });
+
+    expect(validation.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: "balance_jump",
+        resource: "联邦币",
+        fromAmount: 200,
+        toAmount: 1200,
+      }),
+    ]));
+    expect(validation.events.some((event) => event.kind === "balance_jump" && event.resource === "民望值" && event.toAmount === 1200)).toBe(false);
+    expect(validation.closingBalances["联邦币"]).toBe(1200);
+    expect(validation.closingBalances["民望值"]).not.toBe(1200);
+  });
+
+  it("keeps reputation panel jumps attributed to reputation", () => {
+    const chapter = "浅蓝面板重新浮起，民望值稳稳停在100。";
+    const events = extractResourceEvents(chapter, "1点民望=10联邦币");
+
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "balance_jump", resource: "民望值", toAmount: 100 }),
+    ]));
+  });
+
+  it("does not default ambiguous balance jumps to reputation", () => {
+    const events = extractResourceEvents("数字停在110。", "1点民望=10联邦币");
+
+    expect(events.filter((event) => event.kind === "balance_jump")).toEqual([]);
+  });
+
+  it("blocks 5 or 10 reputation being exchanged for 1000 federal coins", () => {
+    const bookRules = "1点民望=10联邦币";
+    for (const chapter of ["他消耗5点民望兑换1000联邦币。", "他消耗10点民望兑换1000联邦币。"]) {
+      const validation = validateResourceMath({
+        events: extractResourceEvents(chapter, bookRules),
+        currentState: "民望值=100；联邦币=200",
+        bookRules,
+        chapterText: chapter,
+      });
+      const classified = classifyResourceConsistency({ validation, repaired: false });
+
+      expect(validation.issues).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "exchange-rate-mismatch", severity: "critical" }),
+      ]));
+      expect(classified.status).toBe("FAILED");
+      expect(classified.blocking).toBe(true);
+    }
+  });
+
+  it("detects implicit federal coin exchange mismatch from nearby reputation spend", () => {
+    const chapter = "兑换成功，消耗民望值10，1000联邦币到账。";
+    const validation = validateResourceMath({
+      events: extractResourceEvents(chapter, "1点民望=10联邦币"),
+      currentState: "民望值=100；联邦币=200",
+      bookRules: "1点民望=10联邦币",
+      chapterText: chapter,
+    });
+
+    expect(validation.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "exchange-rate-mismatch",
+        actualFromAmount: 10,
+        actualToAmount: 1000,
+      }),
+    ]));
+  });
+
+  it("does not mix skill costs and cash exchange costs into one reputation spend", () => {
+    const chapter = "初级辩论技能需要5点民望，1000联邦币需要5点民望，加起来刚好10点。";
+    const validation = validateResourceMath({
+      events: extractResourceEvents(chapter, "1点民望=10联邦币\n初级辩论技能消耗10点民望"),
+      currentState: "民望值=10；联邦币=200",
+      bookRules: "1点民望=10联邦币\n初级辩论技能消耗10点民望",
+      chapterText: chapter,
+    });
+
+    expect(validation.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "skill-cost-mismatch", severity: "critical" }),
+      expect.objectContaining({ code: "exchange-rate-mismatch", severity: "critical" }),
+    ]));
+  });
+
+  it("infers balance jump from zero and keeps exchange non-negative", () => {
+    const chapter = "系统面板上的民望值定格在110点。随后消耗100点民望兑换1000联邦币。";
+    const validation = validateResourceMath({
+      events: extractResourceEvents(chapter, "1点民望=10联邦币"),
+      currentState: "民望值=0；联邦币=200",
+      bookRules: "1点民望=10联邦币",
+      chapterText: chapter,
+    });
+
+    expect(validation.events.find((event) => event.kind === "balance_jump")).toEqual(expect.objectContaining({
+      inferredDelta: 110,
+    }));
+    expect(validation.closingBalances["民望值"]).toBe(10);
+    expect(validation.issues).toEqual([]);
+  });
+
+  it("does not treat ordinary 110 numbers as resource jumps", () => {
+    const text = "他走过第110街，又看见110号公路的标牌，三号仓库在远处，第2章计划没有变化。";
+    const events = extractResourceEvents(text, "1点民望=10联邦币");
+
+    expect(events.filter((event) => event.kind === "balance_jump")).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
+  it("normalizes and filters skill names for ledger-safe unlocks", () => {
+    const chapter = [
+      "兑换栏里亮起一行新字：初级辩论技能。",
+      "栏里亮起一行新字：初级辩论。",
+      "10点民望瞬间清空，初级辩论技能兑换完成。",
+      "兑换完技能。",
+      "权限：基础资源、初级。",
+      "完。",
+    ].join("\n");
+    const validation = validateResourceMath({
+      events: extractResourceEvents(chapter, "初级辩论技能消耗10点民望"),
+      currentState: "民望值=10",
+      bookRules: "初级辩论技能消耗10点民望",
+      chapterText: chapter,
+    });
+    const ledger = buildResourceLedgerUpdate({ chapterNumber: 2, currentLedger: "", validation });
+
+    expect(validation.unlockedSkills).toEqual(["初级辩论技能"]);
+    expect(ledger).toContain("| 技能 | 初级辩论技能 | 2 | 本章解锁 |");
+    expect(ledger).not.toContain("完");
+    expect(ledger).not.toContain("权限");
+    expect(ledger).not.toContain("栏里亮起一行新字");
+  });
+
+  it("treats core resource balance mismatches as blocking failures", () => {
+    const chapter = "围观路人认可他，系统新增110点民望。当前民望值：1。";
+    const validation = validateResourceMath({
+      events: extractResourceEvents(chapter, "resourceTypes:\n  - 民望值\n"),
+      currentState: "民望值=0",
+      bookRules: "resourceTypes:\n  - 民望值\n",
+      chapterText: chapter,
+    });
+    const classified = classifyResourceConsistency({ validation, repaired: false });
+
+    expect(validation.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "balance-mismatch",
+        severity: "critical",
+        resource: "民望值",
+        expected: 110,
+        actual: 1,
+      }),
+    ]));
+    expect(classified.status).toBe("FAILED");
+    expect(classified.blocking).toBe(true);
+  });
+
+  it("auto-completes missing skill unlocks from skill-use prose", () => {
+    const chapter = "10点民望瞬间清空，信息流冲进脑子，法规条文浮现在意识里，他快速梳理逻辑。";
+    const validation = validateResourceMath({
+      events: extractResourceEvents(chapter, "初级辩论技能消耗10点民望"),
+      currentState: "民望值=10",
+      bookRules: "初级辩论技能消耗10点民望",
+      chapterText: chapter,
+    });
+    const classified = classifyResourceConsistency({ validation, repaired: true });
+
+    expect(validation.unlockedSkills).toContain("初级辩论技能");
+    expect(validation.closingBalances["民望值"]).toBe(0);
+    expect(validation.issues.some((issue) => issue.code === "missing-skill-unlock")).toBe(false);
+    expect(classified.blocking).toBe(false);
+  });
+
+  it("syncs explicit reputation balance claims to the program ledger without changing spends or cash", () => {
+    const text = [
+      "他消耗10点民望兑换初级辩论技能。",
+      "蓝色面板显示，当前民望值：10。",
+      "外婆透析费2700，房租800，联邦币200仍旧没有变化。",
+    ].join("\n");
+    const synced = syncBalanceClaimsWithLedger(text, {
+      closingBalances: { 民望值: 100 },
+    });
+
+    expect(synced.attempted).toBe(true);
+    expect(synced.applied).toBe(true);
+    expect(synced.resource).toBe("民望值");
+    expect(synced.from).toBe(10);
+    expect(synced.to).toBe(100);
+    expect(synced.content).toContain("当前民望值：100");
+    expect(synced.content).toContain("消耗10点民望");
+    expect(synced.content).toContain("联邦币200");
+    expect(synced.content).toContain("透析费2700");
+  });
+
+  it("syncs reputation stop-at balance claims and leaves ambiguous text untouched", () => {
+    const synced = syncBalanceClaimsWithLedger("民望值一栏稳稳停在10点。", {
+      closingBalances: { 民望值: 100 },
+    });
+    const ambiguous = syncBalanceClaimsWithLedger("他看了一眼数字，没有再说话。", {
+      closingBalances: { 民望值: 100 },
+    });
+
+    expect(synced.content).toBe("民望值一栏稳稳停在100点。");
+    expect(ambiguous.attempted).toBe(true);
+    expect(ambiguous.applied).toBe(false);
+    expect(ambiguous.reason).toBe("ambiguous-balance-claim");
+  });
+
+  it("filters pseudo skill category labels while preserving real debate skills", () => {
+    const chapter = "可兑换物品/技能列表亮起，物品/技能分类展开，初级辩论技能兑换完成。";
+    const validation = validateResourceMath({
+      events: extractResourceEvents(chapter, "初级辩论技能消耗10点民望"),
+      currentState: "民望值=10",
+      bookRules: "初级辩论技能消耗10点民望",
+      chapterText: chapter,
+    });
+
+    expect(validation.unlockedSkills).toEqual(["初级辩论技能"]);
+    expect(detectFilteredPseudoSkills(chapter)).toEqual(expect.arrayContaining(["物品/技能"]));
+    expect(validation.unlockedSkills).not.toContain("物品/技能");
+  });
+
+  it("template patch syncs stale reputation balance claims after removing cash flow", () => {
+    const patched = applyDeferExchangeTemplatePatch({
+      chapterText: [
+        "他扶起老太太，系统提示获得10点民望。",
+        "10点民望瞬间清空，初级辩论技能兑换完成。",
+        "当前民望值：10。",
+        "100点民望瞬间扣除，1000联邦币到账。",
+        "电子钱包余额变成1200。",
+      ].join("\n"),
+      bookRules: "1点民望=10联邦币\n初级辩论技能消耗10点民望",
+      currentState: "民望值=0；联邦币=200",
+      currentLedger: "| 民望值 | 0 |\n| 联邦币 | 200 |",
+    });
+    const validation = validateResourceMath({
+      events: extractResourceEvents(patched.patchedText, "1点民望=10联邦币\n初级辩论技能消耗10点民望"),
+      currentState: "民望值=0；联邦币=200",
+      bookRules: "1点民望=10联邦币\n初级辩论技能消耗10点民望",
+      chapterText: patched.patchedText,
+    });
+
+    expect(patched.balanceClaimPatchAttempted).toBe(true);
+    expect(patched.balanceClaimPatchApplied).toBe(true);
+    expect(patched.balanceClaimPatchFrom).toBe(10);
+    expect(patched.balanceClaimPatchTo).toBe(100);
+    expect(patched.patchedText).toContain("当前民望值：100");
+    expect(validation.issues).toEqual([]);
+    expect(validation.closingBalances["民望值"]).toBe(100);
+    expect(validation.unlockedSkills).toEqual(["初级辩论技能"]);
+  });
+
+  it("template patch removes indirect defer_exchange cash-out summaries", () => {
+    const patched = applyDeferExchangeTemplatePatch({
+      chapterText: [
+        "他扶起老太太，系统提示获得10点民望。",
+        "10点民望瞬间清空，初级辩论技能兑换完成。",
+        "围观路人认可他的做法，系统新增100点民望。",
+        "林默靠在路边的水泥灯柱上，掏出旧手机翻银行账户。原来的两百加上刚兑换的一千，一共一千二百联邦币。外婆下周要交的透析费还差两千七百，扣掉这一千，还差一千七百，下个月的房租还是差八百，沉甸甸的缺口依然压在胸口，但他已经不像刚才那样慌得没底了。",
+      ].join("\n\n"),
+      bookRules: "1点民望=10联邦币\n初级辩论技能消耗10点民望",
+      currentState: "民望值=0；联邦币=200",
+      currentLedger: "| 民望值 | 0 |\n| 联邦币 | 200 |",
+    });
+    const validation = validateResourceMath({
+      events: extractResourceEvents(patched.patchedText, "1点民望=10联邦币\n初级辩论技能消耗10点民望"),
+      currentState: "民望值=0；联邦币=200",
+      bookRules: "1点民望=10联邦币\n初级辩论技能消耗10点民望",
+      chapterText: patched.patchedText,
+    });
+
+    expect(patched.patchApplied).toBe(true);
+    expect(patched.removedSnippets.join("\n")).toContain("刚兑换的一千");
+    expect(patched.patchedText).not.toContain("一千二百");
+    expect(patched.patchedText).not.toContain("扣掉这一千");
+    expect(patched.patchedText).not.toContain("还差一千七百");
+    expect(patched.patchedText).toContain("没有立刻按下去");
+    expect(patched.patchedText).toContain("透析费还差两千七");
+    expect(validation.closingBalances["联邦币"]).toBe(200);
+    expect(validation.issues).toEqual([]);
+  });
+
+  it("repairs wrong exchange spend and wrong balance claims from authoritative results", () => {
+    const chapter = "他消耗5点民望兑换1000联邦币，当前民望余额20点。";
+    const events = extractResourceEvents(chapter, "1点民望=10联邦币");
+    const validation = validateResourceMath({
+      events,
+      currentState: "民望值=100",
+      bookRules: "1点民望=10联邦币",
+    });
+    const repaired = repairResourceInconsistencies(chapter, validation);
+
+    expect(repaired.content).toContain("消耗100点民望兑换1000联邦币");
+    expect(repaired.content).toContain("当前民望归零");
+  });
+
+  it("updates resource ledger and current state summaries", () => {
+    const chapter = "他赔偿78联邦币。随后消耗100点民望兑换1000联邦币。";
+    const events = extractResourceEvents(chapter, "resourceTypes:\n  - 民望值\n  - 联邦币\n");
+    const validation = validateResourceMath({
+      events,
+      currentLedger: "| 联邦币 | 200 | 0 | 初始现金 |",
+      currentState: "| 当前资源 | 民望值=100；联邦币=200 |",
+    });
+    const ledger = buildResourceLedgerUpdate({
+      chapterNumber: 2,
+      currentLedger: "# 资源账本\n| 联邦币 | 200 | 0 | 初始现金 |",
+      validation,
+    });
+    const state = syncCurrentStateResources({
+      currentState: "# 当前状态\n\n| 字段 | 值 |\n|---|---|\n| 当前章节 | 2 |",
+      validation,
+    });
+
+    expect(ledger).toContain("## 章节流水");
+    expect(ledger).toContain("| 2 | 联邦币 | 200 | +1000 | -78 | 1122 |");
+    expect(state).toContain("当前资源");
+    expect(state).toContain("联邦币=1122");
+  });
+
+  it("filters dirty resource names out of ledger and current_state", () => {
+    const validation = validateResourceMath({
+      events: [],
+      currentLedger: [
+        "| 资源 | 当前值 | 最近更新章节 | 备注 |",
+        "| - | 0 | 2 | 本章更新 |",
+        "| 1 | 0 | 2 | 本章更新 |",
+        "| 当前章节 | 1 | 2 | 本章更新 |",
+        "| 民望值 | 20 | 2 | 合法 |",
+      ].join("\n"),
+      currentState: "| 当前资源 | -=0；1=0；当前章节=1；联邦币=100 |",
+    });
+    const ledger = buildResourceLedgerUpdate({
+      chapterNumber: 2,
+      currentLedger: "",
+      validation: {
+        ...validation,
+        events: [{ kind: "gain", resource: "民望值", amount: 0, evidence: "noop", index: 0 }],
+      },
+    });
+    const state = syncCurrentStateResources({
+      currentState: "| 当前资源 | -=0；1=0；当前章节=1；联邦币=100 |",
+      validation: {
+        ...validation,
+        events: [{ kind: "gain", resource: "民望值", amount: 0, evidence: "noop", index: 0 }],
+      },
+    });
+
+    expect(ledger).toContain("民望值");
+    expect(ledger).toContain("联邦币");
+    expect(ledger).not.toContain("| - |");
+    expect(ledger).not.toContain("| 1 |");
+    expect(ledger).not.toContain("当前章节");
+    expect(state).not.toContain("-=0");
+    expect(state).not.toContain("1=0");
+    expect(state).not.toContain("当前章节=1");
+  });
+
+  it("does not treat chapter numbers, ages, or warehouse numbers as resource events", () => {
+    const chapter = "第2章里，19岁的主角走进三号仓库，拨通了13800138000。";
+    expect(extractResourceEvents(chapter)).toEqual([]);
   });
 });

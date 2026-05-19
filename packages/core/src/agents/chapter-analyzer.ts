@@ -24,6 +24,7 @@ export interface AnalyzeChapterInput {
   readonly chapterIntent?: string;
   readonly contextPackage?: ContextPackage;
   readonly ruleStack?: RuleStack;
+  readonly resourceAuthoritySummary?: string;
 }
 
 export type AnalyzeChapterOutput = ParsedWriterOutput;
@@ -162,6 +163,7 @@ export class ChapterAnalyzerAgent extends BaseAgent {
           ? `\n## Current Character Matrix\n${matrixWorkingSet}\n`
           : `\n## 当前角色交互矩阵\n${matrixWorkingSet}\n`
         : "",
+      resourceAuthoritySummary: input.resourceAuthoritySummary,
     });
 
     const response = await this.chat(
@@ -443,6 +445,7 @@ ${bookRulesBody ? `## 本书规则\n\n${bookRulesBody}` : ""}
     readonly matrixBlock: string;
     readonly bibleBlock: string;
     readonly outlineOrControlBlock: string;
+    readonly resourceAuthoritySummary?: string;
   }): string {
     if (params.language === "en") {
       const titleLine = params.chapterTitle
@@ -462,6 +465,7 @@ ${params.chapterContent}
 ## Current State
 ${params.currentState}
 ${ledgerBlock}
+${params.resourceAuthoritySummary ? `\n## Resource Engine Authority\n${params.resourceAuthoritySummary}\n` : ""}
 ${params.hooksBlock}${params.volumeSummariesBlock}${params.subplotBlock}${params.emotionalBlock}${params.matrixBlock}${params.summariesBlock}${params.outlineOrControlBlock}${params.bibleBlock}
 
 Please return the result strictly in the === TAG === format.`;
@@ -484,6 +488,7 @@ ${params.chapterContent}
 ## 当前状态卡
 ${params.currentState}
 ${ledgerBlock}
+${params.resourceAuthoritySummary ? `\n## Resource Engine 权威资源摘要\n${params.resourceAuthoritySummary}\n` : ""}
 ${params.hooksBlock}${params.volumeSummariesBlock}${params.subplotBlock}${params.emotionalBlock}${params.matrixBlock}${params.summariesBlock}${params.outlineOrControlBlock}${params.bibleBlock}
 
 请严格按照 === TAG === 格式输出分析结果。`;

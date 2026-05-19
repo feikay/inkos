@@ -305,6 +305,7 @@ describe("ChapterStatusSchema", () => {
     "audit-passed",
     "audit-failed",
     "state-degraded",
+    "blocked-resource-plan",
     "revising",
     "ready-for-review",
     "approved",
@@ -317,8 +318,8 @@ describe("ChapterStatusSchema", () => {
     expect(ChapterStatusSchema.parse(value)).toBe(value);
   });
 
-  it("has exactly 13 valid statuses", () => {
-    expect(ChapterStatusSchema.options).toHaveLength(13);
+  it("has exactly 14 valid statuses", () => {
+    expect(ChapterStatusSchema.options).toHaveLength(14);
   });
 
   it("rejects unknown status", () => {

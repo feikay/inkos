@@ -452,10 +452,31 @@ inkos 2.0：故事性的大升级
 
 任务列表
 
-1. inkos 2.0 任务一——沉淀 story-methods 方法论知识库
-2. inkos 2.0 任务二——增强 create 阶段故事骨架
-3. inkos 2.0 任务三——增强 FoundationReviewerAgent 审核故事发动机质量
-4. inkos 2.0 任务二点五——create 阶段反哺旧控制文档
-5. inkos 2.0 任务二点六——优化 create 反哺文档的结构化
-6. inkos 2.0 任务三点五——create 阶段题材安全与发布风险
-7. inkos 2.0 任务三点五点一——补强 identity_insult 检测与真实国家规则一致性
+1. ~~inkos 2.0 任务一——沉淀 story-methods 方法论知识库~~
+2. ~~inkos 2.0 任务二——增强 create 阶段故事骨架~~
+3. ~~inkos 2.0 任务三——增强 FoundationReviewerAgent 审核故事发动机质量~~
+4. ~~inkos 2.0 任务二点五——create 阶段反哺旧控制文档~~
+5. ~~inkos 2.0 任务二点六——优化 create 反哺文档的结构化~~
+6. ~~inkos 2.0 任务三点五——create 阶段题材安全与发布风险~~
+7. ~~inkos 2.0 任务三点五点一——补强 identity_insult 检测与真实国家规则一致性~~
+8. ~~inkos 2.0 任务四——chapter_intent 续写前意图卡~~
+9. ~~inkos 2.0 任务四点一——强化 chapter_intent 优先级，避免旧 payoff 机制覆盖意图卡~~
+10. ~~inkos 2.0 任务四点二——清理旧 planner payoffDirective，防止覆盖 chapter_intent~~
+11. ~~inkos 2.0 任务五 V1——chapter_intent 与正文一致性审核报告~~
+12. ~~inkos 2.0 任务五点一——强化资源账本/数值一致性修复~~
+13. ~~inkos 2.0 任务五点二——程序化 Resource Engine，接管系统流数值计算~~
+14. ~~inkos 2.0 任务五点三——Resource Engine 失败时阻断后续污染~~
+15. ~~inkos 2.0 任务五点四——Resource Engine blocking 后的自动重写策略~~
+16. ~~inkos 2.0 任务五点四点一——增强 Resource Engine 余额跳转识别与技能名抽取~~
+17. ~~inkos 2.0 任务五点四点二——Resource Recovery 失败后降级方案 A，避免 LLM 反复发明透支~~
+18. ~~inkos 2.0 任务五点四点三——修复 balance_jump 资源归属，防止把联邦币余额误判为民望值~~
+19. ~~inkos 2.0 任务五点四点四——统一资源规则来源，方案 A 禁止所有现金兑换，并修复技能账本~~
+20. ~~inkos 2.0 任务五点四点五——方案 A fallback 使用程序模板 patch，硬删违规现金兑换段落~~
+21. ~~inkos 2.0 任务五点四点六——Resource Engine WARN/失败语义统一，资源未闭合不得 ready-for-review~~
+22. ~~inkos 2.0 任务五点四点七——template patch 后同步修正余额声明，并过滤伪技能名~~
+23. ~~inkos 2.0 任务五点四点八——正文非正文内容清理器，Resource patch 后强制 clean-narrative~~
+24. ~~inkos 2.0 任务五点四点九——defer_exchange 下扩展现金流语义检测，删除间接现金兑现表达~~
+25. ~~inkos 2.0 任务五点五——Resource Plan 前置注入 chapter_intent / writer，避免先写错再后修~~
+26. inkos 2.0 任务五点七：Resource Plan 通用化与章节阶段识别
+27. 任务五点七 B： No-Change Resource Closure 无资源变化章节的资源闭合机制
+

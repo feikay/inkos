@@ -488,6 +488,22 @@ export class StateManager {
       // runtime directory missing
     }
 
+    // Delete chapter-intents for discarded chapters
+    const chapterIntentsDir = join(bookDir, "story", "runtime", "chapter-intents");
+    try {
+      const intentFiles = await readdir(chapterIntentsDir);
+      for (const file of intentFiles) {
+        const match = file.match(/^(\d+)\.md$/);
+        if (!match) continue;
+        const num = parseInt(match[1]!, 10);
+        if (num > targetChapter) {
+          await unlink(join(chapterIntentsDir, file)).catch(() => {});
+        }
+      }
+    } catch {
+      // chapter-intents directory missing
+    }
+
     // Also check story/drafts/ for discarded chapter files
     const draftsDir = join(bookDir, "story", "drafts");
     try {

@@ -10,7 +10,49 @@ import { ArchitectAgent, type ArchitectOutput } from "../agents/architect.js";
 import { FoundationReviewerAgent } from "../agents/foundation-reviewer.js";
 import { PlannerAgent, type PlanChapterOutput } from "../agents/planner.js";
 import { ComposerAgent } from "../agents/composer.js";
-import { WriterAgent, type WriteChapterInput, type WriteChapterOutput } from "../agents/writer.js";
+import { sanitizePlannerIntentForChapterIntent, WriterAgent, type WriteChapterInput, type WriteChapterOutput } from "../agents/writer.js";
+import { ChapterIntentAgent } from "../agents/chapter-intent.js";
+import {
+  buildSkippedIntentAlignmentReport,
+  IntentAlignmentReviewerAgent,
+  writeIntentAlignmentReportFiles,
+  type IntentAlignmentReport,
+} from "../agents/intent-alignment-reviewer.js";
+import {
+  cleanNonNarrativeArtifacts,
+  detectNonNarrativeArtifacts,
+  type CleanNarrativeResult,
+} from "../agents/clean-narrative.js";
+import {
+  applyResourcePlanExpectedBalances,
+  buildChapterResourcePlan,
+  isNoBalanceChangePlan,
+  validateResourceEngineAgainstPlan,
+  validateTextAgainstChapterResourcePlanFinal,
+  type ChapterResourcePlan,
+} from "../agents/resource-plan.js";
+import {
+  buildAuthoritativeResourceContext,
+  buildResourceAuditIssues,
+  buildResourceAuthoritySummary,
+  buildResourceLedgerUpdate,
+  buildResourceRecoveryPlans,
+  classifyResourceConsistency,
+  detectFilteredPseudoSkills,
+  extractResourceEvents,
+  applyDeferExchangeTemplatePatch,
+  hasForbiddenResourceRecoveryPhrase,
+  repairResourceInconsistencies,
+  ResourceBlockingRewriterAgent,
+  ResourceConsistencyReviserAgent,
+  selectResourceRecoveryPlan,
+  syncCurrentStateResources,
+  validateResourceMath,
+  type ResourceConsistencyPipelineResult,
+  type ResourceValidationResult,
+  type ResourceConsistencyStatus,
+} from "../agents/resource-consistency.js";
+import { stripNonProseArtifacts } from "../agents/writer-parser.js";
 import { LengthNormalizerAgent } from "../agents/length-normalizer.js";
 import { ChapterAnalyzerAgent } from "../agents/chapter-analyzer.js";
 import { ContinuityAuditor } from "../agents/continuity.js";
@@ -91,7 +133,7 @@ export interface ChapterPipelineResult {
   readonly wordCount: number;
   readonly auditResult: AuditResult;
   readonly revised: boolean;
-  readonly status: "ready-for-review" | "audit-failed" | "state-degraded";
+  readonly status: "ready-for-review" | "audit-failed" | "state-degraded" | "blocked-resource-plan";
   readonly lengthWarnings?: ReadonlyArray<string>;
   readonly lengthTelemetry?: LengthTelemetry;
   readonly tokenUsage?: TokenUsageSummary;
@@ -1332,12 +1374,19 @@ export class PipelineRunner {
       });
     }
     this.logStage(stageLanguage, { zh: "准备章节输入", en: "preparing chapter inputs" });
-    const writeInput = await this.prepareWriteInput(
+    const baseWriteInput = await this.prepareWriteInput(
       book,
       bookDir,
       chapterNumber,
       this.config.externalContext,
     );
+    const writeInput = await this.prepareChapterIntentInput({
+      book,
+      bookDir,
+      chapterNumber,
+      writeInput: baseWriteInput,
+      language: stageLanguage,
+    });
     const reducedControlInput = writeInput.chapterIntent && writeInput.contextPackage && writeInput.ruleStack
       ? {
           chapterIntent: writeInput.chapterIntent,
@@ -1431,6 +1480,280 @@ export class PipelineRunner {
     let auditResult = reviewResult.auditResult;
     const postReviseCount = reviewResult.postReviseCount;
     const normalizeApplied = reviewResult.normalizeApplied;
+    this.config.logger?.child("writer")?.info(this.localize(pipelineLang, {
+      zh: `阶段 1c：资源引擎校验（第${chapterNumber}章）`,
+      en: `Phase 1c: resource engine check for chapter ${chapterNumber}`,
+    }));
+    let resourceConsistency = await this.runResourceConsistencyPass({
+      bookId,
+      bookDir,
+      chapterNumber,
+      content: finalContent,
+      wordCount: finalWordCount,
+      lengthSpec,
+      language: pipelineLang,
+      resourcePlan: writeInput.resourcePlan,
+    });
+    totalUsage = PipelineRunner.addUsage(totalUsage, resourceConsistency.tokenUsage);
+    if (resourceConsistency.repaired) {
+      finalContent = resourceConsistency.content;
+      finalWordCount = resourceConsistency.wordCount;
+      revised = true;
+    }
+    if (resourceConsistency.auditIssues.length > 0) {
+      auditResult = {
+        ...auditResult,
+        issues: [...auditResult.issues, ...resourceConsistency.auditIssues],
+      };
+    }
+    let resourceAuthoritySummary = resourceConsistency.validation.events.length > 0 && !resourceConsistency.blocking
+      ? buildResourceAuthoritySummary({
+          chapter: chapterNumber,
+          validation: resourceConsistency.validation,
+          status: resourceConsistency.status,
+          recoveryPlan: resourceConsistency.fallbackRecoveryPlan ?? resourceConsistency.recoveryPlan,
+        })
+      : undefined;
+    let cleanNarrativeResult: CleanNarrativeResult | undefined;
+    {
+      const storyDirForClean = join(bookDir, "story");
+      const bookRules = await readFile(join(storyDirForClean, "book_rules.md"), "utf-8").catch(() => "");
+      const currentLedger = await readFile(join(storyDirForClean, "particle_ledger.md"), "utf-8").catch(() => "");
+      const currentState = await readFile(join(storyDirForClean, "current_state.md"), "utf-8").catch(() => "");
+      const chapterIntent = await readFile(join(storyDirForClean, "runtime", "chapter-intents", `${String(chapterNumber).padStart(4, "0")}.md`), "utf-8").catch(() => "");
+      cleanNarrativeResult = cleanNonNarrativeArtifacts(finalContent);
+      if (cleanNarrativeResult.changed) {
+        finalContent = cleanNarrativeResult.cleanedText;
+        finalWordCount = countChapterLength(finalContent, lengthSpec.countingMode);
+        revised = true;
+        const validation = this.revalidateResourceConsistency({
+          content: finalContent,
+          bookRules,
+          currentLedger,
+          currentState,
+          chapterIntent,
+        });
+        const classification = classifyResourceConsistency({
+          validation,
+          repaired: resourceConsistency.repaired,
+        });
+        resourceConsistency = {
+          ...resourceConsistency,
+          content: finalContent,
+          wordCount: finalWordCount,
+          validation,
+          status: cleanNarrativeResult.blocking ? "FAILED" : classification.status,
+          blocking: cleanNarrativeResult.blocking || classification.blocking,
+          shouldPersistLedger: !cleanNarrativeResult.blocking && classification.shouldPersistLedger,
+          shouldPersistStateResources: !cleanNarrativeResult.blocking && classification.shouldPersistStateResources,
+          repaired: true,
+        };
+        auditResult = {
+          ...auditResult,
+          passed: auditResult.passed && !resourceConsistency.blocking,
+          issues: [...auditResult.issues, {
+            severity: resourceConsistency.blocking ? "critical" : "info",
+            category: "clean-narrative",
+            description: resourceConsistency.blocking
+              ? "clean-narrative: 正文包含非正文草稿批注，需人工清理。"
+              : "clean-narrative: 已清理正文中的非正文草稿批注。",
+            suggestion: resourceConsistency.blocking
+              ? "删除 LLM 自我纠错、提示词意图、资源计算草稿后再重新校验资源账本。"
+              : "已删除非正文草稿批注，并重新执行 Resource Engine 校验。",
+          }],
+        };
+        await this.writeCleanNarrativeReport({
+          bookDir,
+          chapterNumber,
+          result: cleanNarrativeResult,
+          status: resourceConsistency.blocking ? "FAILED" : "CLEANED",
+          blocking: resourceConsistency.blocking,
+        });
+        await this.writeResourceConsistencyReport({
+          bookDir,
+          chapterNumber,
+          validation: resourceConsistency.validation,
+          status: resourceConsistency.status,
+          blocking: resourceConsistency.blocking,
+          recoveryAttempted: resourceConsistency.recoveryAttempted,
+          recoveryPlan: resourceConsistency.recoveryPlan,
+          secondValidation: resourceConsistency.secondValidation,
+          recoveryPlanResult: resourceConsistency.recoveryPlanResult,
+          fallbackRecoveryAttempted: resourceConsistency.fallbackRecoveryAttempted,
+          fallbackRecoveryPlan: resourceConsistency.fallbackRecoveryPlan,
+          fallbackSecondValidation: resourceConsistency.fallbackSecondValidation,
+          templatePatchAttempted: resourceConsistency.templatePatchAttempted,
+          templatePatchApplied: resourceConsistency.templatePatchApplied,
+          templatePatchValidation: resourceConsistency.templatePatchValidation,
+          templatePatchReason: resourceConsistency.templatePatchReason,
+          removedCashFlowSnippets: resourceConsistency.removedCashFlowSnippets,
+          balanceClaimPatchAttempted: resourceConsistency.balanceClaimPatchAttempted,
+          balanceClaimPatchApplied: resourceConsistency.balanceClaimPatchApplied,
+          balanceClaimPatchResource: resourceConsistency.balanceClaimPatchResource,
+          balanceClaimPatchFrom: resourceConsistency.balanceClaimPatchFrom,
+          balanceClaimPatchTo: resourceConsistency.balanceClaimPatchTo,
+          balanceClaimPatchReason: resourceConsistency.balanceClaimPatchReason,
+          filteredPseudoSkills: resourceConsistency.filteredPseudoSkills ?? detectFilteredPseudoSkills(finalContent),
+          resourcePlan: writeInput.resourcePlan,
+          resourcePlanViolations: writeInput.resourcePlan
+            ? validateTextAgainstChapterResourcePlanFinal({
+                text: finalContent,
+                plan: writeInput.resourcePlan,
+                validation: resourceConsistency.validation,
+              }).violations
+            : [],
+        });
+        resourceAuthoritySummary = resourceConsistency.validation.events.length > 0 && !resourceConsistency.blocking
+          ? buildResourceAuthoritySummary({
+              chapter: chapterNumber,
+              validation: resourceConsistency.validation,
+              status: resourceConsistency.status,
+              recoveryPlan: resourceConsistency.fallbackRecoveryPlan ?? resourceConsistency.recoveryPlan,
+            })
+          : undefined;
+      } else {
+        cleanNarrativeResult = {
+          ...cleanNarrativeResult,
+          artifacts: detectNonNarrativeArtifacts(finalContent),
+        };
+      }
+    }
+    const cleanedFinalContent = stripNonProseArtifacts(finalContent);
+    if (cleanedFinalContent !== finalContent.trim()) {
+      finalContent = cleanedFinalContent;
+      finalWordCount = countChapterLength(finalContent, lengthSpec.countingMode);
+      this.logWarn(pipelineLang, {
+        zh: `第${chapterNumber}章落盘前已清理非正文检查块，清理后字数=${finalWordCount}`,
+        en: `Chapter ${chapterNumber}: removed non-prose check blocks before persistence; cleaned word count=${finalWordCount}`,
+      });
+    }
+    const storyDir = join(bookDir, "story");
+    {
+      const bookRules = await readFile(join(storyDir, "book_rules.md"), "utf-8").catch(() => "");
+      const currentLedger = await readFile(join(storyDir, "particle_ledger.md"), "utf-8").catch(() => "");
+      const currentState = await readFile(join(storyDir, "current_state.md"), "utf-8").catch(() => "");
+      const chapterIntent = await readFile(join(storyDir, "runtime", "chapter-intents", `${String(chapterNumber).padStart(4, "0")}.md`), "utf-8").catch(() => "");
+      const deferPlan = [resourceConsistency.fallbackRecoveryPlan, resourceConsistency.recoveryPlan]
+        .find((plan) => plan?.strategy === "defer_exchange");
+      if (deferPlan && hasForbiddenResourceRecoveryPhrase(finalContent, deferPlan)) {
+        this.config.logger?.child("writer")?.info("resource-engine: defer_exchange cash-flow detected in final candidate, applying template patch");
+        const templateAttempt = this.tryDeferExchangeTemplatePatch({
+          content: finalContent,
+          bookRules,
+          currentLedger,
+          currentState,
+          chapterIntent,
+          recoveryPlan: deferPlan,
+        });
+        resourceConsistency = {
+          ...resourceConsistency,
+          validation: templateAttempt.validation,
+          templatePatchAttempted: true,
+          templatePatchApplied: templateAttempt.applied,
+          templatePatchValidation: templateAttempt.validationPassed ? "PASS" : "FAILED",
+          templatePatchReason: templateAttempt.reason,
+          removedCashFlowSnippets: templateAttempt.removedSnippets,
+          balanceClaimPatchAttempted: templateAttempt.balanceClaimPatchAttempted,
+          balanceClaimPatchApplied: templateAttempt.balanceClaimPatchApplied,
+          balanceClaimPatchResource: templateAttempt.balanceClaimPatchResource,
+          balanceClaimPatchFrom: templateAttempt.balanceClaimPatchFrom,
+          balanceClaimPatchTo: templateAttempt.balanceClaimPatchTo,
+          balanceClaimPatchReason: templateAttempt.balanceClaimPatchReason,
+          filteredPseudoSkills: detectFilteredPseudoSkills(templateAttempt.content),
+        };
+        const finalClosureClassification = classifyResourceConsistency({
+          validation: templateAttempt.validation,
+          repaired: templateAttempt.validationPassed || resourceConsistency.repaired,
+        });
+        if (templateAttempt.validationPassed) {
+          finalContent = templateAttempt.content;
+          finalWordCount = countChapterLength(finalContent, lengthSpec.countingMode);
+          revised = true;
+          resourceConsistency = {
+            ...resourceConsistency,
+            content: finalContent,
+            wordCount: finalWordCount,
+            status: finalClosureClassification.status,
+            blocking: finalClosureClassification.blocking,
+            shouldPersistLedger: finalClosureClassification.shouldPersistLedger,
+            shouldPersistStateResources: finalClosureClassification.shouldPersistStateResources,
+            repaired: true,
+          };
+          auditResult = {
+            ...auditResult,
+            issues: [...auditResult.issues, {
+              severity: "info",
+              category: "resource-consistency",
+              description: "resource-consistency: defer_exchange 模板 patch 已删除本章现金兑现，资源链恢复自洽。",
+              suggestion: "已按程序模板延后现金兑换，仍建议检查 resource-consistency report。",
+            }],
+          };
+          this.config.logger?.child("writer")?.info("resource-engine: template patch validation passed");
+          resourceAuthoritySummary = resourceConsistency.validation.events.length > 0 && !resourceConsistency.blocking
+            ? buildResourceAuthoritySummary({
+                chapter: chapterNumber,
+                validation: resourceConsistency.validation,
+                status: resourceConsistency.status,
+                recoveryPlan: resourceConsistency.fallbackRecoveryPlan ?? resourceConsistency.recoveryPlan ?? deferPlan,
+              })
+            : undefined;
+        } else {
+          resourceConsistency = {
+            ...resourceConsistency,
+            status: "FAILED",
+            blocking: true,
+            shouldPersistLedger: false,
+            shouldPersistStateResources: false,
+          };
+          auditResult = {
+            ...auditResult,
+            passed: false,
+            issues: [...auditResult.issues, {
+              severity: "critical",
+              category: "resource-consistency",
+              description: "resource-consistency: defer_exchange 现金流仍未闭合，程序模板 patch 未能修复。",
+              suggestion: "人工删除本章现金到账/兑换段落，或重写本章资源链；修复前不要基于本章继续续写。",
+            }],
+          };
+          this.config.logger?.child("writer")?.warn("resource-engine: defer_exchange cash-flow remained after template patch");
+          resourceAuthoritySummary = undefined;
+        }
+        await this.writeResourceConsistencyReport({
+          bookDir,
+          chapterNumber,
+          validation: resourceConsistency.validation,
+          status: resourceConsistency.status,
+          blocking: resourceConsistency.blocking,
+          recoveryAttempted: resourceConsistency.recoveryAttempted,
+          recoveryPlan: resourceConsistency.recoveryPlan,
+          secondValidation: resourceConsistency.secondValidation,
+          recoveryPlanResult: resourceConsistency.recoveryPlanResult,
+          fallbackRecoveryAttempted: resourceConsistency.fallbackRecoveryAttempted,
+          fallbackRecoveryPlan: resourceConsistency.fallbackRecoveryPlan ?? deferPlan,
+          fallbackSecondValidation: resourceConsistency.fallbackSecondValidation,
+          templatePatchAttempted: resourceConsistency.templatePatchAttempted,
+          templatePatchApplied: resourceConsistency.templatePatchApplied,
+          templatePatchValidation: resourceConsistency.templatePatchValidation,
+          templatePatchReason: resourceConsistency.templatePatchReason,
+          removedCashFlowSnippets: resourceConsistency.removedCashFlowSnippets,
+          balanceClaimPatchAttempted: resourceConsistency.balanceClaimPatchAttempted,
+          balanceClaimPatchApplied: resourceConsistency.balanceClaimPatchApplied,
+          balanceClaimPatchResource: resourceConsistency.balanceClaimPatchResource,
+          balanceClaimPatchFrom: resourceConsistency.balanceClaimPatchFrom,
+          balanceClaimPatchTo: resourceConsistency.balanceClaimPatchTo,
+          balanceClaimPatchReason: resourceConsistency.balanceClaimPatchReason,
+          filteredPseudoSkills: resourceConsistency.filteredPseudoSkills ?? detectFilteredPseudoSkills(finalContent),
+          resourcePlan: writeInput.resourcePlan,
+          resourcePlanViolations: writeInput.resourcePlan
+            ? validateTextAgainstChapterResourcePlanFinal({
+                text: finalContent,
+                plan: writeInput.resourcePlan,
+                validation: resourceConsistency.validation,
+              }).violations
+            : [],
+        });
+      }
+    }
     const settlementBlocker = this.buildStateSettlementBlocker({
       chapterNumber,
       wordCount: finalWordCount,
@@ -1480,6 +1803,7 @@ export class PipelineRunner {
       finalContent,
       lengthSpec.countingMode,
       reducedControlInput,
+      resourceAuthoritySummary,
     );
     const preferredTitleBeforeFinalizer = persistenceOutput.title;
     const finalTitleResolution = resolveDuplicateTitle(
@@ -1507,6 +1831,99 @@ export class PipelineRunner {
       ...persistenceOutput,
       title: frozenFinalTitle.title,
     };
+    resourceConsistency = {
+      ...resourceConsistency,
+      validation: this.revalidateResourceConsistency({
+        content: finalContent,
+        validation: resourceConsistency.validation,
+        bookRules: await readFile(join(storyDir, "book_rules.md"), "utf-8").catch(() => ""),
+        currentLedger: await readFile(join(storyDir, "particle_ledger.md"), "utf-8").catch(() => ""),
+        currentState: await readFile(join(storyDir, "current_state.md"), "utf-8").catch(() => ""),
+        chapterIntent: await readFile(join(storyDir, "runtime", "chapter-intents", `${String(chapterNumber).padStart(4, "0")}.md`), "utf-8").catch(() => ""),
+      }),
+    };
+    const finalResourceClassification = classifyResourceConsistency({
+      validation: resourceConsistency.validation,
+      repaired: resourceConsistency.repaired,
+    });
+    const finalResourcePlanValidation = validateTextAgainstChapterResourcePlanFinal({
+      text: finalContent,
+      plan: writeInput.resourcePlan,
+      validation: resourceConsistency.validation,
+    });
+    if (!finalResourcePlanValidation.passed) {
+      this.config.logger?.child("writer")?.warn(`final resource-plan validation failed: ${finalResourcePlanValidation.violations.join("；")}`);
+      auditResult = {
+        ...auditResult,
+        passed: false,
+        issues: [
+          ...auditResult.issues,
+          ...buildResourcePlanAuditIssues(finalResourcePlanValidation.violations),
+        ],
+      };
+    } else if (writeInput.resourcePlan && writeInput.resourcePlan.mode !== "no_resource_change") {
+      resourceConsistency = {
+        ...resourceConsistency,
+        validation: applyResourcePlanExpectedBalances(resourceConsistency.validation, writeInput.resourcePlan),
+        resourcePlanViolations: [],
+      };
+      this.config.logger?.child("writer")?.info("final resource-plan validation passed");
+    }
+    resourceConsistency = {
+      ...resourceConsistency,
+      status: finalResourcePlanValidation.passed ? finalResourceClassification.status : "FAILED",
+      blocking: finalResourceClassification.blocking || !finalResourcePlanValidation.passed,
+      shouldPersistLedger: finalResourcePlanValidation.passed && finalResourceClassification.shouldPersistLedger,
+      shouldPersistStateResources: finalResourcePlanValidation.passed && finalResourceClassification.shouldPersistStateResources,
+      resourcePlanViolations: finalResourcePlanValidation.violations,
+    };
+    if (resourceConsistency.validation.events.length > 0 && resourceConsistency.shouldPersistLedger) {
+      persistenceOutput = {
+        ...persistenceOutput,
+        updatedLedger: buildResourceLedgerUpdate({
+          chapterNumber,
+          currentLedger: await readFile(join(storyDir, "particle_ledger.md"), "utf-8").catch(() => ""),
+          validation: resourceConsistency.validation,
+          resourcePlan: writeInput.resourcePlan,
+        }),
+        updatedState: resourceConsistency.shouldPersistStateResources ? syncCurrentStateResources({
+          currentState: persistenceOutput.updatedState,
+          validation: resourceConsistency.validation,
+          resourcePlan: writeInput.resourcePlan,
+        }) : persistenceOutput.updatedState,
+      };
+      this.config.logger?.child("writer")?.info("resource-engine: particle_ledger.md updated");
+    } else if (resourceConsistency.validation.events.length > 0 && resourceConsistency.blocking) {
+      this.config.logger?.child("writer")?.warn("resource-engine: skipped particle_ledger update to avoid pollution");
+    }
+    await this.writeResourceConsistencyReport({
+      bookDir,
+      chapterNumber,
+      validation: resourceConsistency.validation,
+      status: resourceConsistency.status,
+      blocking: resourceConsistency.blocking,
+      recoveryAttempted: resourceConsistency.recoveryAttempted,
+      recoveryPlan: resourceConsistency.recoveryPlan,
+      secondValidation: resourceConsistency.secondValidation,
+      recoveryPlanResult: resourceConsistency.recoveryPlanResult,
+      fallbackRecoveryAttempted: resourceConsistency.fallbackRecoveryAttempted,
+      fallbackRecoveryPlan: resourceConsistency.fallbackRecoveryPlan,
+      fallbackSecondValidation: resourceConsistency.fallbackSecondValidation,
+      templatePatchAttempted: resourceConsistency.templatePatchAttempted,
+      templatePatchApplied: resourceConsistency.templatePatchApplied,
+      templatePatchValidation: resourceConsistency.templatePatchValidation,
+      templatePatchReason: resourceConsistency.templatePatchReason,
+      removedCashFlowSnippets: resourceConsistency.removedCashFlowSnippets,
+      balanceClaimPatchAttempted: resourceConsistency.balanceClaimPatchAttempted,
+      balanceClaimPatchApplied: resourceConsistency.balanceClaimPatchApplied,
+      balanceClaimPatchResource: resourceConsistency.balanceClaimPatchResource,
+      balanceClaimPatchFrom: resourceConsistency.balanceClaimPatchFrom,
+      balanceClaimPatchTo: resourceConsistency.balanceClaimPatchTo,
+      balanceClaimPatchReason: resourceConsistency.balanceClaimPatchReason,
+      filteredPseudoSkills: resourceConsistency.filteredPseudoSkills ?? detectFilteredPseudoSkills(finalContent),
+      resourcePlan: writeInput.resourcePlan,
+      resourcePlanViolations: finalResourcePlanValidation.violations,
+    });
     if (frozenFinalTitle.title !== output.title) {
       const description = pipelineLang === "en"
         ? `Chapter title "${output.title}" was auto-adjusted to "${frozenFinalTitle.title}".`
@@ -1558,7 +1975,6 @@ export class PipelineRunner {
 
     // 4.1 Validate settler output before writing
     this.logStage(stageLanguage, { zh: "校验真相文件变更", en: "validating truth file updates" });
-    const storyDir = join(bookDir, "story");
     const [oldState, oldHooks, oldLedger] = await Promise.all([
       readFile(join(storyDir, "current_state.md"), "utf-8").catch(() => ""),
       readFile(join(storyDir, "pending_hooks.md"), "utf-8").catch(() => ""),
@@ -1639,6 +2055,94 @@ export class PipelineRunner {
       }
     }
 
+    this.logStage(stageLanguage, { zh: "章节意图一致性审核", en: "reviewing chapter intent alignment" });
+    const intentAlignmentReport = await this.runIntentAlignmentReview({
+      bookId,
+      bookDir,
+      chapterNumber,
+      finalTitle: frozenFinalTitle.title,
+      finalContent,
+      storyDir,
+      language: pipelineLang,
+      resourceBlocking: resourceConsistency.blocking,
+      resourcePlan: writeInput.resourcePlan,
+    });
+    this.config.logger?.info(
+      `Intent alignment: ${intentAlignmentReport.score ?? "N/A"}/100 ${intentAlignmentReport.status}`,
+    );
+    const reportableIntentIssues = intentAlignmentReport.issues.filter(
+      (issue) => intentAlignmentReport.status === "WARN" || intentAlignmentReport.status === "FAIL_REPORT_ONLY"
+        ? issue.severity === "warning" || issue.severity === "critical"
+        : false,
+    );
+    if (reportableIntentIssues.length > 0) {
+      this.logWarn(pipelineLang, {
+        zh: `Intent alignment: 第${chapterNumber}章发现 ${reportableIntentIssues.length} 条警告`,
+        en: `Intent alignment: chapter ${chapterNumber} found ${reportableIntentIssues.length} warning(s)`,
+      });
+      auditResult = {
+        ...auditResult,
+        issues: [
+          ...auditResult.issues,
+          ...reportableIntentIssues.map((issue) => ({
+            severity: issue.severity,
+            category: `intent-alignment:${issue.dimension}`,
+            description: issue.message,
+            suggestion: issue.suggestion ?? "人工检查 chapter_intent 与最终正文的一致性；本轮只报告不自动重写。",
+          })),
+        ],
+      };
+    }
+
+    const resourceIndexGuard = detectResourceIndexReadinessBlocker({
+      auditIssues: auditResult.issues,
+      updatedState: persistenceOutput.updatedState,
+      resourceBlocking: resourceConsistency.blocking,
+    });
+    if (resourceIndexGuard) {
+      auditResult = {
+        ...auditResult,
+        passed: false,
+        issues: auditResult.issues.some((issue) => issue.category === "resource-consistency" && issue.description.includes("RESOURCE_CONSISTENCY_NOT_CLOSED"))
+          ? auditResult.issues
+          : [...auditResult.issues, {
+              severity: "critical",
+              category: "resource-consistency",
+              description: `RESOURCE_CONSISTENCY_NOT_CLOSED: ${resourceIndexGuard.reason}`,
+              suggestion: "资源账本闭合前不得标记 ready-for-review；请修复正文资源链或重写本章。",
+            }],
+      };
+      const hasResourcePlanViolation = (resourceConsistency.resourcePlanViolations?.length ?? 0) > 0
+        || auditResult.issues.some((issue) => issue.category === "resource-plan");
+      chapterStatus = hasResourcePlanViolation ? "blocked-resource-plan" : "state-degraded";
+      degradedIssues = [
+        ...degradedIssues,
+        {
+          severity: "critical",
+          category: "resource-consistency",
+          description: `RESOURCE_CONSISTENCY_NOT_CLOSED: ${resourceIndexGuard.reason}`,
+          suggestion: "资源账本闭合前不得标记 ready-for-review；请修复正文资源链或重写本章。",
+        },
+      ];
+      this.config.logger?.child("writer")?.warn(`resource-engine: final resource closure guard forced ${chapterStatus}`);
+    }
+
+    if (resourceConsistency.blocking || resourceIndexGuard) {
+      const hasResourcePlanViolation = (resourceConsistency.resourcePlanViolations?.length ?? 0) > 0
+        || auditResult.issues.some((issue) => issue.category === "resource-plan");
+      chapterStatus = hasResourcePlanViolation ? "blocked-resource-plan" : "state-degraded";
+      persistenceOutput = {
+        ...persistenceOutput,
+        updatedState: oldState,
+        updatedHooks: oldHooks,
+        updatedLedger: oldLedger,
+      };
+      degradedIssues = [
+        ...degradedIssues,
+        ...resourceConsistency.auditIssues.filter((issue) => issue.severity === "critical" || issue.severity === "warning"),
+      ];
+      auditResult = { ...auditResult, passed: false };
+    }
     const resolvedStatus = chapterStatus ?? (auditResult.passed ? "ready-for-review" : "audit-failed");
     await persistChapterArtifacts({
       chapterNumber,
@@ -1675,7 +2179,7 @@ export class PipelineRunner {
 
     // 6. Send notification
     if (this.config.notifyChannels && this.config.notifyChannels.length > 0) {
-      const statusEmoji = resolvedStatus === "state-degraded"
+      const statusEmoji = resolvedStatus === "state-degraded" || resolvedStatus === "blocked-resource-plan"
         ? "🧯"
         : auditResult.passed ? "✅" : "⚠️";
       const chapterLength = formatLengthCount(finalWordCount, lengthSpec.countingMode);
@@ -1684,8 +2188,8 @@ export class PipelineRunner {
         body: [
           `**${frozenFinalTitle.title}** | ${chapterLength}`,
           revised ? "📝 已自动修正" : "",
-          resolvedStatus === "state-degraded"
-            ? "状态结算: 已降级保存，需先修复 state 再继续"
+          resolvedStatus === "state-degraded" || resolvedStatus === "blocked-resource-plan"
+            ? "状态结算: 已阻断 truth files 更新，需先修复资源/状态再继续"
             : `审稿: ${auditResult.passed ? "通过" : "需人工审核"}`,
           ...auditResult.issues
             .filter((i) => i.severity !== "info")
@@ -2411,6 +2915,7 @@ ${matrix}`,
       contextPackage: ContextPackage;
       ruleStack: RuleStack;
     },
+    resourceAuthoritySummary?: string,
   ): Promise<WriteChapterOutput> {
     if (finalContent === output.content) {
       return output;
@@ -2426,6 +2931,7 @@ ${matrix}`,
       chapterIntent: reducedControlInput?.chapterIntent,
       contextPackage: reducedControlInput?.contextPackage,
       ruleStack: reducedControlInput?.ruleStack,
+      resourceAuthoritySummary,
     });
 
     return {
@@ -2442,12 +2948,12 @@ ${matrix}`,
   private async assertNoPendingStateRepair(bookId: string): Promise<void> {
     const existingIndex = await this.state.loadChapterIndex(bookId);
     const latestChapter = [...existingIndex].sort((left, right) => right.number - left.number)[0];
-    if (latestChapter?.status !== "state-degraded") {
+    if (latestChapter?.status !== "state-degraded" && latestChapter?.status !== "blocked-resource-plan") {
       return;
     }
 
     throw new Error(
-      `Latest chapter ${latestChapter.number} is state-degraded. Repair state or rewrite that chapter before continuing.`,
+      `Latest chapter ${latestChapter.number} is ${latestChapter.status}. Repair state/resource plan or rewrite that chapter before continuing.`,
     );
   }
 
@@ -2460,7 +2966,7 @@ ${matrix}`,
     bookDir: string,
     chapterNumber: number,
     externalContext?: string,
-  ): Promise<Pick<WriteChapterInput, "externalContext" | "chapterIntent" | "contextPackage" | "ruleStack" | "trace">> {
+  ): Promise<Pick<WriteChapterInput, "externalContext" | "chapterIntent" | "resourcePlan" | "contextPackage" | "ruleStack" | "trace">> {
     if ((this.config.inputGovernanceMode ?? "v2") === "legacy") {
       return { externalContext };
     }
@@ -2479,6 +2985,1024 @@ ${matrix}`,
       ruleStack: composed.ruleStack,
       trace: composed.trace,
     };
+  }
+
+  private async prepareResourcePlan(params: {
+    readonly book: BookConfig;
+    readonly bookDir: string;
+    readonly chapterNumber: number;
+    readonly chapterGoal?: string;
+    readonly language: LengthLanguage;
+  }): Promise<ChapterResourcePlan> {
+    const storyDir = join(params.bookDir, "story");
+    const [bookRules, particleLedger, currentState, chapterSummaries, pendingHooks] = await Promise.all([
+      readFile(join(storyDir, "book_rules.md"), "utf-8").catch(() => ""),
+      readFile(join(storyDir, "particle_ledger.md"), "utf-8").catch(() => ""),
+      readFile(join(storyDir, "current_state.md"), "utf-8").catch(() => ""),
+      readFile(join(storyDir, "chapter_summaries.md"), "utf-8").catch(() => ""),
+      readFile(join(storyDir, "pending_hooks.md"), "utf-8").catch(() => ""),
+    ]);
+    const resourcePlan = buildChapterResourcePlan({
+      chapter: params.chapterNumber,
+      bookRules,
+      particleLedger,
+      currentState,
+      previousChapterSummary: this.extractPreviousChapterSummary(chapterSummaries, params.chapterNumber),
+      chapterGoal: params.chapterGoal,
+      chapterHooks: pendingHooks,
+      genre: params.book.genre,
+      systemMode: params.book.platform,
+    });
+    this.config.logger?.child("writer")?.info(this.localize(params.language, {
+      zh: `Resource Plan generated: ${resourcePlan.mode}`,
+      en: `Resource Plan generated: ${resourcePlan.mode}`,
+    }));
+    return resourcePlan;
+  }
+
+  private extractPreviousChapterSummary(chapterSummaries: string, chapterNumber: number): string {
+    if (!chapterSummaries.trim() || chapterNumber <= 1) return "";
+    const previous = chapterNumber - 1;
+    const escaped = String(previous).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(`(?:^|\\|)\\s*(?:第)?${escaped}(?:章)?\\s*(?:\\||[:：])`, "u");
+    return chapterSummaries.split("\n").find((line) => pattern.test(line)) ?? "";
+  }
+
+  private async prepareChapterIntentInput(params: {
+    readonly book: BookConfig;
+    readonly bookDir: string;
+    readonly chapterNumber: number;
+    readonly writeInput: Pick<WriteChapterInput, "externalContext" | "chapterIntent" | "resourcePlan" | "contextPackage" | "ruleStack" | "trace">;
+    readonly language: LengthLanguage;
+  }): Promise<Pick<WriteChapterInput, "externalContext" | "chapterIntent" | "resourcePlan" | "contextPackage" | "ruleStack" | "trace">> {
+    const writerLogger = this.config.logger?.child("writer");
+    writerLogger?.info(this.localize(params.language, {
+      zh: `阶段 0：生成章节意图卡（第${params.chapterNumber}章）`,
+      en: `Phase 0: generating chapter intent card for chapter ${params.chapterNumber}`,
+    }));
+
+    const agent = new ChapterIntentAgent(this.agentCtxFor("chapter-intent", params.book.id));
+    const resourcePlan = await this.prepareResourcePlan({
+      book: params.book,
+      bookDir: params.bookDir,
+      chapterNumber: params.chapterNumber,
+      chapterGoal: params.writeInput.chapterIntent,
+      language: params.language,
+    });
+    const result = await agent.generate({
+      book: params.book,
+      bookDir: params.bookDir,
+      chapterNumber: params.chapterNumber,
+      plannerIntent: params.writeInput.chapterIntent,
+      resourcePlan,
+    });
+    writerLogger?.info(this.localize(params.language, {
+      zh: "chapter-intent resource plan injected",
+      en: "chapter-intent resource plan injected",
+    }));
+    if (result.isFallback) {
+      writerLogger?.warn(this.localize(params.language, {
+        zh: "章节意图卡生成失败，使用 fallback intent",
+        en: "Chapter intent generation failed; using fallback intent",
+      }));
+    }
+    writerLogger?.info(this.localize(params.language, {
+      zh: `章节意图卡已写入：${relativeToBookDir(params.bookDir, result.runtimePath)}`,
+      en: `Chapter intent card written: ${relativeToBookDir(params.bookDir, result.runtimePath)}`,
+    }));
+    const sanitized = sanitizePlannerIntentForChapterIntent({
+      plannerIntent: params.writeInput.chapterIntent,
+      chapterIntent: result.content,
+      contextPackage: params.writeInput.contextPackage,
+    });
+    if (sanitized.suppression.suppressPayoff) {
+      writerLogger?.warn(this.localize(params.language, {
+        zh: `chapter_intent suppresses planner payoff; payoffDirective sanitized${sanitized.suppression.removedPayoff ? ` (${sanitized.suppression.removedPayoff})` : ""}`,
+        en: `chapter_intent suppresses planner payoff; payoffDirective sanitized${sanitized.suppression.removedPayoff ? ` (${sanitized.suppression.removedPayoff})` : ""}`,
+      }));
+    }
+
+    return {
+      ...params.writeInput,
+      chapterIntent: result.content,
+      resourcePlan,
+      contextPackage: sanitized.contextPackage,
+    };
+  }
+
+  private async runIntentAlignmentReview(params: {
+    readonly bookId: string;
+    readonly bookDir: string;
+    readonly storyDir: string;
+    readonly chapterNumber: number;
+    readonly finalTitle: string;
+    readonly finalContent: string;
+    readonly language: LengthLanguage;
+    readonly resourceBlocking?: boolean;
+    readonly resourcePlan?: ChapterResourcePlan;
+  }): Promise<IntentAlignmentReport> {
+    const padded = String(params.chapterNumber).padStart(4, "0");
+    const intentFullPath = join(params.storyDir, "runtime", "chapter-intents", `${padded}.md`);
+    const reportDir = join(params.bookDir, "reviews", "intent-alignment");
+    const jsonPath = join(reportDir, `${padded}.report.json`);
+    const markdownPath = join(reportDir, `${padded}.report.md`);
+    const input = {
+      chapter: params.chapterNumber,
+      intentMarkdown: await readFile(intentFullPath, "utf-8").catch(() => ""),
+      chapterContent: params.finalContent,
+      bookRules: await readFile(join(params.storyDir, "book_rules.md"), "utf-8").catch(() => ""),
+      antagonistMap: await readFile(join(params.storyDir, "antagonist_map.md"), "utf-8").catch(() => ""),
+      motivationMatrix: await readFile(join(params.storyDir, "motivation_matrix.md"), "utf-8").catch(() => ""),
+      intentPath: relativeToBookDir(params.bookDir, intentFullPath),
+      chapterPath: join("chapters", `${padded}_${this.sanitizeReportFilename(params.finalTitle)}.md`),
+      resourcePlan: params.resourcePlan,
+    };
+
+    let report: IntentAlignmentReport;
+    if (params.resourceBlocking) {
+      report = {
+        chapter: params.chapterNumber,
+        status: "SKIPPED_DUE_RESOURCE_FAILURE",
+        score: null,
+        dimensions: {
+          goal_alignment: 85,
+          obstacle_alignment: 85,
+          antagonist_pressure_alignment: 85,
+          climax_payoff_alignment: 0,
+          ending_hook_alignment: 85,
+          behavior_safety_alignment: 85,
+        },
+        dimensionConclusions: {
+          goal_alignment: "资源账本校验失败，本章目标对齐未继续判定。",
+          obstacle_alignment: "资源账本校验失败，本章阻碍对齐未继续判定。",
+          antagonist_pressure_alignment: "资源账本校验失败，本章反派压力未继续判定。",
+          climax_payoff_alignment: "资源账本校验失败，本章资源收益/消耗不可确认，因此无法判定高潮收益完全对齐。",
+          ending_hook_alignment: "资源账本校验失败，本章结尾钩子未继续判定。",
+          behavior_safety_alignment: "资源账本校验失败，本章安全维度未继续判定。",
+        },
+        issues: [{
+          severity: "critical",
+          dimension: "resource_consistency",
+          message: "资源账本校验失败，本章资源收益/消耗不可确认，因此跳过 intent alignment PASS 判定。",
+          suggestion: "先人工修复或重写资源数值链路，再重新执行 intent alignment。",
+        }],
+        suggestions: ["修复 Resource Engine 报告中的 blocking issue 后重新审核。"],
+        intentPath: input.intentPath,
+        chapterPath: input.chapterPath,
+      };
+    } else {
+      try {
+      const reviewer = new IntentAlignmentReviewerAgent(this.agentCtxFor("intent-alignment-reviewer", params.bookId));
+      report = await reviewer.review(input);
+      } catch (error) {
+        report = buildSkippedIntentAlignmentReport(input, error);
+        this.logWarn(params.language, {
+          zh: `intent-alignment-reviewer 调用失败，已生成 SKIPPED 报告：${error instanceof Error ? error.message : String(error)}`,
+          en: `intent-alignment-reviewer failed; wrote SKIPPED report: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
+
+    await writeIntentAlignmentReportFiles({ report, jsonPath, markdownPath });
+    return report;
+  }
+
+  private async runResourceConsistencyPass(params: {
+    readonly bookId: string;
+    readonly bookDir: string;
+    readonly chapterNumber: number;
+    readonly content: string;
+    readonly wordCount: number;
+    readonly lengthSpec: LengthSpec;
+    readonly language: LengthLanguage;
+    readonly resourcePlan?: ChapterResourcePlan;
+  }): Promise<ResourceConsistencyPipelineResult> {
+    const storyDir = join(params.bookDir, "story");
+    const padded = String(params.chapterNumber).padStart(4, "0");
+    const [bookRules, currentLedger, currentState, chapterIntent] = await Promise.all([
+      readFile(join(storyDir, "book_rules.md"), "utf-8").catch(() => ""),
+      readFile(join(storyDir, "particle_ledger.md"), "utf-8").catch(() => ""),
+      readFile(join(storyDir, "current_state.md"), "utf-8").catch(() => ""),
+      readFile(join(storyDir, "runtime", "chapter-intents", `${padded}.md`), "utf-8").catch(() => ""),
+    ]);
+    let validation = this.revalidateResourceConsistency({
+      content: params.content,
+      bookRules,
+      currentLedger,
+      currentState,
+      chapterIntent,
+    });
+    const resourcePlanViolations = params.resourcePlan
+      ? validateResourceEngineAgainstPlan({ text: params.content, validation, plan: params.resourcePlan })
+      : [];
+    if (validation.events.length === 0) {
+      const classification = classifyResourceConsistency({ validation, repaired: false });
+      const hasResourcePlanViolations = resourcePlanViolations.length > 0;
+      const finalBlocking = classification.blocking || hasResourcePlanViolations;
+      const finalStatus: ResourceConsistencyStatus = hasResourcePlanViolations ? "FAILED" : classification.status;
+      if (hasResourcePlanViolations) {
+        this.config.logger?.child("writer")?.warn(`resource-engine: resource plan violations detected (${resourcePlanViolations.length}), forcing blocking state`);
+      }
+      return {
+        content: params.content,
+        wordCount: params.wordCount,
+        validation,
+        status: finalStatus,
+        blocking: finalBlocking,
+        shouldPersistLedger: !finalBlocking,
+        shouldPersistStateResources: !finalBlocking,
+        repaired: false,
+        ...(params.resourcePlan ? {
+          resourcePlanMode: params.resourcePlan.mode,
+          resourcePlanExpectedClosingBalances: params.resourcePlan.expectedClosingBalances,
+          resourcePlanAllowedEvents: params.resourcePlan.allowedEvents,
+          resourcePlanForbiddenEvents: params.resourcePlan.forbiddenEvents,
+          resourcePlanViolations,
+        } : {}),
+        auditIssues: hasResourcePlanViolations ? buildResourcePlanAuditIssues(resourcePlanViolations) : [],
+      };
+    }
+    if (validation.issues.length === 0) {
+      const classification = classifyResourceConsistency({ validation, repaired: false });
+      const hasResourcePlanViolations = resourcePlanViolations.length > 0;
+      const finalBlocking = classification.blocking || hasResourcePlanViolations;
+      const finalStatus: ResourceConsistencyStatus = hasResourcePlanViolations ? "FAILED" : classification.status;
+      if (hasResourcePlanViolations) {
+        this.config.logger?.child("writer")?.warn(`resource-engine: resource plan violations detected (${resourcePlanViolations.length}), forcing blocking state`);
+      }
+      return {
+        content: params.content,
+        wordCount: params.wordCount,
+        validation,
+        status: finalStatus,
+        blocking: finalBlocking,
+        shouldPersistLedger: !finalBlocking,
+        shouldPersistStateResources: !finalBlocking,
+        repaired: false,
+        ...(params.resourcePlan ? {
+          resourcePlanMode: params.resourcePlan.mode,
+          resourcePlanExpectedClosingBalances: params.resourcePlan.expectedClosingBalances,
+          resourcePlanAllowedEvents: params.resourcePlan.allowedEvents,
+          resourcePlanForbiddenEvents: params.resourcePlan.forbiddenEvents,
+          resourcePlanViolations,
+        } : {}),
+        auditIssues: hasResourcePlanViolations ? buildResourcePlanAuditIssues(resourcePlanViolations) : [],
+      };
+    }
+
+    this.config.logger?.child("writer")?.warn(this.localize(params.language, {
+      zh: `resource-engine: extracted ${validation.events.length} resource events; detected ${validation.issues.length} issue(s)`,
+      en: `resource-engine: extracted ${validation.events.length} resource event(s); detected ${validation.issues.length} issue(s)`,
+    }));
+    if (validation.issues.some((issue) => issue.code === "exchange-rate-mismatch" || issue.code === "exchange-ratio-mismatch")) {
+      this.config.logger?.child("writer")?.warn("resource-engine: exchange-rate-mismatch detected");
+    }
+
+    const originalIssues = validation.issues;
+    const localRepair = repairResourceInconsistencies(params.content, validation);
+    let content = localRepair.content;
+    let tokenUsage: TokenUsageSummary | undefined;
+    let repaired = localRepair.repaired;
+    validation = this.revalidateResourceConsistency({ content, bookRules, currentLedger, currentState, chapterIntent });
+
+    if (validation.issues.length > 0) {
+      try {
+        const reviser = new ResourceConsistencyReviserAgent(this.agentCtxFor("resource-consistency-reviser", params.bookId));
+        const revised = await reviser.revise({
+          chapterContent: content,
+          issues: validation.issues,
+          authoritativeContext: buildAuthoritativeResourceContext(validation),
+          bookRules,
+          currentLedger,
+          currentState,
+        });
+        tokenUsage = revised.usage;
+        const afterWords = countChapterLength(revised.content, params.lengthSpec.countingMode);
+        const decision = {
+          beforeWords: countChapterLength(content, params.lengthSpec.countingMode),
+          afterWords,
+          accepted: revised.content.trim().length > 0
+            && (params.wordCount < this.minimumWholeChapterWords(params.lengthSpec)
+              || afterWords >= Math.ceil(countChapterLength(content, params.lengthSpec.countingMode) * 0.8)),
+        };
+        const logger = decision.accepted ? this.logInfo.bind(this) : this.logWarn.bind(this);
+        logger(params.language, {
+          zh: `rewrite decision [resource-consistency-fix]: beforeWords=${decision.beforeWords}, afterWords=${decision.afterWords}, accepted=${decision.accepted}, rejectedReason=${decision.accepted ? "none" : "below-80%-of-original-or-empty"}`,
+          en: `rewrite decision [resource-consistency-fix]: beforeWords=${decision.beforeWords}, afterWords=${decision.afterWords}, accepted=${decision.accepted}, rejectedReason=${decision.accepted ? "none" : "below-80%-of-original-or-empty"}`,
+        });
+        if (decision.accepted) {
+          content = revised.content;
+          repaired = true;
+          validation = this.revalidateResourceConsistency({ content, bookRules, currentLedger, currentState, chapterIntent });
+          if (validation.issues.length === 0) {
+            this.config.logger?.child("writer")?.info("resource-engine: second validation passed");
+          } else {
+            this.config.logger?.child("writer")?.warn("resource-engine: second validation failed, blocking chapter");
+          }
+        }
+      } catch (error) {
+        this.logWarn(params.language, {
+          zh: `resource-consistency-reviser 调用失败，保留正文并写入 auditIssues：${error instanceof Error ? error.message : String(error)}`,
+          en: `resource-consistency-reviser failed; keeping chapter and writing auditIssues: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    } else if (localRepair.repaired) {
+      this.logInfo(params.language, {
+        zh: `rewrite decision [resource-consistency-fix]: beforeWords=${params.wordCount}, afterWords=${countChapterLength(content, params.lengthSpec.countingMode)}, accepted=true, rejectedReason=none`,
+        en: `rewrite decision [resource-consistency-fix]: beforeWords=${params.wordCount}, afterWords=${countChapterLength(content, params.lengthSpec.countingMode)}, accepted=true, rejectedReason=none`,
+      });
+      this.config.logger?.child("writer")?.info("resource-engine: second validation passed");
+    }
+
+    let classification = classifyResourceConsistency({ validation, repaired });
+    let recoveryAttempted = false;
+    let recoveryPlan: ReturnType<typeof selectResourceRecoveryPlan> | undefined;
+    let secondValidation: "PASS" | "FAILED" | undefined;
+    let recoveryPlanResult: "PASS" | "FAILED" | undefined;
+    let fallbackRecoveryAttempted = false;
+    let fallbackRecoveryPlan: ReturnType<typeof selectResourceRecoveryPlan> | undefined;
+    let fallbackSecondValidation: "PASS" | "FAILED" | undefined;
+    let templatePatchAttempted = false;
+    let templatePatchApplied = false;
+    let templatePatchValidation: "PASS" | "FAILED" | undefined;
+    let templatePatchReason: string | undefined;
+    let removedCashFlowSnippets: ReadonlyArray<string> = [];
+    let balanceClaimPatchAttempted = false;
+    let balanceClaimPatchApplied = false;
+    let balanceClaimPatchResource: string | undefined;
+    let balanceClaimPatchFrom: number | undefined;
+    let balanceClaimPatchTo: number | undefined;
+    let balanceClaimPatchReason: string | undefined;
+    if (classification.blocking) {
+      recoveryAttempted = true;
+      this.config.logger?.child("writer")?.info("resource-engine: second validation failed, attempting blocking recovery");
+      recoveryPlan = selectResourceRecoveryPlan({ validation, chapterIntent });
+      this.config.logger?.child("writer")?.info(`resource-engine: recovery plan selected: ${recoveryPlan.planId}`);
+      try {
+        const rewriter = new ResourceBlockingRewriterAgent(this.agentCtxFor("resource-blocking-rewrite", params.bookId));
+        const attempt = await this.tryResourceBlockingRewrite({
+          rewriter,
+          content,
+          chapterIntent,
+          validation,
+          recoveryPlan,
+          bookRules,
+          currentLedger,
+          currentState,
+          lengthSpec: params.lengthSpec,
+          originalWordCount: params.wordCount,
+          language: params.language,
+          logLabel: "resource-blocking-rewrite",
+        });
+        tokenUsage = tokenUsage && attempt.usage
+          ? PipelineRunner.addUsage(tokenUsage, attempt.usage)
+          : attempt.usage ?? tokenUsage;
+        if (attempt.accepted) {
+          content = attempt.content;
+          validation = attempt.validation;
+          repaired = true;
+          secondValidation = "PASS";
+          recoveryPlanResult = "PASS";
+          classification = classifyResourceConsistency({ validation, repaired });
+          this.config.logger?.child("writer")?.info("resource-engine: recovery validation passed");
+          this.config.logger?.child("writer")?.info("resource-engine: blocking recovered, continuing normal flow");
+        } else {
+          secondValidation = "FAILED";
+          recoveryPlanResult = "FAILED";
+          this.config.logger?.child("writer")?.warn(`resource-engine: recovery validation failed for ${recoveryPlan.planId}`);
+          const fallback = buildFallbackRecoveryPlan({
+            validation,
+            chapterIntent,
+            failedPlan: recoveryPlan,
+          });
+          if (fallback && fallback.planId !== recoveryPlan.planId) {
+            fallbackRecoveryAttempted = true;
+            fallbackRecoveryPlan = fallback;
+            this.config.logger?.child("writer")?.info("resource-engine: falling back to defer_exchange");
+            this.config.logger?.child("writer")?.info(`resource-engine: fallback recovery plan selected: ${fallbackRecoveryPlan.planId}`);
+            const fallbackAttempt = await this.tryResourceBlockingRewrite({
+              rewriter,
+              content,
+              chapterIntent,
+              validation,
+              recoveryPlan: fallbackRecoveryPlan,
+              bookRules,
+              currentLedger,
+              currentState,
+              lengthSpec: params.lengthSpec,
+              originalWordCount: params.wordCount,
+              language: params.language,
+              logLabel: "resource-blocking-rewrite",
+              isFallback: true,
+            });
+            tokenUsage = tokenUsage && fallbackAttempt.usage
+              ? PipelineRunner.addUsage(tokenUsage, fallbackAttempt.usage)
+              : fallbackAttempt.usage ?? tokenUsage;
+            if (fallbackAttempt.accepted) {
+              content = fallbackAttempt.content;
+              validation = fallbackAttempt.validation;
+              repaired = true;
+              fallbackSecondValidation = "PASS";
+              secondValidation = "PASS";
+              classification = classifyResourceConsistency({ validation, repaired });
+              this.config.logger?.child("writer")?.info("resource-engine: fallback recovery validation passed");
+              this.config.logger?.child("writer")?.info("resource-engine: blocking recovered by defer_exchange");
+            } else {
+              fallbackSecondValidation = "FAILED";
+              this.config.logger?.child("writer")?.warn("resource-engine: fallback recovery validation failed");
+              const templateAttempt = this.tryDeferExchangeTemplatePatch({
+                content: fallbackAttempt.content,
+                bookRules,
+                currentLedger,
+                currentState,
+                chapterIntent,
+                recoveryPlan: fallbackRecoveryPlan,
+              });
+              if (templateAttempt.attempted) {
+                templatePatchAttempted = true;
+                templatePatchApplied = templateAttempt.applied;
+                templatePatchValidation = templateAttempt.validationPassed ? "PASS" : "FAILED";
+                templatePatchReason = templateAttempt.reason;
+                removedCashFlowSnippets = templateAttempt.removedSnippets;
+                balanceClaimPatchAttempted = Boolean(templateAttempt.balanceClaimPatchAttempted);
+                balanceClaimPatchApplied = Boolean(templateAttempt.balanceClaimPatchApplied);
+                balanceClaimPatchResource = templateAttempt.balanceClaimPatchResource;
+                balanceClaimPatchFrom = templateAttempt.balanceClaimPatchFrom;
+                balanceClaimPatchTo = templateAttempt.balanceClaimPatchTo;
+                balanceClaimPatchReason = templateAttempt.balanceClaimPatchReason;
+                if (templateAttempt.validationPassed) {
+                  content = templateAttempt.content;
+                  validation = templateAttempt.validation;
+                  repaired = true;
+                  secondValidation = "PASS";
+                  classification = classifyResourceConsistency({ validation, repaired });
+                  this.config.logger?.child("writer")?.info("resource-engine: template patch validation passed");
+                  this.config.logger?.child("writer")?.info("resource-engine: blocking recovered by defer_exchange template patch");
+                } else {
+                  this.config.logger?.child("writer")?.warn("resource-engine: template patch validation failed");
+                }
+              }
+            }
+          }
+        }
+      } catch (error) {
+        secondValidation = "FAILED";
+        this.logWarn(params.language, {
+          zh: `resource-blocking-rewrite 调用失败，保持 state-degraded：${error instanceof Error ? error.message : String(error)}`,
+          en: `resource-blocking-rewrite failed; keeping state-degraded: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
+
+    const repairSummary = repairResourceInconsistencies(params.content, {
+      ...validation,
+      issues: validation.issues,
+    });
+    const auditIssues = buildResourceAuditIssues({
+      repair: {
+        ...repairSummary,
+        repairedIssues: repaired && validation.issues.length === 0
+          ? (localRepair.repairedIssues.length > 0 ? localRepair.repairedIssues : originalIssues)
+          : [],
+        unresolvedIssues: validation.issues,
+      },
+      validation,
+    });
+    const finalAuditIssues = recoveryAttempted && secondValidation === "PASS"
+      ? [
+          ...auditIssues,
+          {
+            severity: "info" as const,
+            category: "resource-consistency",
+            description: templatePatchValidation === "PASS"
+              ? "resource-consistency: defer_exchange 模板 patch 已删除本章现金兑现，资源链恢复自洽。"
+              : "resource-consistency: Resource Engine blocking 已通过程序约束重写修复。",
+            suggestion: templatePatchValidation === "PASS"
+              ? "已按程序模板延后现金兑换，仍建议检查 resource-consistency report。"
+              : "已按程序恢复资源链，仍建议检查 resource-consistency report。",
+          },
+        ]
+      : auditIssues;
+    if (classification.blocking) {
+      this.config.logger?.child("writer")?.warn("resource-engine: second validation failed, blocking chapter");
+      this.config.logger?.child("writer")?.warn("resource-engine: skipped particle_ledger update to avoid pollution");
+      this.config.logger?.child("writer")?.warn("resource-engine: chapter status set to state-degraded");
+    }
+    const finalResourcePlanViolations = params.resourcePlan
+      ? validateResourceEngineAgainstPlan({ text: content, validation, plan: params.resourcePlan })
+      : [];
+    const hasFinalResourcePlanViolations = finalResourcePlanViolations.length > 0;
+    let finalAuditIssuesWithPlan: ReadonlyArray<AuditIssue> = finalAuditIssues;
+    if (hasFinalResourcePlanViolations) {
+      this.config.logger?.child("writer")?.warn(`resource-engine: final resource plan violations detected (${finalResourcePlanViolations.length}), forcing blocking state`);
+      classification = {
+        status: "FAILED",
+        blocking: true,
+        shouldPersistLedger: false,
+        shouldPersistStateResources: false,
+      };
+      finalAuditIssuesWithPlan = [
+        ...finalAuditIssues,
+        ...buildResourcePlanAuditIssues(finalResourcePlanViolations),
+      ];
+    }
+
+    await this.writeResourceConsistencyReport({
+      bookDir: params.bookDir,
+      chapterNumber: params.chapterNumber,
+      validation,
+      status: classification.status,
+      blocking: classification.blocking,
+      recoveryAttempted,
+      recoveryPlan,
+      secondValidation,
+      recoveryPlanResult,
+      fallbackRecoveryAttempted,
+      fallbackRecoveryPlan,
+      fallbackSecondValidation,
+      templatePatchAttempted,
+      templatePatchApplied,
+      templatePatchValidation,
+      templatePatchReason,
+      removedCashFlowSnippets,
+      balanceClaimPatchAttempted,
+      balanceClaimPatchApplied,
+      balanceClaimPatchResource,
+      balanceClaimPatchFrom,
+      balanceClaimPatchTo,
+      balanceClaimPatchReason,
+      filteredPseudoSkills: detectFilteredPseudoSkills(content),
+      resourcePlan: params.resourcePlan,
+      resourcePlanViolations: finalResourcePlanViolations,
+    });
+
+    return {
+      content,
+      wordCount: countChapterLength(content, params.lengthSpec.countingMode),
+      validation,
+      status: classification.status,
+      blocking: classification.blocking,
+      shouldPersistLedger: classification.shouldPersistLedger,
+      shouldPersistStateResources: classification.shouldPersistStateResources,
+      repaired,
+      ...(recoveryAttempted ? { recoveryAttempted } : {}),
+      ...(recoveryPlan ? { recoveryPlan } : {}),
+      ...(recoveryPlanResult ? { recoveryPlanResult } : {}),
+      ...(fallbackRecoveryAttempted ? { fallbackRecoveryAttempted } : {}),
+      ...(fallbackRecoveryPlan ? { fallbackRecoveryPlan } : {}),
+      ...(fallbackSecondValidation ? { fallbackSecondValidation } : {}),
+      ...(templatePatchAttempted ? { templatePatchAttempted } : {}),
+      ...(templatePatchApplied ? { templatePatchApplied } : {}),
+      ...(templatePatchValidation ? { templatePatchValidation } : {}),
+      ...(templatePatchReason ? { templatePatchReason } : {}),
+      ...(removedCashFlowSnippets.length > 0 ? { removedCashFlowSnippets } : {}),
+      ...(balanceClaimPatchAttempted ? { balanceClaimPatchAttempted } : {}),
+      ...(balanceClaimPatchApplied ? { balanceClaimPatchApplied } : {}),
+      ...(balanceClaimPatchResource ? { balanceClaimPatchResource } : {}),
+      ...(balanceClaimPatchFrom !== undefined ? { balanceClaimPatchFrom } : {}),
+      ...(balanceClaimPatchTo !== undefined ? { balanceClaimPatchTo } : {}),
+      ...(balanceClaimPatchReason ? { balanceClaimPatchReason } : {}),
+      ...(detectFilteredPseudoSkills(content).length > 0 ? { filteredPseudoSkills: detectFilteredPseudoSkills(content) } : {}),
+      ...(params.resourcePlan ? {
+        resourcePlanMode: params.resourcePlan.mode,
+        resourcePlanExpectedClosingBalances: params.resourcePlan.expectedClosingBalances,
+        resourcePlanAllowedEvents: params.resourcePlan.allowedEvents,
+        resourcePlanForbiddenEvents: params.resourcePlan.forbiddenEvents,
+        resourcePlanViolations: finalResourcePlanViolations,
+      } : {}),
+      ...(secondValidation ? { secondValidation } : {}),
+      auditIssues: finalAuditIssuesWithPlan,
+      ...(tokenUsage ? { tokenUsage } : {}),
+    };
+  }
+
+  private async tryResourceBlockingRewrite(params: {
+    readonly rewriter: ResourceBlockingRewriterAgent;
+    readonly content: string;
+    readonly chapterIntent: string;
+    readonly validation: ResourceValidationResult;
+    readonly recoveryPlan: ReturnType<typeof selectResourceRecoveryPlan>;
+    readonly bookRules: string;
+    readonly currentLedger: string;
+    readonly currentState: string;
+    readonly lengthSpec: LengthSpec;
+    readonly originalWordCount: number;
+    readonly language: LengthLanguage;
+    readonly logLabel: string;
+    readonly isFallback?: boolean;
+  }): Promise<{
+    readonly accepted: boolean;
+    readonly content: string;
+    readonly validation: ResourceValidationResult;
+    readonly usage?: TokenUsageSummary;
+  }> {
+    const rewritten = await params.rewriter.rewrite({
+      chapterContent: params.content,
+      chapterIntent: params.chapterIntent,
+      validation: params.validation,
+      recoveryPlan: params.recoveryPlan,
+      bookRules: params.bookRules,
+      currentLedger: params.currentLedger,
+      currentState: params.currentState,
+    });
+    this.config.logger?.child("writer")?.info(params.isFallback
+      ? "resource-engine: fallback recovery returned, validating by program"
+      : "resource-engine: recovery rewrite returned, validating by program");
+    const candidateValidation = this.revalidateResourceConsistency({
+      content: rewritten.content,
+      bookRules: params.bookRules,
+      currentLedger: params.currentLedger,
+      currentState: params.currentState,
+      chapterIntent: params.chapterIntent,
+    });
+    const candidateClassification = classifyResourceConsistency({ validation: candidateValidation, repaired: true });
+    const forbidden = hasForbiddenResourceRecoveryPhrase(rewritten.content, params.recoveryPlan);
+    const afterWords = countChapterLength(rewritten.content, params.lengthSpec.countingMode);
+    const accepted = rewritten.content.trim().length > 0
+      && !forbidden
+      && candidateValidation.issues.length === 0
+      && !candidateClassification.blocking
+      && (params.originalWordCount < this.minimumWholeChapterWords(params.lengthSpec)
+        || afterWords >= Math.ceil(countChapterLength(params.content, params.lengthSpec.countingMode) * 0.8));
+    this.logInfo(params.language, {
+      zh: `rewrite decision [${params.logLabel}]: beforeWords=${countChapterLength(params.content, params.lengthSpec.countingMode)}, afterWords=${afterWords}, accepted=${accepted}, rejectedReason=${accepted ? "none" : forbidden ? "forbidden-resource-phrase-or-rule" : candidateValidation.issues.length > 0 ? "resource-validation-failed" : "below-80%-of-original-or-empty"}`,
+      en: `rewrite decision [${params.logLabel}]: beforeWords=${countChapterLength(params.content, params.lengthSpec.countingMode)}, afterWords=${afterWords}, accepted=${accepted}, rejectedReason=${accepted ? "none" : forbidden ? "forbidden-resource-phrase-or-rule" : candidateValidation.issues.length > 0 ? "resource-validation-failed" : "below-80%-of-original-or-empty"}`,
+    });
+    return {
+      accepted,
+      content: rewritten.content,
+      validation: candidateValidation,
+      ...(rewritten.usage ? { usage: rewritten.usage } : {}),
+    };
+  }
+
+  private tryDeferExchangeTemplatePatch(params: {
+    readonly content: string;
+    readonly bookRules: string;
+    readonly currentLedger: string;
+    readonly currentState: string;
+    readonly chapterIntent: string;
+    readonly recoveryPlan?: ReturnType<typeof selectResourceRecoveryPlan>;
+  }): {
+    readonly attempted: boolean;
+    readonly applied: boolean;
+    readonly validationPassed: boolean;
+    readonly content: string;
+    readonly validation: ResourceValidationResult;
+    readonly reason?: string;
+    readonly removedSnippets: ReadonlyArray<string>;
+    readonly balanceClaimPatchAttempted?: boolean;
+    readonly balanceClaimPatchApplied?: boolean;
+    readonly balanceClaimPatchResource?: string;
+    readonly balanceClaimPatchFrom?: number;
+    readonly balanceClaimPatchTo?: number;
+    readonly balanceClaimPatchReason?: string;
+  } {
+    if (params.recoveryPlan?.strategy !== "defer_exchange") {
+      return {
+        attempted: false,
+        applied: false,
+        validationPassed: false,
+        content: params.content,
+        validation: this.revalidateResourceConsistency({
+          content: params.content,
+          bookRules: params.bookRules,
+          currentLedger: params.currentLedger,
+          currentState: params.currentState,
+          chapterIntent: params.chapterIntent,
+        }),
+        removedSnippets: [],
+        balanceClaimPatchAttempted: false,
+        balanceClaimPatchApplied: false,
+      };
+    }
+    const patch = applyDeferExchangeTemplatePatch({
+      chapterText: params.content,
+      bookRules: params.bookRules,
+      currentLedger: params.currentLedger,
+      currentState: params.currentState,
+    });
+    if (!patch.patchApplied) {
+      return {
+        attempted: false,
+        applied: false,
+        validationPassed: false,
+        content: params.content,
+        validation: this.revalidateResourceConsistency({
+          content: params.content,
+          bookRules: params.bookRules,
+          currentLedger: params.currentLedger,
+          currentState: params.currentState,
+          chapterIntent: params.chapterIntent,
+        }),
+        reason: patch.reason,
+        removedSnippets: [],
+        balanceClaimPatchAttempted: patch.balanceClaimPatchAttempted,
+        balanceClaimPatchApplied: patch.balanceClaimPatchApplied,
+        balanceClaimPatchResource: patch.balanceClaimPatchResource,
+        balanceClaimPatchFrom: patch.balanceClaimPatchFrom,
+        balanceClaimPatchTo: patch.balanceClaimPatchTo,
+        balanceClaimPatchReason: patch.balanceClaimPatchReason,
+      };
+    }
+    this.config.logger?.child("writer")?.info("resource-engine: applying defer_exchange template patch");
+    this.config.logger?.child("writer")?.info(`resource-engine: removed ${patch.removedSnippets.length} cash-flow paragraph(s)`);
+    this.config.logger?.child("writer")?.info("resource-engine: template patch returned, validating by program");
+    const cleanAfterPatch = cleanNonNarrativeArtifacts(patch.patchedText);
+    const contentForValidation = cleanAfterPatch.cleanedText;
+    const validation = this.revalidateResourceConsistency({
+      content: contentForValidation,
+      bookRules: params.bookRules,
+      currentLedger: params.currentLedger,
+      currentState: params.currentState,
+      chapterIntent: params.chapterIntent,
+    });
+    const classification = classifyResourceConsistency({ validation, repaired: true });
+    const forbidden = hasForbiddenResourceRecoveryPhrase(contentForValidation, params.recoveryPlan);
+    const requiredSkills = params.recoveryPlan.requiredEvents
+      .filter((event) => event.kind === "unlock" && event.label)
+      .map((event) => event.label!);
+    const hasRequiredSkills = requiredSkills.every((skill) => validation.unlockedSkills.includes(skill));
+    const openingFederalCoins = validation.openingBalances["联邦币"] ?? 0;
+    const closingFederalCoins = validation.closingBalances["联邦币"] ?? openingFederalCoins;
+    const closingReputation = validation.closingBalances["民望值"] ?? 0;
+    const validationPassed = !forbidden
+      && validation.issues.length === 0
+      && !classification.blocking
+      && hasRequiredSkills
+      && closingFederalCoins <= openingFederalCoins
+      && closingReputation >= 0;
+    return {
+      attempted: true,
+      applied: true,
+      validationPassed,
+      content: contentForValidation,
+      validation,
+      reason: patch.reason,
+      removedSnippets: [...patch.removedSnippets, ...cleanAfterPatch.removedSnippets],
+      balanceClaimPatchAttempted: patch.balanceClaimPatchAttempted,
+      balanceClaimPatchApplied: patch.balanceClaimPatchApplied,
+      balanceClaimPatchResource: patch.balanceClaimPatchResource,
+      balanceClaimPatchFrom: patch.balanceClaimPatchFrom,
+      balanceClaimPatchTo: patch.balanceClaimPatchTo,
+      balanceClaimPatchReason: patch.balanceClaimPatchReason,
+    };
+  }
+
+  private async writeResourceConsistencyReport(params: {
+    readonly bookDir: string;
+    readonly chapterNumber: number;
+    readonly validation: ResourceValidationResult;
+    readonly status: string;
+    readonly blocking: boolean;
+    readonly recoveryAttempted?: boolean;
+    readonly recoveryPlan?: ReturnType<typeof selectResourceRecoveryPlan>;
+    readonly secondValidation?: "PASS" | "FAILED";
+    readonly recoveryPlanResult?: "PASS" | "FAILED";
+    readonly fallbackRecoveryAttempted?: boolean;
+    readonly fallbackRecoveryPlan?: ReturnType<typeof selectResourceRecoveryPlan>;
+    readonly fallbackSecondValidation?: "PASS" | "FAILED";
+    readonly templatePatchAttempted?: boolean;
+    readonly templatePatchApplied?: boolean;
+    readonly templatePatchValidation?: "PASS" | "FAILED";
+    readonly templatePatchReason?: string;
+    readonly removedCashFlowSnippets?: ReadonlyArray<string>;
+    readonly balanceClaimPatchAttempted?: boolean;
+    readonly balanceClaimPatchApplied?: boolean;
+    readonly balanceClaimPatchResource?: string;
+    readonly balanceClaimPatchFrom?: number;
+    readonly balanceClaimPatchTo?: number;
+    readonly balanceClaimPatchReason?: string;
+    readonly filteredPseudoSkills?: ReadonlyArray<string>;
+    readonly resourcePlan?: ChapterResourcePlan;
+    readonly resourcePlanViolations?: ReadonlyArray<string>;
+  }): Promise<void> {
+    const padded = String(params.chapterNumber).padStart(4, "0");
+    const reportDir = join(params.bookDir, "reviews", "resource-consistency");
+    await mkdir(reportDir, { recursive: true });
+    const events = params.validation.events.map((event) => ({
+      kind: event.kind,
+      resource: event.resource,
+      amount: event.amount,
+      targetResource: event.targetResource,
+      label: event.label,
+      evidence: event.evidence,
+    }));
+    const resourcePlanViolationCount = (params.resourcePlanViolations ?? []).length;
+    const balanceMutationEvents = params.validation.events
+      .filter((event) => event.kind === "gain" || event.kind === "consume" || event.kind === "balance_jump" || event.kind === "unlock")
+      .map((event) => `${event.kind} ${event.resource}${event.amount !== undefined ? ` ${event.amount}` : ""}${event.label ? ` ${event.label}` : ""}: ${event.evidence}`);
+    const noChangeInferred = Boolean(params.resourcePlan && isNoBalanceChangePlan(params.resourcePlan) && balanceMutationEvents.length === 0 && resourcePlanViolationCount === 0);
+    const closureRequirement = params.resourcePlan?.closureRequirement
+      ?? (params.resourcePlan && isNoBalanceChangePlan(params.resourcePlan) ? "inferred_no_change_allowed" : "-");
+    const closureSource = noChangeInferred ? "inferred_no_change" : "-";
+    const effectiveStatus = resourcePlanViolationCount > 0
+      ? "BLOCKED_BY_RESOURCE_PLAN"
+      : params.status;
+    const effectiveBlocking = params.blocking || resourcePlanViolationCount > 0;
+    const report = {
+      chapter: params.chapterNumber,
+      status: effectiveStatus,
+      blocking: effectiveBlocking,
+      events,
+      openingBalances: params.validation.openingBalances,
+      closingBalances: params.validation.closingBalances,
+      unlockedSkills: params.validation.unlockedSkills,
+      issues: params.validation.issues,
+      suggestions: buildResourceRepairSuggestions(params.validation),
+      recoveryAttempted: params.recoveryAttempted ?? false,
+      recoveryPlan: params.recoveryPlan?.planId ?? null,
+      recoveryPlanResult: params.recoveryPlanResult ?? null,
+      secondValidation: params.secondValidation ?? null,
+      fallbackRecoveryAttempted: params.fallbackRecoveryAttempted ?? false,
+      fallbackRecoveryPlan: params.fallbackRecoveryPlan?.planId ?? null,
+      fallbackSecondValidation: params.fallbackSecondValidation ?? null,
+      templatePatchAttempted: params.templatePatchAttempted ?? false,
+      templatePatchApplied: params.templatePatchApplied ?? false,
+      templatePatchValidation: params.templatePatchValidation ?? null,
+      templatePatchReason: params.templatePatchReason ?? null,
+      removedCashFlowSnippets: params.removedCashFlowSnippets ?? [],
+      balanceClaimPatchAttempted: params.balanceClaimPatchAttempted ?? false,
+      balanceClaimPatchApplied: params.balanceClaimPatchApplied ?? false,
+      balanceClaimPatchResource: params.balanceClaimPatchResource ?? null,
+      balanceClaimPatchFrom: params.balanceClaimPatchFrom ?? null,
+      balanceClaimPatchTo: params.balanceClaimPatchTo ?? null,
+      balanceClaimPatchReason: params.balanceClaimPatchReason ?? null,
+      filteredPseudoSkills: params.filteredPseudoSkills ?? [],
+      resourcePlanMode: params.resourcePlan?.mode ?? null,
+      resourcePlanExpectedClosingBalances: params.resourcePlan?.expectedClosingBalances ?? null,
+      resourcePlanAllowedEvents: params.resourcePlan?.allowedEvents ?? [],
+      resourcePlanForbiddenEvents: params.resourcePlan?.forbiddenEvents ?? [],
+      resourcePlanViolations: params.resourcePlanViolations ?? [],
+      closureRequirement,
+      closureSource,
+      noChangeInferred,
+      balanceMutationEvents,
+      forbiddenMutationHits: params.resourcePlanViolations ?? [],
+    };
+    await writeFile(join(reportDir, `${padded}.report.json`), JSON.stringify(report, null, 2), "utf-8");
+    const issueLines = params.validation.issues.length
+      ? params.validation.issues.map((issue) => `- [${issue.severity}] ${issue.code}: ${issue.message}\n  - 建议：${issue.suggestion}`)
+      : resourcePlanViolationCount > 0 ? [] : ["- 无"];
+    const eventLines = events.length
+      ? events.map((event) => `- ${event.kind} ${event.resource}${event.amount !== undefined ? ` ${event.amount}` : ""}${event.targetResource ? ` -> ${event.targetResource}` : ""}：${event.evidence}`)
+      : ["- 无"];
+    const suggestionLines = resourcePlanViolationCount > 0
+      ? []
+      : report.suggestions.map((suggestion) => `- ${suggestion}`);
+    const resourcePlanViolationLines = resourcePlanViolationCount > 0
+      ? (params.resourcePlanViolations ?? []).map((violation) => `- [critical] ${violation}`)
+      : ["- 无"];
+    const resourcePlanProblemLines = resourcePlanViolationCount > 0
+      ? (params.resourcePlanViolations ?? []).map((violation) => `- Resource Plan 违规：${violation}\n  - 建议：修复正文资源链使其符合 Resource Plan expectedClosingBalances 与 allowedEvents；本章未修复前不得标记 ready-for-review。`)
+      : [];
+    const resourcePlanSuggestionLines = resourcePlanViolationCount > 0
+      ? [
+          "- Resource Plan violations 存在，必须修复：",
+          "  1. 检查 expectedClosingBalances 是否与正文结尾面板匹配",
+          "  2. 检查 allowedEvents 是否全部出现在正文",
+          "  3. 检查 forbiddenEvents 是否出现在正文",
+          "  4. 修复后重新运行 write next 或人工修改正文",
+        ]
+      : [];
+    await writeFile(join(reportDir, `${padded}.report.md`), [
+      `# 第${params.chapterNumber}章 Resource Consistency Report`,
+      "",
+      `- 状态：${effectiveStatus}`,
+      `- Blocking：${effectiveBlocking ? "YES" : "NO"}`,
+      `- Recovery Attempted：${params.recoveryAttempted ? "YES" : "NO"}`,
+      `- Recovery Plan：${params.recoveryPlan?.planId ?? "-"}`,
+      `- Recovery Plan Result：${params.recoveryPlanResult ?? "-"}`,
+      `- Fallback Recovery Attempted：${params.fallbackRecoveryAttempted ? "YES" : "NO"}`,
+      `- Fallback Recovery Plan：${params.fallbackRecoveryPlan?.planId ?? "-"}`,
+      `- Fallback Second Validation：${params.fallbackSecondValidation ?? "-"}`,
+      `- Template Patch Attempted：${params.templatePatchAttempted ? "YES" : "NO"}`,
+      `- Template Patch Applied：${params.templatePatchApplied ? "YES" : "NO"}`,
+      `- Template Patch Validation：${params.templatePatchValidation ?? "-"}`,
+      `- Template Patch Reason：${params.templatePatchReason ?? "-"}`,
+      `- Balance Claim Patch Attempted：${params.balanceClaimPatchAttempted ? "YES" : "NO"}`,
+      `- Balance Claim Patch Applied：${params.balanceClaimPatchApplied ? "YES" : "NO"}`,
+      `- Balance Claim Patch：${params.balanceClaimPatchResource ?? "-"} ${params.balanceClaimPatchFrom ?? "-"} -> ${params.balanceClaimPatchTo ?? "-"} (${params.balanceClaimPatchReason ?? "-"})`,
+      `- Filtered Pseudo Skills：${params.filteredPseudoSkills?.join("、") || "-"}`,
+      `- Resource Plan Mode：${params.resourcePlan?.mode ?? "-"}`,
+      `- Closure Requirement：${closureRequirement}`,
+      `- Closure Source：${closureSource}`,
+      `- No Change Inferred：${noChangeInferred ? "YES" : "NO"}`,
+      `- Second Validation：${params.secondValidation ?? "-"}`,
+      "",
+      "## 抽取事件",
+      ...eventLines,
+      "",
+      "## 程序账本",
+      "```json",
+      JSON.stringify({
+        openingBalances: params.validation.openingBalances,
+        closingBalances: params.validation.closingBalances,
+        unlockedSkills: params.validation.unlockedSkills,
+        resourcePlanExpectedClosingBalances: params.resourcePlan?.expectedClosingBalances ?? null,
+        resourcePlanViolations: params.resourcePlanViolations ?? [],
+        closureRequirement,
+        closureSource,
+        noChangeInferred,
+        balanceMutationEvents,
+      }, null, 2),
+      "```",
+      "",
+      "## Resource Plan",
+      `- mode: ${params.resourcePlan?.mode ?? "-"}`,
+      `- expectedClosingBalances: ${params.resourcePlan ? JSON.stringify(params.resourcePlan.expectedClosingBalances) : "-"}`,
+      `- allowedEvents: ${params.resourcePlan ? params.resourcePlan.allowedEvents.length : 0}`,
+      `- forbiddenEvents: ${params.resourcePlan ? params.resourcePlan.forbiddenEvents.length : 0}`,
+      `- closureRequirement: ${closureRequirement}`,
+      `- closureSource: ${closureSource}`,
+      `- noChangeInferred: ${noChangeInferred ? "YES" : "NO"}`,
+      `- balanceMutationEvents: ${balanceMutationEvents.length ? balanceMutationEvents.join("；") : "none"}`,
+      `- forbiddenMutationHits: ${(params.resourcePlanViolations ?? []).length ? (params.resourcePlanViolations ?? []).join("；") : "none"}`,
+      "",
+      "## Resource Plan Violations",
+      ...resourcePlanViolationLines,
+      "",
+      "## 问题",
+      ...issueLines,
+      ...resourcePlanProblemLines,
+      "",
+      "## 模板 Patch 删除片段",
+      ...((params.removedCashFlowSnippets ?? []).length
+        ? (params.removedCashFlowSnippets ?? []).map((snippet) => `- ${snippet}`)
+        : ["- 无"]),
+      "",
+      "## 修复建议",
+      ...suggestionLines,
+      ...resourcePlanSuggestionLines,
+      "",
+    ].join("\n"), "utf-8");
+  }
+
+  private async writeCleanNarrativeReport(params: {
+    readonly bookDir: string;
+    readonly chapterNumber: number;
+    readonly result: CleanNarrativeResult;
+    readonly status: "PASS" | "CLEANED" | "FAILED";
+    readonly blocking: boolean;
+  }): Promise<void> {
+    const padded = String(params.chapterNumber).padStart(4, "0");
+    const reportDir = join(params.bookDir, "reviews", "clean-narrative");
+    await mkdir(reportDir, { recursive: true });
+    const report = {
+      chapter: params.chapterNumber,
+      status: params.status,
+      blocking: params.blocking,
+      changed: params.result.changed,
+      artifacts: params.result.artifacts,
+      removedSnippets: params.result.removedSnippets,
+    };
+    await writeFile(join(reportDir, `${padded}.report.json`), JSON.stringify(report, null, 2), "utf-8");
+    const artifactLines = params.result.artifacts.length
+      ? params.result.artifacts.map((artifact) => `- [${artifact.severity}] ${artifact.type}: ${artifact.reason}\n  - ${artifact.text}`)
+      : ["- 无"];
+    const removedLines = params.result.removedSnippets.length
+      ? params.result.removedSnippets.map((snippet) => `- ${snippet}`)
+      : ["- 无"];
+    await writeFile(join(reportDir, `${padded}.report.md`), [
+      `# 第${params.chapterNumber}章 Clean Narrative Report`,
+      "",
+      `- 状态：${params.status}`,
+      `- Blocking：${params.blocking ? "YES" : "NO"}`,
+      `- Changed：${params.result.changed ? "YES" : "NO"}`,
+      "",
+      "## 检测项",
+      ...artifactLines,
+      "",
+      "## 删除片段",
+      ...removedLines,
+      "",
+    ].join("\n"), "utf-8");
+  }
+
+  private revalidateResourceConsistency(params: {
+    readonly content: string;
+    readonly bookRules: string;
+    readonly currentLedger: string;
+    readonly currentState: string;
+    readonly chapterIntent?: string;
+    readonly validation?: ResourceValidationResult;
+  }): ResourceValidationResult {
+    const events = extractResourceEvents(params.content, params.bookRules, params.currentLedger);
+    return validateResourceMath({
+      events,
+      currentLedger: params.currentLedger,
+      currentState: params.currentState,
+      bookRules: params.bookRules,
+      chapterIntent: params.chapterIntent,
+      chapterText: params.content,
+    });
+  }
+
+  private sanitizeReportFilename(title: string): string {
+    return title
+      .replace(/[/\\?%*:|"<>]/g, "")
+      .replace(/\s+/g, "_")
+      .slice(0, 50);
   }
 
   private async readWriteRetryHint(
@@ -3205,4 +4729,82 @@ ${matrix}`,
     const contentStart = lines.findIndex((l, i) => i > 0 && l.trim().length > 0);
     return contentStart >= 0 ? lines.slice(contentStart).join("\n") : raw;
   }
+}
+
+function buildResourceRepairSuggestions(validation: ResourceValidationResult): string[] {
+  if (validation.issues.length === 0) {
+    return ["资源账本校验通过，无需人工处理。"];
+  }
+  const blockingLike = validation.issues.some((issue) =>
+    issue.severity === "critical"
+    || issue.code === "balance-mismatch"
+    || issue.code === "exchange-rate-mismatch"
+    || issue.code === "exchange-ratio-mismatch"
+    || issue.code === "skill-cost-mismatch"
+    || issue.code === "missing-skill-unlock"
+    || issue.code === "negative-balance"
+    || issue.code === "resource-rule-conflict"
+    || issue.code === "unauthorized-resource-rule");
+  const suggestions = blockingLike
+    ? [
+        "修复前不要基于本章继续续写。",
+        "优先让正文资源事件满足程序账本，而不是修改兑换比例。",
+      ]
+    : [
+        "本章存在轻微资源提示，可人工复核后继续。",
+        "优先让正文资源事件满足程序账本，而不是修改兑换比例。",
+      ];
+  if (validation.issues.some((issue) => issue.code === "negative-balance")) {
+    suggestions.push("若资源余额不足，延后兑换、补足合理获得事件，或降低本章收益/消耗，不要发明透支规则。");
+  }
+  if (validation.issues.some((issue) => issue.code === "exchange-rate-mismatch" || issue.code === "exchange-ratio-mismatch")) {
+    suggestions.push("按 book_rules 中的兑换比例修正消耗与收益，例如 1点民望值=10联邦币 时，1000联邦币必须消耗100民望值。");
+  }
+  if (validation.issues.some((issue) => issue.code === "unauthorized-resource-rule")) {
+    suggestions.push("删除正文中的透支/负债/信用额度设定；除非 book_rules 显式声明 allowNegative 或 creditLimit。");
+  }
+  return suggestions;
+}
+
+function buildResourcePlanAuditIssues(violations: ReadonlyArray<string>): AuditIssue[] {
+  return [...new Set(violations)].map((violation) => ({
+    severity: "critical" as const,
+    category: "resource-plan",
+    description: `RESOURCE_PLAN_NOT_CLOSED: ${violation}`,
+    suggestion: "Resource Plan 是本章资源真相；修复正文资源链并二次验证通过前，不得更新 state/ledger，也不得标记 ready-for-review。",
+  }));
+}
+
+function detectResourceIndexReadinessBlocker(params: {
+  readonly auditIssues: ReadonlyArray<AuditIssue>;
+  readonly updatedState: string;
+  readonly resourceBlocking: boolean;
+}): { readonly reason: string } | undefined {
+  if (params.resourceBlocking) {
+    return { reason: "Resource Engine blocking=true" };
+  }
+  const issueText = params.auditIssues
+    .map((issue) => `${issue.category ?? ""} ${issue.description} ${issue.suggestion}`)
+    .join("\n");
+  const resourceIssuePattern = /RESOURCE_PLAN_NOT_CLOSED|resource-plan|resource-consistency:\s*程序账本校验(?:仍)?失败|resource-consistency:.*需人工确认|balance-mismatch|exchange-rate-mismatch|negative-balance|resource-rule-conflict|missing-skill-unlock|unlockedSkills\s*为空|资源账本校验存在冲突/u;
+  if (resourceIssuePattern.test(issueText)) {
+    return { reason: "auditIssues contain unresolved resource consistency markers" };
+  }
+  const stateConflictPattern = /当前资源[^|\n]*(?:资源账本校验存在冲突|需人工确认|未确认|待人工处理|state conflict)|资源账本校验存在冲突，需人工确认/u;
+  if (stateConflictPattern.test(params.updatedState)) {
+    return { reason: "current_state resource field is unresolved" };
+  }
+  return undefined;
+}
+
+function buildFallbackRecoveryPlan(params: {
+  readonly validation: ResourceValidationResult;
+  readonly chapterIntent: string;
+  readonly failedPlan: ReturnType<typeof selectResourceRecoveryPlan>;
+}): ReturnType<typeof selectResourceRecoveryPlan> | undefined {
+  if (params.failedPlan.strategy !== "add_earned_resource_before_spend") return undefined;
+  return buildResourceRecoveryPlans({
+    validation: params.validation,
+    chapterIntent: params.chapterIntent,
+  }).find((plan) => plan.strategy === "defer_exchange");
 }

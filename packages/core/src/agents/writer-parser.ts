@@ -30,6 +30,7 @@ export function parseCreativeOutput(
   if (!chapterContent) {
     chapterContent = fallbackExtractContent(content, countingMode);
   }
+  chapterContent = stripNonProseArtifacts(chapterContent);
 
   let title = extract("CHAPTER_TITLE");
   if (!title) {
@@ -42,6 +43,55 @@ export function parseCreativeOutput(
     wordCount: countChapterLength(chapterContent, countingMode),
     preWriteCheck: extract("PRE_WRITE_CHECK"),
   };
+}
+
+export function stripNonProseArtifacts(content: string): string {
+  let cleaned = content.trim();
+  if (!cleaned) return "";
+
+  const marker = cleaned.match(
+    /^\s*(?:#{1,6}\s*)?(?:={2,}\s*)?(?:PRE_WRITE_CHECK|POST_WRITE_CHECK|写作检查|自检|审稿说明)(?:\s*={2,})?\b.*$/im,
+  );
+  if (marker?.index !== undefined) {
+    cleaned = cleaned.slice(0, marker.index).trimEnd();
+  }
+  const residualTag = cleaned.match(/^\s*={3,}[\s\S]*$/m);
+  if (residualTag?.index !== undefined) {
+    cleaned = cleaned.slice(0, residualTag.index).trimEnd();
+  }
+
+  const lines = cleaned.split("\n");
+  const output: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const normalized = line.replace(/\s/g, "");
+    const isInspectionTableHeader =
+      line.includes("|")
+      && normalized.includes("检查项")
+      && normalized.includes("本章记录")
+      && normalized.includes("备注");
+    if (!isInspectionTableHeader) {
+      output.push(line);
+      continue;
+    }
+
+    index += 1;
+    while (index < lines.length) {
+      const next = lines[index] ?? "";
+      if (!next.trim()) break;
+      if (!next.includes("|")) {
+        index -= 1;
+        break;
+      }
+      index += 1;
+    }
+  }
+
+  return output
+    .join("\n")
+    .replace(/\n+\s*(?:={3,}|-{3,}|\*{3,}|#{3,})\s*$/u, "")
+    .replace(/\n+\s*```(?:[\s\S]*?)?```\s*$/u, "")
+    .trim();
 }
 
 /**

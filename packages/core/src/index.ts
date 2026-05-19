@@ -71,7 +71,63 @@ export {
   ChapterTraceSchema,
 } from "./models/input-governance.js";
 export { PlannerAgent, type PlanChapterInput, type PlanChapterOutput } from "./agents/planner.js";
+export { ChapterIntentAgent, type ChapterIntentInput, type ChapterIntentResult } from "./agents/chapter-intent.js";
+export {
+  IntentAlignmentReviewerAgent,
+  INTENT_ALIGNMENT_DIMENSIONS,
+  type IntentAlignmentDimension,
+  type IntentAlignmentIssue,
+  type IntentAlignmentReport,
+  type IntentAlignmentReviewInput,
+  type IntentAlignmentScores,
+  type IntentAlignmentSeverity,
+  type IntentAlignmentStatus,
+} from "./agents/intent-alignment-reviewer.js";
+export {
+  ResourceBlockingRewriterAgent,
+  ResourceConsistencyReviserAgent,
+  buildAuthoritativeResourceContext,
+  buildResourceAuditIssues,
+  buildResourceLedgerUpdate,
+  buildResourceRecoveryPlans,
+  classifyResourceConsistency,
+  computeResourceLedger,
+  detectFilteredPseudoSkills,
+  extractResourceEvents,
+  hasForbiddenResourceRecoveryPhrase,
+  parseResourceRules,
+  repairResourceInconsistencies,
+  selectResourceRecoveryPlan,
+  syncBalanceClaimsWithLedger,
+  syncCurrentStateResources,
+  validateResourceMath,
+  type ResourceConsistencyPipelineResult,
+  type ResourceConsistencyStatus,
+  type ResourceEvent,
+  type ResourceMathIssue,
+  type ResourceRepairResult,
+  type ResourceRecoveryPlan,
+  type ResourceRecoveryStrategy,
+  type ResourceValidationResult,
+} from "./agents/resource-consistency.js";
 export { ComposerAgent, type ComposeChapterInput, type ComposeChapterOutput } from "./agents/composer.js";
+export {
+  cleanNonNarrativeArtifacts,
+  detectNonNarrativeArtifacts,
+  type CleanNarrativeResult,
+  type NonNarrativeArtifact,
+} from "./agents/clean-narrative.js";
+export {
+  buildChapterResourcePlan,
+  renderResourcePlanForPrompt,
+  sanitizeIntentAgainstResourcePlan,
+  preScanTextAgainstResourcePlan,
+  validateIntentAgainstResourcePlan,
+  validateResourceEngineAgainstPlan,
+  type ChapterResourcePlan,
+  type ChapterResourcePlanMode,
+  type PlannedResourceEvent,
+} from "./agents/resource-plan.js";
 export { validateStyleGuard, type StyleGuardChapter, type StyleGuardOptions, type StyleGuardResult } from "./validators/style-guard.js";
 export { validateConsistencyGuard, type ConsistencyGuardResult } from "./validators/consistency-guard.js";
 export { analyzePatternBreaker, analyzeChapterPattern, type ChapterPatternAnalysis, type NarrativePatternTag, type PatternBreakerResult } from "./validators/pattern-breaker.js";
