@@ -6,6 +6,7 @@ import type { ChapterResourcePlanMode, PlannedResourceEvent } from "./resource-p
 
 export type ResourceEventKind = "gain" | "consume" | "balance" | "balance_jump" | "unlock";
 export type ResourceConsistencyStatus = "PASS" | "FIXED" | "WARN" | "FAILED";
+export type ClosureStatus = "no_change_closed" | "normal_closed" | "not_checked" | "resource_failed";
 
 export interface ResourceEvent {
   readonly chapter?: number;
@@ -94,6 +95,7 @@ export interface ResourceConsistencyPipelineResult {
   readonly balanceClaimPatchTo?: number;
   readonly balanceClaimPatchReason?: string;
   readonly filteredPseudoSkills?: ReadonlyArray<string>;
+  readonly closureStatus: ClosureStatus;
   readonly resourcePlanMode?: ChapterResourcePlanMode;
   readonly resourcePlanExpectedClosingBalances?: Readonly<Record<string, number>>;
   readonly resourcePlanAllowedEvents?: ReadonlyArray<PlannedResourceEvent>;
@@ -764,6 +766,29 @@ export function classifyResourceConsistency(params: {
     shouldPersistLedger: !blocking,
     shouldPersistStateResources: !blocking,
   };
+}
+
+export function classifyClosureStatus(params: {
+  readonly hasResourcePlan: boolean;
+  readonly hasEvents: boolean;
+  readonly hasIssues: boolean;
+  readonly hasResourcePlanViolations: boolean;
+  readonly blocking: boolean;
+  readonly status: ResourceConsistencyStatus;
+}): ClosureStatus {
+  if (params.blocking || params.status === "FAILED" || params.status === "WARN" || params.hasResourcePlanViolations) {
+    return "resource_failed";
+  }
+  if (!params.hasResourcePlan && !params.hasEvents) {
+    return "not_checked";
+  }
+  if (!params.hasEvents && !params.hasIssues && !params.hasResourcePlanViolations) {
+    return "no_change_closed";
+  }
+  if (params.hasEvents && !params.hasIssues && !params.hasResourcePlanViolations && !params.blocking) {
+    return "normal_closed";
+  }
+  return "not_checked";
 }
 
 export function buildResourceRecoveryPlans(params: {

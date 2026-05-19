@@ -37,6 +37,7 @@ import {
   buildResourceAuthoritySummary,
   buildResourceLedgerUpdate,
   buildResourceRecoveryPlans,
+  classifyClosureStatus,
   classifyResourceConsistency,
   detectFilteredPseudoSkills,
   extractResourceEvents,
@@ -48,6 +49,7 @@ import {
   selectResourceRecoveryPlan,
   syncCurrentStateResources,
   validateResourceMath,
+  type ClosureStatus,
   type ResourceConsistencyPipelineResult,
   type ResourceValidationResult,
   type ResourceConsistencyStatus,
@@ -1575,6 +1577,7 @@ export class PipelineRunner {
           validation: resourceConsistency.validation,
           status: resourceConsistency.status,
           blocking: resourceConsistency.blocking,
+          closureStatus: resourceConsistency.closureStatus,
           recoveryAttempted: resourceConsistency.recoveryAttempted,
           recoveryPlan: resourceConsistency.recoveryPlan,
           secondValidation: resourceConsistency.secondValidation,
@@ -1724,6 +1727,7 @@ export class PipelineRunner {
           validation: resourceConsistency.validation,
           status: resourceConsistency.status,
           blocking: resourceConsistency.blocking,
+          closureStatus: resourceConsistency.closureStatus,
           recoveryAttempted: resourceConsistency.recoveryAttempted,
           recoveryPlan: resourceConsistency.recoveryPlan,
           secondValidation: resourceConsistency.secondValidation,
@@ -1902,6 +1906,7 @@ export class PipelineRunner {
       validation: resourceConsistency.validation,
       status: resourceConsistency.status,
       blocking: resourceConsistency.blocking,
+      closureStatus: resourceConsistency.closureStatus,
       recoveryAttempted: resourceConsistency.recoveryAttempted,
       recoveryPlan: resourceConsistency.recoveryPlan,
       secondValidation: resourceConsistency.secondValidation,
@@ -3203,6 +3208,14 @@ ${matrix}`,
       if (hasResourcePlanViolations) {
         this.config.logger?.child("writer")?.warn(`resource-engine: resource plan violations detected (${resourcePlanViolations.length}), forcing blocking state`);
       }
+      const closureStatus: ClosureStatus = classifyClosureStatus({
+        hasResourcePlan: !!params.resourcePlan,
+        hasEvents: false,
+        hasIssues: false,
+        hasResourcePlanViolations,
+        blocking: finalBlocking,
+        status: finalStatus,
+      });
       return {
         content: params.content,
         wordCount: params.wordCount,
@@ -3212,6 +3225,7 @@ ${matrix}`,
         shouldPersistLedger: !finalBlocking,
         shouldPersistStateResources: !finalBlocking,
         repaired: false,
+        closureStatus,
         ...(params.resourcePlan ? {
           resourcePlanMode: params.resourcePlan.mode,
           resourcePlanExpectedClosingBalances: params.resourcePlan.expectedClosingBalances,
@@ -3230,6 +3244,14 @@ ${matrix}`,
       if (hasResourcePlanViolations) {
         this.config.logger?.child("writer")?.warn(`resource-engine: resource plan violations detected (${resourcePlanViolations.length}), forcing blocking state`);
       }
+      const closureStatus: ClosureStatus = classifyClosureStatus({
+        hasResourcePlan: !!params.resourcePlan,
+        hasEvents: validation.events.length > 0,
+        hasIssues: false,
+        hasResourcePlanViolations,
+        blocking: finalBlocking,
+        status: finalStatus,
+      });
       return {
         content: params.content,
         wordCount: params.wordCount,
@@ -3239,6 +3261,7 @@ ${matrix}`,
         shouldPersistLedger: !finalBlocking,
         shouldPersistStateResources: !finalBlocking,
         repaired: false,
+        closureStatus,
         ...(params.resourcePlan ? {
           resourcePlanMode: params.resourcePlan.mode,
           resourcePlanExpectedClosingBalances: params.resourcePlan.expectedClosingBalances,
@@ -3507,12 +3530,22 @@ ${matrix}`,
       ];
     }
 
+    const finalClosureStatus: ClosureStatus = classifyClosureStatus({
+      hasResourcePlan: !!params.resourcePlan,
+      hasEvents: validation.events.length > 0,
+      hasIssues: validation.issues.length > 0,
+      hasResourcePlanViolations: hasFinalResourcePlanViolations,
+      blocking: classification.blocking,
+      status: classification.status,
+    });
+
     await this.writeResourceConsistencyReport({
       bookDir: params.bookDir,
       chapterNumber: params.chapterNumber,
       validation,
       status: classification.status,
       blocking: classification.blocking,
+      closureStatus: finalClosureStatus,
       recoveryAttempted,
       recoveryPlan,
       secondValidation,
@@ -3545,6 +3578,7 @@ ${matrix}`,
       shouldPersistLedger: classification.shouldPersistLedger,
       shouldPersistStateResources: classification.shouldPersistStateResources,
       repaired,
+      closureStatus: finalClosureStatus,
       ...(recoveryAttempted ? { recoveryAttempted } : {}),
       ...(recoveryPlan ? { recoveryPlan } : {}),
       ...(recoveryPlanResult ? { recoveryPlanResult } : {}),
@@ -3776,6 +3810,7 @@ ${matrix}`,
     readonly filteredPseudoSkills?: ReadonlyArray<string>;
     readonly resourcePlan?: ChapterResourcePlan;
     readonly resourcePlanViolations?: ReadonlyArray<string>;
+    readonly closureStatus: ClosureStatus;
   }): Promise<void> {
     const padded = String(params.chapterNumber).padStart(4, "0");
     const reportDir = join(params.bookDir, "reviews", "resource-consistency");
@@ -3834,6 +3869,7 @@ ${matrix}`,
       resourcePlanAllowedEvents: params.resourcePlan?.allowedEvents ?? [],
       resourcePlanForbiddenEvents: params.resourcePlan?.forbiddenEvents ?? [],
       resourcePlanViolations: params.resourcePlanViolations ?? [],
+      closureStatus: params.closureStatus,
       closureRequirement,
       closureSource,
       noChangeInferred,
@@ -3885,6 +3921,7 @@ ${matrix}`,
       `- Balance Claim Patch：${params.balanceClaimPatchResource ?? "-"} ${params.balanceClaimPatchFrom ?? "-"} -> ${params.balanceClaimPatchTo ?? "-"} (${params.balanceClaimPatchReason ?? "-"})`,
       `- Filtered Pseudo Skills：${params.filteredPseudoSkills?.join("、") || "-"}`,
       `- Resource Plan Mode：${params.resourcePlan?.mode ?? "-"}`,
+      `- Closure Status：${params.closureStatus}`,
       `- Closure Requirement：${closureRequirement}`,
       `- Closure Source：${closureSource}`,
       `- No Change Inferred：${noChangeInferred ? "YES" : "NO"}`,
@@ -3901,6 +3938,7 @@ ${matrix}`,
         unlockedSkills: params.validation.unlockedSkills,
         resourcePlanExpectedClosingBalances: params.resourcePlan?.expectedClosingBalances ?? null,
         resourcePlanViolations: params.resourcePlanViolations ?? [],
+        closureStatus: params.closureStatus,
         closureRequirement,
         closureSource,
         noChangeInferred,

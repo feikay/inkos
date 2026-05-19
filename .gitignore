@@ -26,3 +26,4 @@ tests/
 .github/
 .claude/
 reports/
+.ai_workflow/

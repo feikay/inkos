@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   syncCurrentStateResources,
   buildResourceLedgerUpdate,
+  classifyClosureStatus,
   classifyResourceConsistency,
   parseResourceRules,
   validateResourceMath,
@@ -160,5 +161,128 @@ describe("classifyResourceConsistency", () => {
     expect(result.blocking).toBe(false);
     expect(result.shouldPersistLedger).toBe(true);
     expect(result.shouldPersistStateResources).toBe(true);
+  });
+});
+
+describe("classifyClosureStatus", () => {
+  it("should return no_change_closed: plan exists, zero events, zero issues, no violations", () => {
+    const result = classifyClosureStatus({
+      hasResourcePlan: true,
+      hasEvents: false,
+      hasIssues: false,
+      hasResourcePlanViolations: false,
+      blocking: false,
+      status: "PASS",
+    });
+    expect(result).toBe("no_change_closed");
+  });
+
+  it("should return not_checked: no plan, zero events", () => {
+    const result = classifyClosureStatus({
+      hasResourcePlan: false,
+      hasEvents: false,
+      hasIssues: false,
+      hasResourcePlanViolations: false,
+      blocking: false,
+      status: "PASS",
+    });
+    expect(result).toBe("not_checked");
+  });
+
+  it("should return normal_closed: has events, zero issues, no violations, no blocking", () => {
+    const result = classifyClosureStatus({
+      hasResourcePlan: true,
+      hasEvents: true,
+      hasIssues: false,
+      hasResourcePlanViolations: false,
+      blocking: false,
+      status: "PASS",
+    });
+    expect(result).toBe("normal_closed");
+  });
+
+  it("should return resource_failed: blocking true", () => {
+    const result = classifyClosureStatus({
+      hasResourcePlan: true,
+      hasEvents: true,
+      hasIssues: true,
+      hasResourcePlanViolations: false,
+      blocking: true,
+      status: "FAILED",
+    });
+    expect(result).toBe("resource_failed");
+  });
+
+  it("should return resource_failed: status FAILED", () => {
+    const result = classifyClosureStatus({
+      hasResourcePlan: true,
+      hasEvents: true,
+      hasIssues: true,
+      hasResourcePlanViolations: false,
+      blocking: false,
+      status: "FAILED",
+    });
+    expect(result).toBe("resource_failed");
+  });
+
+  it("should return resource_failed: status WARN", () => {
+    const result = classifyClosureStatus({
+      hasResourcePlan: true,
+      hasEvents: true,
+      hasIssues: true,
+      hasResourcePlanViolations: false,
+      blocking: false,
+      status: "WARN",
+    });
+    expect(result).toBe("resource_failed");
+  });
+
+  it("should return resource_failed: has plan violations", () => {
+    const result = classifyClosureStatus({
+      hasResourcePlan: true,
+      hasEvents: false,
+      hasIssues: false,
+      hasResourcePlanViolations: true,
+      blocking: false,
+      status: "PASS",
+    });
+    expect(result).toBe("resource_failed");
+  });
+
+  it("should return normal_closed: has events, no plan, no issues, no blocking", () => {
+    const result = classifyClosureStatus({
+      hasResourcePlan: false,
+      hasEvents: true,
+      hasIssues: false,
+      hasResourcePlanViolations: false,
+      blocking: false,
+      status: "PASS",
+    });
+    expect(result).toBe("normal_closed");
+  });
+
+  it("should not misclassify missing-check as no_change_closed", () => {
+    const notChecked = classifyClosureStatus({
+      hasResourcePlan: false,
+      hasEvents: false,
+      hasIssues: false,
+      hasResourcePlanViolations: false,
+      blocking: false,
+      status: "PASS",
+    });
+    expect(notChecked).toBe("not_checked");
+    expect(notChecked).not.toBe("no_change_closed");
+  });
+
+  it("should return resource_failed when blocking even with zero events", () => {
+    const result = classifyClosureStatus({
+      hasResourcePlan: true,
+      hasEvents: false,
+      hasIssues: true,
+      hasResourcePlanViolations: false,
+      blocking: true,
+      status: "FAILED",
+    });
+    expect(result).toBe("resource_failed");
   });
 });
