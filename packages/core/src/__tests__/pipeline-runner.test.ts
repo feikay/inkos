@@ -1988,6 +1988,8 @@ describe("PipelineRunner", () => {
       expect(resourceReport.status).toBe("FAILED");
       expect(resourceReport.blocking).toBe(true);
       expect(resourceReport.closureStatus).toBe("resource_failed");
+      const resourceMd = await readFile(join(state.bookDir(bookId), "reviews", "resource-consistency", "0001.report.md"), "utf-8");
+      expect(resourceMd).toContain("Closure Status：resource_failed");
       expect(resourceReport.issues).toEqual(expect.arrayContaining([
         expect.objectContaining({ code: "unauthorized-resource-rule" }),
         expect.objectContaining({ code: "negative-balance" }),
