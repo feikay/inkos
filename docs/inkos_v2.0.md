@@ -1,3 +1,22 @@
+# 把六份笔记合并成一个“网文生产操作系统”
+
+现在你手上其实已经有六个核心方法论：
+
+```
+1. 世界观运转：稀缺、链式反应、文明共识
+2. 六招心法：情绪事件、欲望目标、阻碍、解法、高潮、反馈
+3. 高智商反派：谋局者、殉道者、伪态者
+4. 开头钩子：悬念、反差、矛盾前置、世界观炸弹、极致情绪
+5. 万能转场：情绪延续、勾子引导、环境暗示、以动带进
+6. 当前 inkos 骨架：story_bible、volume_outline、book_rules、current_state、pending_hooks
+```
+
+当前 inkos 已经在 create 阶段一次 LLM 生成五个 SECTION，并通过 FoundationReviewerAgent 做核心冲突、开篇节奏、世界一致性、角色区分度、节奏可行性五项审核。
+
+但现在的问题是：**审核的是“有没有”，不是“能不能持续产出好看的网文”。**
+
+所以我建议把系统升级成下面这个结构。
+
 # 一、升级后的完整链路
 
 ## 阶段一：题材立项，不只是选 genre，而是生成“题材架构”
@@ -441,16 +460,9 @@ inkos 2.0：故事性的大升级
 → book-info 发布信息优化
 ```
 
-接下来建议我们按顺序推进：
 
-```text
-第一步：给 Codex 下任务，先沉淀 story-methods 方法论知识库
-第二步：增强 create 阶段，让建书时多生成 5 个骨架文件
-第三步：增强 FoundationReviewerAgent，审核“故事发动机”是否成立
-第四步：再改 write next，让每章先生成 chapter_intent
-```
 
-任务列表
+# 任务列表
 
 1. ~~inkos 2.0 任务一——沉淀 story-methods 方法论知识库~~
 2. ~~inkos 2.0 任务二——增强 create 阶段故事骨架~~
@@ -477,6 +489,6 @@ inkos 2.0：故事性的大升级
 23. ~~inkos 2.0 任务五点四点八——正文非正文内容清理器，Resource patch 后强制 clean-narrative~~
 24. ~~inkos 2.0 任务五点四点九——defer_exchange 下扩展现金流语义检测，删除间接现金兑现表达~~
 25. ~~inkos 2.0 任务五点五——Resource Plan 前置注入 chapter_intent / writer，避免先写错再后修~~
-26. inkos 2.0 任务五点七：Resource Plan 通用化与章节阶段识别
+26. ~~inkos 2.0 任务五点七：Resource Plan 通用化与章节阶段识别~~
 27. 任务五点七 B： No-Change Resource Closure 无资源变化章节的资源闭合机制
 
