@@ -19,6 +19,11 @@ import {
   type IntentAlignmentReport,
 } from "../agents/intent-alignment-reviewer.js";
 import {
+  StoryEffectivenessAgent,
+  writeStoryEffectivenessReportFiles,
+  type StoryEffectivenessReport,
+} from "../agents/story-effectiveness.js";
+import {
   cleanNonNarrativeArtifacts,
   detectNonNarrativeArtifacts,
   type CleanNarrativeResult,
@@ -2101,6 +2106,22 @@ export class PipelineRunner {
       };
     }
 
+    this.logStage(stageLanguage, { zh: "故事有效性审核", en: "reviewing story effectiveness" });
+    const storyEffectivenessReport = await this.runStoryEffectivenessReview({
+      bookId,
+      bookDir,
+      chapterNumber,
+      finalTitle: frozenFinalTitle.title,
+      finalContent,
+      storyDir,
+      language: pipelineLang,
+      resourceBlocking: resourceConsistency.blocking,
+      chapterIndexStatus: chapterStatus ?? undefined,
+    });
+    this.config.logger?.info(
+      `Story effectiveness: ${storyEffectivenessReport.score ?? "N/A"}/100 ${storyEffectivenessReport.status}`,
+    );
+
     const resourceIndexGuard = detectResourceIndexReadinessBlocker({
       auditIssues: auditResult.issues,
       updatedState: persistenceOutput.updatedState,
@@ -3171,6 +3192,75 @@ ${matrix}`,
     }
 
     await writeIntentAlignmentReportFiles({ report, jsonPath, markdownPath });
+    return report;
+  }
+
+  private async runStoryEffectivenessReview(params: {
+    readonly bookId: string;
+    readonly bookDir: string;
+    readonly storyDir: string;
+    readonly chapterNumber: number;
+    readonly finalTitle: string;
+    readonly finalContent: string;
+    readonly language: LengthLanguage;
+    readonly resourceBlocking?: boolean;
+    readonly chapterIndexStatus?: string;
+  }): Promise<StoryEffectivenessReport> {
+    const padded = String(params.chapterNumber).padStart(4, "0");
+    const reportDir = join(params.bookDir, "reviews", "story-effectiveness");
+    const jsonPath = join(reportDir, `${padded}.report.json`);
+    const markdownPath = join(reportDir, `${padded}.report.md`);
+    const chapterIntentPath = join(params.storyDir, "runtime", "chapter-intents", `${padded}.md`);
+    const input = {
+      chapter: params.chapterNumber,
+      chapterContent: params.finalContent,
+      chapterIntent: await readFile(chapterIntentPath, "utf-8").catch(() => ""),
+      resourceBlocking: params.resourceBlocking,
+      chapterIndexStatus: params.chapterIndexStatus,
+    };
+
+    let report: StoryEffectivenessReport;
+    try {
+      const reviewer = new StoryEffectivenessAgent(this.agentCtxFor("story-effectiveness", params.bookId));
+      report = await reviewer.review(input);
+    } catch (error) {
+      report = {
+        chapter: params.chapterNumber,
+        status: "SKIPPED",
+        score: null,
+        dimensions: {
+          emotion_event: 85,
+          desire_goal: 85,
+          obstacle_pressure: 85,
+          solution_method: 85,
+          climax_payoff: 85,
+          ending_pull: 85,
+        },
+        dimensionConclusions: {
+          emotion_event: "reviewer 调用失败，未执行审核。",
+          desire_goal: "reviewer 调用失败，未执行审核。",
+          obstacle_pressure: "reviewer 调用失败，未执行审核。",
+          solution_method: "reviewer 调用失败，未执行审核。",
+          climax_payoff: "reviewer 调用失败，未执行审核。",
+          ending_pull: "reviewer 调用失败，未执行审核。",
+        },
+        strengths: [],
+        issues: [{
+          severity: "warning",
+          dimension: "local_scan",
+          message: `story-effectiveness reviewer 调用失败：${error instanceof Error ? error.message : String(error)}`,
+          suggestion: "稍后重新运行审核或人工检查本章故事结构。",
+        }],
+        suggestions: ["稍后重新执行 story-effectiveness review。"],
+        skippedReason: `reviewer error: ${error instanceof Error ? error.message : String(error)}`,
+      };
+      this.logWarn(params.language, {
+        zh: `story-effectiveness reviewer 调用失败，已生成 SKIPPED 报告：${error instanceof Error ? error.message : String(error)}`,
+        en: `story-effectiveness reviewer failed; wrote SKIPPED report: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+
+    await writeStoryEffectivenessReportFiles({ report, jsonPath, markdownPath });
     return report;
   }
 

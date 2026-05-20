@@ -84,6 +84,18 @@ export {
   type IntentAlignmentStatus,
 } from "./agents/intent-alignment-reviewer.js";
 export {
+  StoryEffectivenessAgent,
+  STORY_EFFECTIVENESS_DIMENSIONS,
+  writeStoryEffectivenessReportFiles,
+  buildSkippedEffectivenessReport,
+  renderStoryEffectivenessMarkdown,
+  type StoryEffectivenessDimension,
+  type StoryEffectivenessStatus,
+  type StoryEffectivenessIssue,
+  type StoryEffectivenessReport,
+  type StoryEffectivenessReviewInput,
+} from "./agents/story-effectiveness.js";
+export {
   ResourceBlockingRewriterAgent,
   ResourceConsistencyReviserAgent,
   buildAuthoritativeResourceContext,

@@ -21,6 +21,7 @@ import {
   type ContinuityReport,
   type FanqieFinalQualityStatus,
   type FanqieQualityReport,
+  type StoryEffectivenessReport,
 } from "@actalk/inkos-core";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
@@ -1053,6 +1054,11 @@ interface PublishReadyResult {
   readonly min_chapter_words: number;
   readonly report_json_path: string;
   readonly report_markdown_path: string;
+  readonly story_effectiveness?: {
+    readonly status: string;
+    readonly score: number | null;
+    readonly summary: string;
+  };
 }
 
 interface PublishReadyManualContinuityAcceptance {
@@ -1855,6 +1861,44 @@ function isExportablePublishStatus(status: PublishReadyStatus | string): boolean
   return status === "READY_TO_EXPORT" || status === "READY_WITH_WARNINGS";
 }
 
+export function applyStoryEffectivenessDecision(
+  publishStatus: string,
+  existingWarnings: ReadonlyArray<string> | undefined,
+  seSummary: { status: string; score: number | null; summary: string } | undefined,
+): { publishStatus: string; warnings: ReadonlyArray<string> | undefined } {
+  if (!seSummary || seSummary.status === "PASS" || seSummary.status === "SKIPPED") {
+    return { publishStatus, warnings: existingWarnings };
+  }
+
+  const hardBlocked = publishStatus === "BLOCKED_BY_RESOURCE"
+    || publishStatus === "BLOCKED_BY_CONTINUITY"
+    || publishStatus === "BLOCKED_BY_QUALITY"
+    || publishStatus === "NEED_REWRITE";
+
+  // Never override existing hard blocks
+  if (hardBlocked) {
+    return { publishStatus, warnings: existingWarnings };
+  }
+
+  const seWarning = `story-effectiveness: ${seSummary.summary} (score: ${seSummary.score ?? "n/a"})`;
+  const warnings = existingWarnings ? [...existingWarnings, seWarning] : [seWarning];
+
+  if (seSummary.status === "WARN") {
+    // Append warnings, don't change publish_status
+    return { publishStatus, warnings };
+  }
+
+  if (seSummary.status === "FAIL_STRUCTURAL") {
+    // Turn exportable into MANUAL_REVIEW; already-MANUAL_REVIEW stays
+    if (publishStatus === "READY_TO_EXPORT" || publishStatus === "READY_WITH_WARNINGS") {
+      return { publishStatus: "MANUAL_REVIEW", warnings };
+    }
+    return { publishStatus, warnings };
+  }
+
+  return { publishStatus, warnings: existingWarnings };
+}
+
 function qualityWarnings(decision: PublishQualityDecision, score: number, passThreshold: number): ReadonlyArray<string> | undefined {
   return decision === "QUALITY_WARN_POLISH_OPTIONAL"
     ? [`quality_score ${score} is below ideal ${passThreshold}; polish is optional before export.`]
@@ -1866,8 +1910,22 @@ async function writePublishReadyReport(bookDir: string, report: PublishReadyResu
   const prefix = chapterNumberPrefix(report.chapter_index);
   const jsonPath = join(reportDir, `${prefix}.publish-report.json`);
   const markdownPath = join(reportDir, `${prefix}.publish-report.md`);
+
+  // Merge story-effectiveness summary if not already provided
+  const seSummary = report.story_effectiveness ?? await readStoryEffectivenessSummary(bookDir, report.chapter_index);
+
+  // Apply story-effectiveness decision semantics:
+  // - PASS / SKIPPED: summary only, no change to publish result
+  // - WARN: append to warnings, don't block (never change publish_status)
+  // - FAIL_STRUCTURAL: if no hard block from Resource/Continuity/Quality, set MANUAL_REVIEW
+  // - Never override existing hard blocks (BLOCKED_BY_RESOURCE, BLOCKED_BY_CONTINUITY, BLOCKED_BY_QUALITY, NEED_REWRITE)
+  const decision = applyStoryEffectivenessDecision(report.publish_status, report.warnings, seSummary);
+
   const finalReport = {
     ...report,
+    story_effectiveness: seSummary,
+    publish_status: decision.publishStatus as PublishReadyResult["publish_status"],
+    warnings: decision.warnings,
     final_candidate_file: report.final_candidate_file
       ? `books/${report.book}/${report.final_candidate_file}`
       : "",
@@ -1905,7 +1963,9 @@ ${report.accepted_reason ? `- accepted_reason: ${report.accepted_reason}\n` : ""
 - reviewedFinalExists: ${report.reviewedFinalExists ? "true" : "false"}
 ` : ""}${report.continuityOverride ? `- continuityOverride: ${report.continuityOverride}
 - continuityOverrideReason: ${report.continuityOverrideReason ?? "n/a"}
-` : ""}${report.warnings?.length ? `- warnings:\n${report.warnings.map((warning) => `  - ${warning}`).join("\n")}\n` : ""}${report.source_file ? `- source_file: ${report.source_file}\n` : ""}- word_count: ${report.word_count ?? "n/a"}/${report.min_chapter_words}
+` : ""}${report.warnings?.length ? `- warnings:\n${report.warnings.map((warning) => `  - ${warning}`).join("\n")}\n` : ""}${report.source_file ? `- source_file: ${report.source_file}\n` : ""}- word_count: ${report.word_count ?? "n/a"}/${report.min_chapter_words}${report.story_effectiveness ? `
+- story_effectiveness: ${report.story_effectiveness.status} (${report.story_effectiveness.score ?? "n/a"})
+  ${report.story_effectiveness.summary}` : ""}
 
 ## Source Chain
 
@@ -3512,6 +3572,43 @@ async function readPublishReadyReportIfExists(
 ): Promise<Partial<PublishReadyResult> | null> {
   const file = join(bookDir, "reviews", "publish-ready", `${chapterNumberPrefix(chapter)}.publish-report.json`);
   return readJsonIfExists<Partial<PublishReadyResult>>(file);
+}
+
+async function readStoryEffectivenessReportIfExists(
+  bookDir: string,
+  chapter: number,
+): Promise<Partial<StoryEffectivenessReport> | null> {
+  const file = join(bookDir, "reviews", "story-effectiveness", `${chapterNumberPrefix(chapter)}.report.json`);
+  return readJsonIfExists<Partial<StoryEffectivenessReport>>(file);
+}
+
+async function readStoryEffectivenessSummary(
+  bookDir: string,
+  chapter: number,
+): Promise<{ status: string; score: number | null; summary: string } | undefined> {
+  const report = await readStoryEffectivenessReportIfExists(bookDir, chapter);
+  if (!report) return undefined;
+  const score = report.score ?? null;
+  const status = report.status ?? "UNKNOWN";
+  let summary: string;
+  if (status === "SKIPPED") {
+    summary = report.skippedReason ?? "未执行审核。";
+  } else if (status === "PASS") {
+    summary = report.strengths?.length
+      ? `六步心法审核通过，亮点：${report.strengths.slice(0, 3).join("；")}`
+      : "六步心法审核通过。";
+  } else if (status === "WARN") {
+    summary = report.issues?.length
+      ? `存在结构弱点：${report.issues.filter((i) => i.severity !== "info").slice(0, 2).map((i) => i.message).join("；")}`
+      : "存在结构弱点，建议人工关注。";
+  } else if (status === "FAIL_STRUCTURAL") {
+    summary = report.issues?.length
+      ? `结构缺陷：${report.issues.filter((i) => i.severity === "critical").slice(0, 2).map((i) => i.message).join("；")}`
+      : "存在严重结构缺陷，建议人工审查。";
+  } else {
+    summary = "";
+  }
+  return { status, score, summary };
 }
 
 async function readResourceConsistencyReportIfExists(

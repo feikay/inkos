@@ -13,6 +13,7 @@ import {
   resolveContinuityOverridePassCandidate,
   decidePublishQuality,
   readChapterIndexStatus,
+  applyStoryEffectivenessDecision,
 } from "../commands/review.js";
 
 function makeReport(overrides: Partial<ContinuityReport> = {}): ContinuityReport {
@@ -264,5 +265,125 @@ describe("readChapterIndexStatus", () => {
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+describe("applyStoryEffectivenessDecision", () => {
+  const sePass = { status: "PASS", score: 90, summary: "六步心法审核通过。" };
+  const seWarn = { status: "WARN", score: 75, summary: "存在结构弱点：开头情绪事件信号偏弱" };
+  const seFail = { status: "FAIL_STRUCTURAL", score: 50, summary: "结构缺陷：缺少冲突画面；缺少明确主角目标" };
+  const seSkipped = { status: "SKIPPED", score: null, summary: "资源账本校验失败，跳过故事有效性审核。" };
+
+  it("PASS: returns unchanged publish_status and warnings", () => {
+    const result = applyStoryEffectivenessDecision("READY_TO_EXPORT", undefined, sePass);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeUndefined();
+  });
+
+  it("PASS: preserves existing warnings unchanged", () => {
+    const result = applyStoryEffectivenessDecision("READY_WITH_WARNINGS", ["quality warning"], sePass);
+    expect(result.publishStatus).toBe("READY_WITH_WARNINGS");
+    expect(result.warnings).toEqual(["quality warning"]);
+  });
+
+  it("SKIPPED: returns unchanged publish_status and warnings", () => {
+    const result = applyStoryEffectivenessDecision("READY_TO_EXPORT", undefined, seSkipped);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeUndefined();
+  });
+
+  it("SKIPPED: does not change exportable result", () => {
+    const result = applyStoryEffectivenessDecision("READY_WITH_WARNINGS", ["existing"], seSkipped);
+    expect(result.publishStatus).toBe("READY_WITH_WARNINGS");
+    expect(result.warnings).toEqual(["existing"]);
+  });
+
+  it("WARN: appends story-effectiveness warning without changing publish_status", () => {
+    const result = applyStoryEffectivenessDecision("READY_TO_EXPORT", undefined, seWarn);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings!.length).toBe(1);
+    expect(result.warnings![0]).toContain("story-effectiveness");
+    expect(result.warnings![0]).toContain("75");
+  });
+
+  it("WARN: merges with existing warnings", () => {
+    const result = applyStoryEffectivenessDecision("READY_WITH_WARNINGS", ["quality score below ideal"], seWarn);
+    expect(result.publishStatus).toBe("READY_WITH_WARNINGS");
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings!.length).toBe(2);
+    expect(result.warnings![0]).toBe("quality score below ideal");
+    expect(result.warnings![1]).toContain("story-effectiveness");
+  });
+
+  it("WARN: appends warnings for MANUAL_REVIEW without changing status", () => {
+    const result = applyStoryEffectivenessDecision("MANUAL_REVIEW", undefined, seWarn);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings![0]).toContain("story-effectiveness");
+  });
+
+  it("FAIL_STRUCTURAL: turns READY_TO_EXPORT into MANUAL_REVIEW", () => {
+    const result = applyStoryEffectivenessDecision("READY_TO_EXPORT", undefined, seFail);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings![0]).toContain("story-effectiveness");
+    expect(result.warnings![0]).toContain("50");
+  });
+
+  it("FAIL_STRUCTURAL: turns READY_WITH_WARNINGS into MANUAL_REVIEW", () => {
+    const result = applyStoryEffectivenessDecision("READY_WITH_WARNINGS", ["quality warning"], seFail);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings!.length).toBe(2);
+  });
+
+  it("FAIL_STRUCTURAL: keeps MANUAL_REVIEW as MANUAL_REVIEW", () => {
+    const result = applyStoryEffectivenessDecision("MANUAL_REVIEW", ["continuity concern"], seFail);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings!.length).toBe(2);
+  });
+
+  it("does NOT override BLOCKED_BY_RESOURCE", () => {
+    for (const se of [seWarn, seFail]) {
+      const result = applyStoryEffectivenessDecision("BLOCKED_BY_RESOURCE", ["resource blocking=true"], se);
+      expect(result.publishStatus).toBe("BLOCKED_BY_RESOURCE");
+      expect(result.warnings).toEqual(["resource blocking=true"]);
+    }
+  });
+
+  it("does NOT override BLOCKED_BY_CONTINUITY", () => {
+    for (const se of [seWarn, seFail]) {
+      const result = applyStoryEffectivenessDecision("BLOCKED_BY_CONTINUITY", undefined, se);
+      expect(result.publishStatus).toBe("BLOCKED_BY_CONTINUITY");
+      expect(result.warnings).toBeUndefined();
+    }
+  });
+
+  it("does NOT override BLOCKED_BY_QUALITY", () => {
+    for (const se of [seWarn, seFail]) {
+      const result = applyStoryEffectivenessDecision("BLOCKED_BY_QUALITY", ["quality < threshold"], se);
+      expect(result.publishStatus).toBe("BLOCKED_BY_QUALITY");
+      expect(result.warnings).toEqual(["quality < threshold"]);
+    }
+  });
+
+  it("does NOT override NEED_REWRITE", () => {
+    for (const se of [seWarn, seFail]) {
+      const result = applyStoryEffectivenessDecision("NEED_REWRITE", undefined, se);
+      expect(result.publishStatus).toBe("NEED_REWRITE");
+    }
+  });
+
+  it("returns unchanged when seSummary is undefined", () => {
+    const result = applyStoryEffectivenessDecision("READY_TO_EXPORT", undefined, undefined);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeUndefined();
+  });
+
+  it("returns unchanged for unknown seSummary status", () => {
+    const result = applyStoryEffectivenessDecision("READY_TO_EXPORT", undefined, { status: "UNKNOWN", score: null, summary: "" });
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeUndefined();
   });
 });
