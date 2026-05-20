@@ -96,6 +96,19 @@ export {
   type StoryEffectivenessReviewInput,
 } from "./agents/story-effectiveness.js";
 export {
+  Golden3ChapterAgent,
+  GOLDEN_3_CHAPTER_DIMENSIONS,
+  writeGolden3ChapterReportFiles,
+  buildSkippedGolden3ChapterReport,
+  renderGolden3ChapterMarkdown,
+  readGolden3ChapterSummary,
+  type Golden3ChapterDimension,
+  type Golden3ChapterStatus,
+  type Golden3ChapterIssue,
+  type Golden3ChapterReport,
+  type Golden3ChapterReviewInput,
+} from "./agents/golden-3-chapter.js";
+export {
   ResourceBlockingRewriterAgent,
   ResourceConsistencyReviserAgent,
   buildAuthoritativeResourceContext,

@@ -14,6 +14,7 @@ import {
   decidePublishQuality,
   readChapterIndexStatus,
   applyStoryEffectivenessDecision,
+  applyGolden3ChapterDecision,
 } from "../commands/review.js";
 
 function makeReport(overrides: Partial<ContinuityReport> = {}): ContinuityReport {
@@ -383,6 +384,103 @@ describe("applyStoryEffectivenessDecision", () => {
 
   it("returns unchanged for unknown seSummary status", () => {
     const result = applyStoryEffectivenessDecision("READY_TO_EXPORT", undefined, { status: "UNKNOWN", score: null, summary: "" });
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeUndefined();
+  });
+});
+
+describe("applyGolden3ChapterDecision", () => {
+  const gcPass = { status: "PASS", score: 90, summary: "前三章开篇审核通过。" };
+  const gcWarn = { status: "WARN", score: 72, summary: "前三章开篇审核警告：第1章开头钩子信号偏弱。" };
+  const gcFail = { status: "FAIL_STRUCTURAL", score: 50, summary: "前三章开篇审核未通过：第1章开头未检测到明确钩子类型信号。" };
+  const gcSkipped = { status: "SKIPPED", score: null, summary: "跳过：前三章未齐全（缺失：第2章、第3章），无法执行完整开篇审核。" };
+
+  it("PASS: returns unchanged publish_status and warnings", () => {
+    const result = applyGolden3ChapterDecision("READY_TO_EXPORT", undefined, gcPass);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeUndefined();
+  });
+
+  it("SKIPPED: returns unchanged publish_status and warnings", () => {
+    const result = applyGolden3ChapterDecision("READY_TO_EXPORT", ["story warning"], gcSkipped);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toEqual(["story warning"]);
+  });
+
+  it("SKIPPED: does not alter READY_WITH_WARNINGS", () => {
+    const result = applyGolden3ChapterDecision("READY_WITH_WARNINGS", ["quality warning"], gcSkipped);
+    expect(result.publishStatus).toBe("READY_WITH_WARNINGS");
+    expect(result.warnings).toEqual(["quality warning"]);
+  });
+
+  it("WARN: appends warning without changing publish_status", () => {
+    const result = applyGolden3ChapterDecision("READY_TO_EXPORT", undefined, gcWarn);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings![0]).toContain("golden-3-chapter");
+    expect(result.warnings![0]).toContain("72");
+  });
+
+  it("WARN: appends to existing warnings", () => {
+    const result = applyGolden3ChapterDecision("READY_WITH_WARNINGS", ["quality warning"], gcWarn);
+    expect(result.publishStatus).toBe("READY_WITH_WARNINGS");
+    expect(result.warnings).toHaveLength(2);
+    expect(result.warnings![1]).toContain("golden-3-chapter");
+  });
+
+  it("FAIL_STRUCTURAL: turns READY_TO_EXPORT into MANUAL_REVIEW", () => {
+    const result = applyGolden3ChapterDecision("READY_TO_EXPORT", undefined, gcFail);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings![0]).toContain("golden-3-chapter");
+    expect(result.warnings![0]).toContain("50");
+  });
+
+  it("FAIL_STRUCTURAL: turns READY_WITH_WARNINGS into MANUAL_REVIEW", () => {
+    const result = applyGolden3ChapterDecision("READY_WITH_WARNINGS", ["quality warning"], gcFail);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings).toHaveLength(2);
+  });
+
+  it("FAIL_STRUCTURAL: keeps MANUAL_REVIEW as MANUAL_REVIEW", () => {
+    const result = applyGolden3ChapterDecision("MANUAL_REVIEW", ["continuity concern"], gcFail);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings!.length).toBe(2);
+  });
+
+  it("does NOT override BLOCKED_BY_RESOURCE", () => {
+    for (const gc of [gcWarn, gcFail]) {
+      const result = applyGolden3ChapterDecision("BLOCKED_BY_RESOURCE", ["resource blocking=true"], gc);
+      expect(result.publishStatus).toBe("BLOCKED_BY_RESOURCE");
+      expect(result.warnings).toEqual(["resource blocking=true"]);
+    }
+  });
+
+  it("does NOT override BLOCKED_BY_CONTINUITY", () => {
+    for (const gc of [gcWarn, gcFail]) {
+      const result = applyGolden3ChapterDecision("BLOCKED_BY_CONTINUITY", undefined, gc);
+      expect(result.publishStatus).toBe("BLOCKED_BY_CONTINUITY");
+      expect(result.warnings).toBeUndefined();
+    }
+  });
+
+  it("does NOT override BLOCKED_BY_QUALITY", () => {
+    for (const gc of [gcWarn, gcFail]) {
+      const result = applyGolden3ChapterDecision("BLOCKED_BY_QUALITY", ["quality < threshold"], gc);
+      expect(result.publishStatus).toBe("BLOCKED_BY_QUALITY");
+      expect(result.warnings).toEqual(["quality < threshold"]);
+    }
+  });
+
+  it("does NOT override NEED_REWRITE", () => {
+    for (const gc of [gcWarn, gcFail]) {
+      const result = applyGolden3ChapterDecision("NEED_REWRITE", undefined, gc);
+      expect(result.publishStatus).toBe("NEED_REWRITE");
+    }
+  });
+
+  it("returns unchanged when gcSummary is undefined", () => {
+    const result = applyGolden3ChapterDecision("READY_TO_EXPORT", undefined, undefined);
     expect(result.publishStatus).toBe("READY_TO_EXPORT");
     expect(result.warnings).toBeUndefined();
   });

@@ -24,6 +24,11 @@ import {
   type StoryEffectivenessReport,
 } from "../agents/story-effectiveness.js";
 import {
+  Golden3ChapterAgent,
+  writeGolden3ChapterReportFiles,
+  type Golden3ChapterReport,
+} from "../agents/golden-3-chapter.js";
+import {
   cleanNonNarrativeArtifacts,
   detectNonNarrativeArtifacts,
   type CleanNarrativeResult,
@@ -2122,6 +2127,22 @@ export class PipelineRunner {
       `Story effectiveness: ${storyEffectivenessReport.score ?? "N/A"}/100 ${storyEffectivenessReport.status}`,
     );
 
+    // Golden 3-chapter review: only for ch1-3 with incremental update
+    if (chapterNumber >= 1 && chapterNumber <= 3) {
+      this.logStage(stageLanguage, { zh: "前三章开篇审核", en: "reviewing golden 3-chapter opening" });
+      const golden3Report = await this.runGolden3ChapterReview({
+        bookId,
+        bookDir,
+        chapterNumber,
+        language: pipelineLang,
+        resourceBlocking: resourceConsistency.blocking,
+        chapterIndexStatus: chapterStatus ?? undefined,
+      });
+      this.config.logger?.info(
+        `Golden 3-chapter: ${golden3Report.score ?? "N/A"}/100 ${golden3Report.status}`,
+      );
+    }
+
     const resourceIndexGuard = detectResourceIndexReadinessBlocker({
       auditIssues: auditResult.issues,
       updatedState: persistenceOutput.updatedState,
@@ -3261,6 +3282,102 @@ ${matrix}`,
     }
 
     await writeStoryEffectivenessReportFiles({ report, jsonPath, markdownPath });
+    return report;
+  }
+
+  private async runGolden3ChapterReview(params: {
+    readonly bookId: string;
+    readonly bookDir: string;
+    readonly chapterNumber: number;
+    readonly language: LengthLanguage;
+    readonly resourceBlocking?: boolean;
+    readonly chapterIndexStatus?: string;
+  }): Promise<Golden3ChapterReport> {
+    const reportDir = join(params.bookDir, "reviews", "golden-3-chapter");
+    const jsonPath = join(reportDir, "golden-3-chapter.report.json");
+    const markdownPath = join(reportDir, "golden-3-chapter.report.md");
+    const chaptersDir = join(params.bookDir, "chapters");
+
+    // Read chapter files from disk
+    const readChapterContent = async (chNum: number): Promise<string> => {
+      try {
+        const files = await readdir(chaptersDir);
+        const padded = String(chNum).padStart(4, "0");
+        const file = files.find((f) => f.startsWith(padded) && f.endsWith(".md"));
+        if (!file) return "";
+        const raw = await readFile(join(chaptersDir, file), "utf-8");
+        // Strip heading line
+        const headingEnd = raw.indexOf("\n\n");
+        return headingEnd >= 0 ? raw.slice(headingEnd + 2).trim() : raw.trim();
+      } catch {
+        return "";
+      }
+    };
+
+    const ch1Content = await readChapterContent(1);
+    const ch2Content = await readChapterContent(2);
+    const ch3Content = await readChapterContent(3);
+
+    // Read first_10_chapter_plan from story dir
+    let first10Plan: string | undefined;
+    try {
+      const storyDir = join(params.bookDir, "story");
+      const planPath = join(storyDir, "first_10_chapter_plan.md");
+      first10Plan = await readFile(planPath, "utf-8");
+    } catch {
+      // Plan may not exist — continue without it
+    }
+
+    const input = {
+      chapter1Content: ch1Content,
+      chapter2Content: ch2Content,
+      chapter3Content: ch3Content,
+      first10ChapterPlan: first10Plan,
+      resourceBlocking: params.resourceBlocking,
+      chapterIndexStatus: params.chapterIndexStatus,
+    };
+
+    let report: Golden3ChapterReport;
+    try {
+      const reviewer = new Golden3ChapterAgent(this.agentCtxFor("golden-3-chapter", params.bookId));
+      report = await reviewer.review(input);
+    } catch (error) {
+      report = {
+        chapterRange: [1, 3],
+        status: "SKIPPED",
+        score: null,
+        dimensions: {
+          opening_hook_delivery: 85,
+          core_differentiator_visible: 85,
+          long_term_goal_established: 85,
+          three_chapter_arc: 85,
+          setup_ratio_safe: 85,
+        },
+        dimensionConclusions: {
+          opening_hook_delivery: "reviewer 调用失败，未执行审核。",
+          core_differentiator_visible: "reviewer 调用失败，未执行审核。",
+          long_term_goal_established: "reviewer 调用失败，未执行审核。",
+          three_chapter_arc: "reviewer 调用失败，未执行审核。",
+          setup_ratio_safe: "reviewer 调用失败，未执行审核。",
+        },
+        strengths: [],
+        issues: [{
+          severity: "warning",
+          dimension: "local_scan",
+          message: `golden-3-chapter reviewer 调用失败：${error instanceof Error ? error.message : String(error)}`,
+          suggestion: "稍后重新运行 golden_3_chapter review。",
+        }],
+        suggestions: ["稍后重新执行 golden_3_chapter review。"],
+        summary: `跳过：reviewer error: ${error instanceof Error ? error.message : String(error)}`,
+        skippedReason: `reviewer error: ${error instanceof Error ? error.message : String(error)}`,
+      };
+      this.logWarn(params.language, {
+        zh: `golden-3-chapter reviewer 调用失败，已生成 SKIPPED 报告：${error instanceof Error ? error.message : String(error)}`,
+        en: `golden-3-chapter reviewer failed; wrote SKIPPED report: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+
+    await writeGolden3ChapterReportFiles({ report, jsonPath, markdownPath });
     return report;
   }
 

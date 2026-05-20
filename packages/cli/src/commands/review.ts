@@ -22,6 +22,7 @@ import {
   type FanqieFinalQualityStatus,
   type FanqieQualityReport,
   type StoryEffectivenessReport,
+  type Golden3ChapterReport,
 } from "@actalk/inkos-core";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
@@ -1059,6 +1060,11 @@ interface PublishReadyResult {
     readonly score: number | null;
     readonly summary: string;
   };
+  readonly golden_3_chapter?: {
+    readonly status: string;
+    readonly score: number | null;
+    readonly summary: string;
+  };
 }
 
 interface PublishReadyManualContinuityAcceptance {
@@ -1899,6 +1905,44 @@ export function applyStoryEffectivenessDecision(
   return { publishStatus, warnings: existingWarnings };
 }
 
+export function applyGolden3ChapterDecision(
+  publishStatus: string,
+  existingWarnings: ReadonlyArray<string> | undefined,
+  gcSummary: { status: string; score: number | null; summary: string } | undefined,
+): { publishStatus: string; warnings: ReadonlyArray<string> | undefined } {
+  if (!gcSummary || gcSummary.status === "PASS" || gcSummary.status === "SKIPPED") {
+    return { publishStatus, warnings: existingWarnings };
+  }
+
+  const hardBlocked = publishStatus === "BLOCKED_BY_RESOURCE"
+    || publishStatus === "BLOCKED_BY_CONTINUITY"
+    || publishStatus === "BLOCKED_BY_QUALITY"
+    || publishStatus === "NEED_REWRITE";
+
+  // Never override existing hard blocks
+  if (hardBlocked) {
+    return { publishStatus, warnings: existingWarnings };
+  }
+
+  const gcWarning = `golden-3-chapter: ${gcSummary.summary} (score: ${gcSummary.score ?? "n/a"})`;
+  const warnings = existingWarnings ? [...existingWarnings, gcWarning] : [gcWarning];
+
+  if (gcSummary.status === "WARN") {
+    // Append warnings, don't change publish_status
+    return { publishStatus, warnings };
+  }
+
+  if (gcSummary.status === "FAIL_STRUCTURAL") {
+    // Turn exportable into MANUAL_REVIEW; already-MANUAL_REVIEW stays
+    if (publishStatus === "READY_TO_EXPORT" || publishStatus === "READY_WITH_WARNINGS") {
+      return { publishStatus: "MANUAL_REVIEW", warnings };
+    }
+    return { publishStatus, warnings };
+  }
+
+  return { publishStatus, warnings: existingWarnings };
+}
+
 function qualityWarnings(decision: PublishQualityDecision, score: number, passThreshold: number): ReadonlyArray<string> | undefined {
   return decision === "QUALITY_WARN_POLISH_OPTIONAL"
     ? [`quality_score ${score} is below ideal ${passThreshold}; polish is optional before export.`]
@@ -1914,18 +1958,24 @@ async function writePublishReadyReport(bookDir: string, report: PublishReadyResu
   // Merge story-effectiveness summary if not already provided
   const seSummary = report.story_effectiveness ?? await readStoryEffectivenessSummary(bookDir, report.chapter_index);
 
-  // Apply story-effectiveness decision semantics:
-  // - PASS / SKIPPED: summary only, no change to publish result
-  // - WARN: append to warnings, don't block (never change publish_status)
-  // - FAIL_STRUCTURAL: if no hard block from Resource/Continuity/Quality, set MANUAL_REVIEW
-  // - Never override existing hard blocks (BLOCKED_BY_RESOURCE, BLOCKED_BY_CONTINUITY, BLOCKED_BY_QUALITY, NEED_REWRITE)
-  const decision = applyStoryEffectivenessDecision(report.publish_status, report.warnings, seSummary);
+  // Apply story-effectiveness decision semantics (see applyStoryEffectivenessDecision for details)
+  const seDecision = applyStoryEffectivenessDecision(report.publish_status, report.warnings, seSummary);
+
+  // Merge golden-3-chapter summary (only for ch1-3)
+  const gcSummary = report.chapter_index >= 1 && report.chapter_index <= 3
+    ? (report.golden_3_chapter ?? await readGolden3ChapterSummary(bookDir))
+    : undefined;
+
+  // Apply golden-3-chapter decision semantics (same pattern: WARN→warning, FAIL_STRUCTURAL→MANUAL_REVIEW, no hard block override)
+  // Important: use the result of story-effectiveness decision as input, so both can contribute
+  const gcDecision = applyGolden3ChapterDecision(seDecision.publishStatus, seDecision.warnings, gcSummary);
 
   const finalReport = {
     ...report,
     story_effectiveness: seSummary,
-    publish_status: decision.publishStatus as PublishReadyResult["publish_status"],
-    warnings: decision.warnings,
+    golden_3_chapter: gcSummary,
+    publish_status: gcDecision.publishStatus as PublishReadyResult["publish_status"],
+    warnings: gcDecision.warnings,
     final_candidate_file: report.final_candidate_file
       ? `books/${report.book}/${report.final_candidate_file}`
       : "",
@@ -1965,7 +2015,9 @@ ${report.accepted_reason ? `- accepted_reason: ${report.accepted_reason}\n` : ""
 - continuityOverrideReason: ${report.continuityOverrideReason ?? "n/a"}
 ` : ""}${report.warnings?.length ? `- warnings:\n${report.warnings.map((warning) => `  - ${warning}`).join("\n")}\n` : ""}${report.source_file ? `- source_file: ${report.source_file}\n` : ""}- word_count: ${report.word_count ?? "n/a"}/${report.min_chapter_words}${report.story_effectiveness ? `
 - story_effectiveness: ${report.story_effectiveness.status} (${report.story_effectiveness.score ?? "n/a"})
-  ${report.story_effectiveness.summary}` : ""}
+  ${report.story_effectiveness.summary}` : ""}${report.golden_3_chapter ? `
+- golden_3_chapter: ${report.golden_3_chapter.status} (${report.golden_3_chapter.score ?? "n/a"})
+  ${report.golden_3_chapter.summary}` : ""}
 
 ## Source Chain
 
@@ -3608,6 +3660,24 @@ async function readStoryEffectivenessSummary(
   } else {
     summary = "";
   }
+  return { status, score, summary };
+}
+
+async function readGolden3ChapterReportIfExists(
+  bookDir: string,
+): Promise<Partial<Golden3ChapterReport> | null> {
+  const file = join(bookDir, "reviews", "golden-3-chapter", "golden-3-chapter.report.json");
+  return readJsonIfExists<Partial<Golden3ChapterReport>>(file);
+}
+
+async function readGolden3ChapterSummary(
+  bookDir: string,
+): Promise<{ status: string; score: number | null; summary: string } | undefined> {
+  const report = await readGolden3ChapterReportIfExists(bookDir);
+  if (!report) return undefined;
+  const score = report.score ?? null;
+  const status = report.status ?? "UNKNOWN";
+  const summary = report.summary ?? "";
   return { status, score, summary };
 }
 
