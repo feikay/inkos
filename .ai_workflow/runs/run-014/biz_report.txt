@@ -1,0 +1,45 @@
+BIZ REPORT — Run-014 (5.8B-FIX-TEST)
+=====================================
+
+Timestamp: 2026-05-20 | Status: IMPLEMENTATION_COMPLETE
+
+1. SCOPE
+=========
+
+纯测试补齐轮。不改业务逻辑。本轮未运行真实业务验证。
+
+2. WHAT WAS TESTED
+===================
+
+2.1 blocked-resource-plan 单元测试 (NEW)
+  - readChapterIndexStatus 正确读取 chapters/index.json 中 blocked-resource-plan 状态
+  - 该状态在 publish-ready 中触发 BLOCKED_BY_RESOURCE（run-013 已实现的资源门禁逻辑）
+
+2.2 state-degraded 单元测试 (NEW)
+  - readChapterIndexStatus 正确读取 chapters/index.json 中 state-degraded 状态
+  - run-013 真实验证已有覆盖（情绪值系统 ch1），本轮补齐单元测试
+
+2.3 system_bootstrap schema-driven 回归确认 (PASS)
+  - 民望值/联邦币 schema: balance_claim 覆盖所有声明资源
+  - 灵石/金币 schema: balance_claim 覆盖灵石/金币，无民望值/联邦币泄漏
+
+3. CONSTRAINT COMPLIANCE
+=========================
+
+| 约束 | 状态 |
+|------|------|
+| 不改业务逻辑 | PASS (仅添加 export 关键字) |
+| 不修改 .ai_workflow/01_design.md | PASS |
+| 不修改业务验证输出 | PASS |
+| 不自动 commit | PASS |
+| 不硬编码书名/资源名/章节号 | PASS |
+
+4. 5.8B CLOSURE
+================
+
+| 项目 | 闭合状态 |
+|------|----------|
+| Blocker 1: system_bootstrap 硬编码 | CLOSED (run-013 fix + 测试确认) |
+| Blocker 2: publish-ready chapter index | CLOSED (run-013 fix + 测试确认) |
+| Gap: blocked-resource-plan 测试 | CLOSED (run-014 补齐) |
+| Gap: state-degraded 单元测试 | CLOSED (run-014 补齐) |

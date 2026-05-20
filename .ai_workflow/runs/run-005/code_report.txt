@@ -1,0 +1,68 @@
+================================================================================
+CODE REPORT — run-005 (5.7B-4)
+================================================================================
+
+## 执行摘要
+
+完整数据流盘点确认：现有代码已保证 no-change 不触发 BLOCKED/WARN。本轮仅在 resource-consistency.test.ts 新增 2 个防御性测试。
+
+## 数据流盘点
+
+### 1. classifyClosureStatus（resource-consistency.ts:771-792）
+
+第一优先级检查：
+  if (blocking || status === "FAILED" || status === "WARN" || hasResourcePlanViolations)
+    → return "resource_failed"
+
+"no_change_closed" 仅在以下条件全部满足时返回：
+  !blocking && status !== "FAILED" && status !== "WARN"
+  && !hasResourcePlanViolations && hasResourcePlan && !hasEvents && !hasIssues
+
+### 2. runResourceConsistencyPass — zero-events 路径（runner.ts:3203-3237）
+
+no-change 章节：
+  - validation.events.length === 0 → 进入 zero-events 分支
+  - classifyResourceConsistency: blocking=false, status="PASS"
+  - resourcePlanViolations = [] → hasResourcePlanViolations = false
+  - finalBlocking = false, finalStatus = "PASS"
+  - classifyClosureStatus → "no_change_closed"
+  - auditIssues = []
+
+### 3. detectResourceIndexReadinessBlocker（runner.ts:4816-4836）
+
+三项检查：
+  a) resourceBlocking === true → no-change 为 false → 不触发
+  b) auditIssues 匹配 resource 问题正则 → no-change auditIssues=[] → 不触发
+  c) updatedState 含资源冲突模式 → 不触发
+
+返回 undefined。
+
+### 4. writeNextChapter — chapterStatus 决策（runner.ts:2102-2138）
+
+  if (resourceConsistency.blocking || resourceIndexGuard)
+    → chapterStatus = "blocked-resource-plan" | "state-degraded"
+
+no-change 章节：
+  - blocking = false
+  - resourceIndexGuard = undefined
+  - → 不进入阻断分支
+  - → chapterStatus = auditResult.passed ? "ready-for-review" : "audit-failed"
+
+## 修改清单
+
+文件：packages/core/src/__tests__/resource-consistency.test.ts（+39 行）
+
+新增测试：
+1. "should never return no_change_closed when blocking, FAILED, WARN, or plan violations exist"
+   - 参数化覆盖 4 种阻断输入，assert 返回 "resource_failed" 而非 "no_change_closed"
+
+2. "no_change_closed implies non-blocking PASS status by construction"
+   - 确认 no_change_closed 仅在 blocking=false, PASS, 无 violations 时返回
+
+## 测试结果
+
+pnpm --filter @actalk/inkos-core test -- resource-consistency pipeline-runner
+→ 85 files, 1074 tests — ALL PASSED
+
+pnpm typecheck
+→ 3 packages — ALL PASSED

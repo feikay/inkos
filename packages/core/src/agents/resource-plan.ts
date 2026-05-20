@@ -7,7 +7,7 @@ import {
   type ResourceValidationResult,
 } from "./resource-consistency.js";
 
-export type ChapterResourcePlanMode = "normal" | "defer_exchange" | "explore_conversion_path" | "cash_exchange_allowed" | "no_resource_change";
+export type ChapterResourcePlanMode = "normal" | "defer_exchange" | "explore_conversion_path" | "cash_exchange_allowed" | "no_resource_change" | "system_bootstrap" | "resource_rule_reveal";
 export type ResourcePlanClosureRequirement = "explicit_balance_required" | "inferred_no_change_allowed" | "explicit_event_chain_required";
 
 export interface PlannedResourceEvent {
@@ -170,6 +170,25 @@ export function buildChapterResourcePlan(params: {
     inferenceText,
   });
   if (exploreConversionPlan) return exploreConversionPlan;
+
+  // ---- new: system bootstrap / resource rule reveal detection (universal) ----
+  const systemBootstrapPlan = buildSystemBootstrapPlanIfMatched({
+    ...params,
+    resourceRules,
+    openingBalances,
+    inferenceText,
+    hasAnyResources: Object.keys(resourceRules.resources).length > 0,
+  });
+  if (systemBootstrapPlan) return systemBootstrapPlan;
+
+  const resourceRuleRevealPlan = buildResourceRuleRevealPlanIfMatched({
+    ...params,
+    resourceRules,
+    openingBalances,
+    inferenceText,
+    hasAnyResources: Object.keys(resourceRules.resources).length > 0,
+  });
+  if (resourceRuleRevealPlan) return resourceRuleRevealPlan;
 
   // ---- Step 1-2: if no resources or no ledger activity, bail out early ----
   const hasAnyResources = Object.keys(resourceRules.resources).length > 0;
@@ -409,6 +428,150 @@ const DEFER_EXCHANGE_KEYWORDS: ReadonlyArray<string> = [
 ];
 
 
+
+// ---- system_bootstrap / resource_rule_reveal universal detection ----
+
+function detectSystemBootstrapStage(params: {
+  readonly chapter: number;
+  readonly bookRules: string;
+  readonly particleLedger: string;
+  readonly currentState: string;
+  readonly inferenceText: string;
+  readonly resourceRules: ResourceRules;
+}): boolean {
+  const allText = [
+    params.bookRules,
+    params.particleLedger,
+    params.currentState,
+    params.inferenceText,
+  ].filter(Boolean).join("\n");
+  const hasSystemIntro = /系统.{0,16}(?:激活|绑定|觉醒|赋予|开启|初始化|唤醒)/u.test(allText);
+  const hasFirstResourceReveal = /(?:获得|激活|解锁|开启).{0,8}(?:系统|面板|能力|技能).{0,16}(?:首次|第一次|初始)/u.test(allText);
+  const isEarlyChapter = params.chapter <= 3;
+  const hasResources = Object.keys(params.resourceRules.resources).length > 0;
+  return (hasSystemIntro || hasFirstResourceReveal) && isEarlyChapter && hasResources;
+}
+
+function detectResourceRuleRevealStage(params: {
+  readonly chapter: number;
+  readonly inferenceText: string;
+  readonly resourceRules: ResourceRules;
+}): boolean {
+  const allText = params.inferenceText;
+  const hasRuleReveal = /(?:揭示|说明|解释|规则|运作方式|兑换比例|兑换规则|资源规则|如何使用|怎么用).{0,16}(?:资源|系统|面板|能力|技能|兑换)/u.test(allText)
+    || /(?:资源|系统|面板|能力|技能|兑换).{0,16}(?:揭示|说明|解释|规则|运作方式|兑换比例|兑换规则)/u.test(allText);
+  const notBootstrap = !/系统.{0,16}(?:激活|绑定|觉醒|赋予|开启|初始化|唤醒)/u.test(allText);
+  const hasResources = Object.keys(params.resourceRules.resources).length > 0;
+  return hasRuleReveal && notBootstrap && hasResources;
+}
+
+function buildSystemBootstrapPlanIfMatched(params: {
+  readonly chapter: number;
+  readonly bookRules: string;
+  readonly particleLedger: string;
+  readonly currentState: string;
+  readonly previousChapterSummary?: string;
+  readonly chapterGoal?: string;
+  readonly chapterHooks?: string;
+  readonly resourceRules: ResourceRules;
+  readonly openingBalances: Readonly<Record<string, number>>;
+  readonly inferenceText: string;
+  readonly hasAnyResources: boolean;
+}): ChapterResourcePlan | null {
+  if (!params.hasAnyResources) return null;
+  if (!detectSystemBootstrapStage({
+    chapter: params.chapter,
+    bookRules: params.bookRules,
+    particleLedger: params.particleLedger,
+    currentState: params.currentState,
+    inferenceText: params.inferenceText,
+    resourceRules: params.resourceRules,
+  })) return null;
+
+  return {
+    chapter: params.chapter,
+    mode: "system_bootstrap",
+    source: "resource-engine",
+    openingBalances: params.openingBalances,
+    allowedEvents: Object.keys(params.resourceRules.resources).map((resource, index) => ({
+      order: index + 1,
+      kind: "balance_claim" as const,
+      resource,
+      reason: "系统首次激活：声明初始资源余额",
+      requiredInText: true,
+    })),
+    forbiddenEvents: [
+      "exchange",
+      "cash_out",
+      "balance_transfer",
+      "earn_resource_before_closure",
+    ],
+    expectedClosingBalances: params.openingBalances,
+    unlockedSkills: [],
+    resourceRules: params.resourceRules,
+    closureRequirement: "explicit_balance_required",
+    narrativeGuidance: [
+      "本章处于系统/能力首次激活阶段。",
+      "允许：系统绑定、规则揭示、初始任务发布、首次余额声明。",
+      "禁止：未计划的收益到账、资源兑换、余额转移。",
+      "如正文需要资源变化，必须与 Resource Plan 已允许事件一致。",
+    ],
+  };
+}
+
+function buildResourceRuleRevealPlanIfMatched(params: {
+  readonly chapter: number;
+  readonly bookRules: string;
+  readonly particleLedger: string;
+  readonly currentState: string;
+  readonly previousChapterSummary?: string;
+  readonly chapterGoal?: string;
+  readonly chapterHooks?: string;
+  readonly resourceRules: ResourceRules;
+  readonly openingBalances: Readonly<Record<string, number>>;
+  readonly inferenceText: string;
+  readonly hasAnyResources: boolean;
+}): ChapterResourcePlan | null {
+  if (!params.hasAnyResources) return null;
+  if (!detectResourceRuleRevealStage({
+    chapter: params.chapter,
+    inferenceText: params.inferenceText,
+    resourceRules: params.resourceRules,
+  })) return null;
+
+  return {
+    chapter: params.chapter,
+    mode: "resource_rule_reveal",
+    source: "resource-engine",
+    openingBalances: params.openingBalances,
+    allowedEvents: [
+      {
+        order: 1,
+        kind: "discover",
+        resource: Object.keys(params.resourceRules.resources)[0] ?? "未知资源",
+        reason: "揭示资源运作规则",
+        requiredInText: true,
+      },
+    ],
+    forbiddenEvents: [
+      "exchange",
+      "cash_out",
+      "earn_resource_before_closure",
+      "gain",
+      "consume",
+    ],
+    expectedClosingBalances: params.openingBalances,
+    unlockedSkills: [],
+    resourceRules: params.resourceRules,
+    closureRequirement: "explicit_balance_required",
+    narrativeGuidance: [
+      "本章处于资源规则揭示阶段。",
+      "允许：解释资源运作方式、兑换比例、使用限制。",
+      "禁止：实际收益/消耗/兑换操作。",
+      "如正文需要资源变化，必须与 Resource Plan 已允许事件一致。",
+    ],
+  };
+}
 
 interface GenericInferenceInput {
   readonly chapter: number;

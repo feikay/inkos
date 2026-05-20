@@ -1,0 +1,32 @@
+结论：APPROVE_TO_EXECUTE
+
+审查摘要（12 项逐条）：
+
+1. [PASS] 03_prompt.txt 包含 Design Anchor（第9-14行，5个锚点：章节生成层4.5、审稿增强层4.6、发布优化层4.7、§7 Resource Engine、§8 No-Change Resource Closure）
+2. [PASS] Design Anchor 对应 01_design.md：4.5(L90)、4.6(L94)、4.7(L106)、§7(L137-145)、§8(L149-166) 全部可精确追溯
+3. [PASS] 对应 02_todo.md 子任务："5.8B-FIX：修复 run-012 抽象边界缺口，移除资源名特判并补齐 publish-ready chapter status 硬门禁"（02_todo.md 第120-136行定义完整）
+4. [PASS] 未要求未授权修改 01_design.md（第62行列入禁止修改范围，第108-112行重申受控变更原则）
+5. [N/A] 不适用
+6. [PASS] 未脱离 inkos 2.0 主线——修复 Resource Engine 抽象边界直接服务于 §7 和 4.5/4.6/4.7
+7. [PASS] 未把 .ai_workflow 当作业务主线——修改对象是 resource-plan.ts 和 review.ts 源码
+8. [PASS] 未诱导直接修改业务验证输出（第61-68行明确禁止，第105-106行重申验证样本不可直接修复原则）
+9. [PASS] 允许/禁止修改范围清晰（第45-71行：2个源码文件 + 测试 + .ai_workflow 报告 vs 01_design.md、生成章节、reviews、publish 输出等）
+10. [PASS] 遵守验证样本不可直接修复原则（第105-106行重申）
+11. [PASS] 真实业务验证允许后台运行并按需以单元测试替代（第80-83行：要求后台运行并记录 PID/log/exit，无法构造真实样本时可用单元测试覆盖）
+12. [PASS] 遵守不自动 commit 原则（第114-116行）
+
+关键约束：
+- 本轮为轻量修复轮（5.8B-FIX），非大范围实现轮。修改范围仅限 resource-plan.ts、review.ts 和相关测试
+- Codex review（07_review_report.txt）已精确指出两个阻断位置：resource-plan.ts:496（hardcoded 民望值/联邦币）和 review.ts:1107-1110（仅读 resource report，未读 chapter index）
+- 禁止写成书名/资源名/章节号特例补丁（第71行）
+- 禁止修改 01_design.md（第62行）
+- run-012 已有9个新测试必须继续通过
+
+git 状态：7 个文件有未提交修改（run-012 实现改动，未 commit），无新增变更
+git diff --stat：432 insertions / 17 deletions，与 run-012 一致
+
+风险提示：
+- 本轮真实业务验证可能无法构造真实 chapter index 状态样本（state-degraded / blocked-resource-plan），03_prompt.txt 已允许以单元测试替代
+- resource-plan.ts 的 bootstrap 逻辑改为 schema-driven 可能影响已有测试 — 需在修改后重跑全量测试
+
+判定：APPROVE_TO_EXECUTE

@@ -1,0 +1,25 @@
+================================================================================
+BIZ FILESPATH — 5.7B-2R 相关文件路径
+================================================================================
+
+## 本轮修改/输出文件（全部在 .ai_workflow 内）
+.ai_workflow/reports/03_preflight_review.txt
+.ai_workflow/reports/04_output_code_report.txt
+.ai_workflow/reports/05_output_biz_report.txt
+.ai_workflow/reports/06_output_biz_filspath.txt
+.ai_workflow/runs/run-003/preflight_review.txt
+.ai_workflow/runs/run-003/code_report.txt
+.ai_workflow/runs/run-003/biz_report.txt
+.ai_workflow/runs/run-003/biz_filespath.txt
+.ai_workflow/runs/run-003/diff_summary.txt
+
+## 未修改的源文件（确认保留）
+packages/core/src/agents/resource-consistency.ts
+packages/core/src/pipeline/runner.ts
+packages/core/src/index.ts
+packages/core/src/__tests__/resource-consistency.test.ts
+
+## 未修改的业务输出
+books/<book-id>/story/chapters/*
+books/<book-id>/exports/*
+books/<book-id>/reviews/*

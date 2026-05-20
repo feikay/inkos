@@ -1,0 +1,62 @@
+================================================================================
+CODE REPORT — 5.7B-1 No-Change Resource Closure 盘点
+================================================================================
+
+## 审查文件清单
+
+| 文件 | 行数 | 关联度 |
+|------|------|--------|
+| packages/core/src/agents/resource-plan.ts | 1157 | 核心 — Resource Plan 构建、验证、no-change 语义 |
+| packages/core/src/agents/resource-consistency.ts | ~1310 | 核心 — 事件提取、数学验证、分类、ledger/state 持久化 |
+| packages/core/src/pipeline/runner.ts | ~4000+ | 核心 — 管线编排、Resource Consistency Pass、状态判定、报告写入 |
+| packages/core/src/pipeline/chapter-state-recovery.ts | 237 | 间接 — state-degraded 恢复、blocked-resource-plan 处理 |
+| packages/core/src/agents/chapter-continuity.ts | ~800+ | 间接 — publish_readiness 判定（可能引用 resource 状态） |
+| packages/core/src/agents/writer.ts | ~7000+ | 间接 — 使用 resource plan 作为写作输入 |
+| packages/core/src/__tests__/resource-plan.test.ts | ~400+ | 测试 — 已有 no-change closure 测试 |
+| packages/core/src/__tests__/resource-consistency.test.ts | ~2000+ | 测试 — 资源一致性单元测试 |
+
+## 关键代码位置
+
+### No-Change Plan 生成
+- resource-plan.ts:177-193 — 无资源/无账本活动 → no_resource_change
+- resource-plan.ts:207-221 — Fallback → no_resource_change
+- resource-plan.ts:309-384 — explore_conversion_path 也是 no-change 语义
+
+### No-Change 验证
+- resource-plan.ts:852-866 — canInferNoChange 路径
+- resource-plan.ts:867-881 — plan.mode === "no_resource_change" 路径
+- resource-plan.ts:946-958 — isNoBalanceChangePlan()
+
+### Pipeline 零事件快速路径
+- runner.ts:3198-3224 — events.length === 0 时提前返回
+- runner.ts:3225-3251 — issues.length === 0 时提前返回
+
+### 报告语义
+- runner.ts:3795-3798 — noChangeInferred / closureRequirement / closureSource 计算
+- runner.ts:3837-3840 — 写入报告 JSON
+
+### 状态持久化
+- resource-consistency.ts:1201-1250 — buildResourceLedgerUpdate（no_resource_change 不更新）
+- resource-consistency.ts:1252-1287 — syncCurrentStateResources（no_resource_change 不更新）
+
+### 章节状态
+- runner.ts:2110-2146 — blocking → blocked-resource-plan / state-degraded
+
+## 发现摘要
+
+PASS（正确行为）：
+- 零事件+零issue+无plan violation → PASS, blocking=false ✅
+- no_resource_change 模式不更新 ledger/state ✅
+- plan violation 正确升级为 FAILED+blocking ✅
+- explore_conversion_path 有明确 no-change 测试 ✅
+
+GAP（需修复）：
+- 无 resourcePlan 时 closureSource="not_applicable"，无法区分"无变化"与"未检查"
+- no_resource_change 下有事件但静默通过（不报 violation）
+- ResourceConsistencyPipelineResult 无 closureStatus 字段
+- 报告 noChangeInferred 依赖 resourcePlan 存在
+
+## 修改建议
+
+最少修改（级别1）：resource-plan.ts +20行, runner.ts +25行
+完整方案（级别1+2+3）：< 100 行，5个文件

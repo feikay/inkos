@@ -1,0 +1,41 @@
+================================================================================
+BIZ REPORT — run-004 (5.7B-3)
+================================================================================
+
+## 业务目标达成情况
+
+5.7B-3 要求：report JSON/MD 稳定输出 closureStatus，消费者可区分 4 种状态。
+
+当前状态：
+- no_change_closed  → 已检查，确认无资源变化 ✅
+- normal_closed     → 有资源事件且资源计算闭合 ✅
+- not_checked       → 缺少必要检查 ✅
+- resource_failed   → 资源异常、阻断或真实失败 ✅
+
+报告消费者（publish-ready、continuity、review、export）可通过读取 report JSON 的 `closureStatus` 字段或 report MD 的 `Closure Status` 行获取语义。
+
+## 报告字段现状
+
+report JSON（NNNN.report.json）字段：
+  "closureStatus": "normal_closed" | "no_change_closed" | "not_checked" | "resource_failed"
+
+report MD 头部字段：
+  - Closure Status：normal_closed / no_change_closed / not_checked / resource_failed
+
+Program Ledger JSON（MD 内嵌）：
+  "closureStatus": "..."
+
+## 真实业务验证
+
+未在本轮执行。建议在 5.7B-5 或 5.7B-6 中验证：
+- 选择 no_resource_change 模式章节，运行 write next
+- 检查 reviews/resource-consistency/NNNN.report.json 的 closureStatus 是否为 "no_change_closed"
+- 检查 report.md 的 Closure Status 行
+
+## 未出现的问题
+
+- 无未授权修改 01_design.md
+- 无直接修改业务验证输出
+- 无自动 commit
+- 无把 not_checked 伪装成 no_change_closed
+- 无放宽真实资源异常的 FAILED/WARN/blocking 语义

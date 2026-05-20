@@ -1,0 +1,46 @@
+================================================================================
+BIZ REPORT — run-010 no-change 补验
+================================================================================
+时间：2026-05-19
+
+## 业务目标
+执行一次真实 write-next，生成 post-5.7B no-change 验证样本，观察 closureStatus: "no_change_closed"。
+
+## 执行命令
+node packages/cli/dist/index.js write next 我使用系统当上美国总统3 --count 1 --words 1200
+  --context "任务五 no-change 补验：本章只写对话、心理活动、环境观察、局势判断和人物关系压力。
+            不要出现系统面板刷新、奖励、到账、入账、兑换、余额、民望值变化、联邦币变化、
+            技能解锁、技能使用、资源结算或任何数字资源变化。不要为了闭合资源写任何余额声明。
+            必须兑现上一章钩子，但兑现方式只能是信息压力或人物态度变化。" --json
+
+后台运行：是
+PID 文件：.ai_workflow/runs/run-010/logs/write-next.pid
+日志文件：.ai_workflow/runs/run-010/logs/write-next.log
+退出码文件：.ai_workflow/runs/run-010/logs/write-next.exit
+
+## 结果
+退出码：1（失败）
+错误：Latest chapter 4 is blocked-resource-plan. Repair state/resource plan or rewrite that chapter before continuing.
+失败阶段：准备章节输入（管线入口处被阻断）
+
+## 分析
+Chapter 4（run-009 生成）处于 blocked-resource-plan 状态。
+Resource Engine 的阻断机制在此生效——它阻止了在有资源未闭合问题的章节之后继续续写。
+这是系统正确行为，不是 bug。
+
+## 验证目标达成情况
+- ❌ 未生成新章节
+- ❌ 未生成新 resource consistency report
+- ❌ 未观察到 closureStatus: "no_change_closed"
+- ✅ Resource Engine 阻断机制在真实链路中再次确认工作正常
+- ✅ 阻断阻止了下游污染
+
+## 阻塞原因
+run-009 生成的 Chapter 4 包含资源违规（民望值+6，技能解锁），
+被 Resource Engine 标记为 blocked-resource-plan，阻止了续写。
+run-010 无法在当前书生成 Chapter 5 来验证 no_change_closed。
+
+## 解除阻塞的可能方式（供用户决策，本轮未执行）
+1. 对 Ch4 执行 write rewrite 解决资源违规
+2. 使用另一本有 resource consistency 追踪的新书
+3. 接受当前 gap，在未来的日常 write-next 中自然验证 no_change_closed

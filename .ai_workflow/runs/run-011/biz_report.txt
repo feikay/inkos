@@ -1,0 +1,34 @@
+=== BIZ REPORT (run-011) ===
+
+Status: INVENTORY_COMPLETE
+
+本轮为盘点轮，不运行真实业务命令。以下来自只读 evidence 分析。
+
+EVIDENCE SAMPLES:
+  1. 资源一致性报告: my-novel/books/情绪值系统/reviews/resource-consistency/0001.report.json
+     - closureStatus: "resource_failed"
+     - blocking: true
+     - resourcePlanMode: "no_resource_change"
+     - 联邦币余额计算错误：应为0，正文写成1
+
+  2. Chapter Index: my-novel/books/我使用系统当上美国总统3/chapters/index.json
+     - Chapter 4: status = "blocked-resource-plan"
+     - 此状态正确阻止了 run-010 的续写尝试
+
+  3. run-010 验证报告: .ai_workflow/reports/task5_no_change_real_validation_report.md
+     - write next 退出码1，管线入口阻断
+     - Resource Engine 阻断机制端到端验证通过
+
+OBSERVED GAPS (from evidence, not speculation):
+  G1: 17个 DEFAULT_RESOURCE_TYPES 跨题材注入（见 code report）
+  G2: 叙事金融数字 → 联邦币误判路径存在（见 inventory report §3）
+  G3: Resource Plan 缺 system_bootstrap mode（见 inventory report §4）
+  G4: Fallback 无条件 defer_exchange（见 inventory report §5）
+  G5: publish-ready/export 无资源门禁（见 inventory report §6）
+
+BUSINESS IMPACT ASSESSMENT:
+  - 当前影响范围：仅有系统流/都市系统类小说受影响
+  - 严重性：G5（发布resource_failed章节）> G2（误判叙事数字）> G1（跨题材污染）
+  - G5 是最严重的：当前可以发布 resource_failed 的章节而不触发任何警告
+  - G2 是概率性的：取决于 LLM 是否在正文中使用了银行/余额/入账等词汇
+  - G1 主要是噪音：未触发的资源类型不产生实际影响

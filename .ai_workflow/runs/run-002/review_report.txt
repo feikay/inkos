@@ -1,0 +1,31 @@
+结论：MANUAL_CONFIRM_REQUIRED
+
+审查摘要：
+- preflight 状态：已通过。`.ai_workflow/runs/run-002/preflight_review.txt` 结论为 `APPROVE_TO_EXECUTE`。
+- 用户批准状态：未通过文件证据确认。run-002 prompt 明确要求执行报告记录“用户已批准执行”的依据，但 `.ai_workflow/reports/04_output_code_report.txt`、`.ai_workflow/runs/run-002/code_report.txt`、biz report、diff summary 均未记录该依据。
+- Design Anchor 对齐：对齐。run-002 prompt 的章节生成层、审稿增强层、发布优化层、Resource Engine 与故事性升级关系、No-Change Resource Closure 设计目标，均能在 `01_design.md` 找到对应依据。
+- 当前任务推进情况：技术实现推进了 5.7B-2。新增 `ClosureStatus`、`classifyClosureStatus()`、pipeline result 字段、resource consistency report 输出和聚焦测试。
+- 03_prompt.txt 完成情况：大部分完成；但未满足“用户批准记录要求”，且修改了未列入允许范围的 `packages/core/src/index.ts`。
+- 01_design.md 是否被未授权修改：未发现内容 diff；本轮未修改 `01_design.md`。注意：`.ai_workflow` 仍是未跟踪目录，git 无法像跟踪文件那样提供历史差异证明。
+- 是否直接修改业务验证输出：未发现。`git status --short -- books packages scripts .ai_workflow/01_design.md` 未显示 books、exports、旧 reviews 等业务输出变更。
+- git status 摘要：修改了 `packages/core/src/__tests__/resource-consistency.test.ts`、`packages/core/src/agents/resource-consistency.ts`、`packages/core/src/index.ts`、`packages/core/src/pipeline/runner.ts`；`.ai_workflow/` 为未跟踪目录。
+- git diff --stat 摘要：4 个源码/测试文件，189 行新增。
+
+问题清单：
+- 阻塞 1：缺少用户批准执行记录。run-002 prompt 要求“执行报告中请记录用户已批准执行的依据；如果没有明确批准记录，必须停止并要求用户确认”。执行报告没有该记录。
+- 阻塞 2：`packages/core/src/index.ts` 不在 run-002 prompt 的允许修改范围内。该改动是公共导出，可能合理，但需要用户确认接受，或下一轮回收该导出并调整测试导入。
+- 非阻塞观察：`00_state.json` 的 `allowed_modify_scope` 仍写着源码只读检查，而 run-002 prompt 允许修改特定源码文件。后续 state 应与 prompt 同步，避免审查边界不一致。
+
+验证结果：
+- 我复跑了 `pnpm --filter @actalk/inkos-core test -- resource-consistency`：通过，85 files / 1072 tests passed。
+- 我复跑了 `pnpm --filter @actalk/inkos-core typecheck`：通过。
+- `git diff --check`：通过。
+
+下一轮建议：
+- 不直接进入 5.7B-3。
+- 先进入 5.7B-2R，要求用户确认 run-002 是否视为已批准执行，以及是否接受 `packages/core/src/index.ts` 导出修改。
+- 如果用户接受，则可在下一轮 review 后推进到 5.7B-3。
+- 如果用户不接受 `index.ts` 导出，则下一轮最小修正：移除 `index.ts` 导出，测试改为从内部模块导入，并重跑 core test/typecheck。
+
+提交状态：
+- 不自动 commit。

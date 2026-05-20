@@ -12,6 +12,7 @@ import {
   resolvePublishReadyStartingCandidate,
   resolveContinuityOverridePassCandidate,
   decidePublishQuality,
+  readChapterIndexStatus,
 } from "../commands/review.js";
 
 function makeReport(overrides: Partial<ContinuityReport> = {}): ContinuityReport {
@@ -212,6 +213,56 @@ describe("continuity-auto verdict helpers", () => {
       expect(basename(candidate?.sourceFile ?? "")).toBe("0094_标题.md");
     } finally {
       await rm(bookDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("readChapterIndexStatus", () => {
+  it("returns the chapter status from the index", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-review-"));
+    try {
+      const bookDir = join(tmp, "my-novel", "books", "test-book");
+      const chaptersDir = join(bookDir, "chapters");
+      await mkdir(chaptersDir, { recursive: true });
+      await writeFile(
+        join(chaptersDir, "index.json"),
+        JSON.stringify([
+          { number: 1, status: "draft", wordCount: 1000 },
+          { number: 2, status: "blocked-resource-plan", wordCount: 1200 },
+          { number: 3, status: "approved", wordCount: 1500 },
+        ]),
+        "utf-8",
+      );
+
+      expect(await readChapterIndexStatus(bookDir, 1)).toBe("draft");
+      expect(await readChapterIndexStatus(bookDir, 2)).toBe("blocked-resource-plan");
+      expect(await readChapterIndexStatus(bookDir, 3)).toBe("approved");
+      // Missing chapter returns null
+      expect(await readChapterIndexStatus(bookDir, 99)).toBeNull();
+      // Missing index file returns null
+      expect(await readChapterIndexStatus(join(tmp, "no-book"), 1)).toBeNull();
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("returns state-degraded status correctly", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-review-"));
+    try {
+      const bookDir = join(tmp, "my-novel", "books", "test-book-2");
+      const chaptersDir = join(bookDir, "chapters");
+      await mkdir(chaptersDir, { recursive: true });
+      await writeFile(
+        join(chaptersDir, "index.json"),
+        JSON.stringify([
+          { number: 1, status: "state-degraded", wordCount: 500 },
+        ]),
+        "utf-8",
+      );
+
+      expect(await readChapterIndexStatus(bookDir, 1)).toBe("state-degraded");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
     }
   });
 });

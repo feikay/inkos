@@ -1006,7 +1006,7 @@ interface ContinuityBatchStop {
 
 type ContinuityBodySource = "fixed" | "salvaged" | "polished" | "original";
 
-type PublishReadyStatus = "READY_TO_EXPORT" | "READY_WITH_WARNINGS" | "BLOCKED_BY_CONTINUITY" | "BLOCKED_BY_QUALITY" | "QUALITY_MANUAL_REVIEW" | "NEED_REWRITE" | "MANUAL_REVIEW";
+type PublishReadyStatus = "READY_TO_EXPORT" | "READY_WITH_WARNINGS" | "BLOCKED_BY_CONTINUITY" | "BLOCKED_BY_QUALITY" | "BLOCKED_BY_RESOURCE" | "QUALITY_MANUAL_REVIEW" | "NEED_REWRITE" | "MANUAL_REVIEW";
 export type PublishQualityDecision = "QUALITY_PASS" | "QUALITY_WARN_POLISH_OPTIONAL" | "QUALITY_MANUAL_REVIEW" | "NEED_REWRITE";
 
 interface ReviewedChapterSource {
@@ -1102,6 +1102,43 @@ async function runPublishReadyChapter(params: {
   sourceChain.add(relative(params.bookDir, original.file));
   const reviewedFinal = await findReviewedFinalChapterFile(params.bookDir, params.chapter);
   const reviewedFinalExists = Boolean(reviewedFinal);
+
+  // Resource hard gate: check resource consistency report before continuity/quality
+  const resourceReport = await readResourceConsistencyReportIfExists(params.bookDir, params.chapter);
+  const resourceBlocked = resourceReport?.blocking === true || resourceReport?.closureStatus === "resource_failed";
+  const chapterBlocked = resourceReport?.status && ["BLOCKED_BY_RESOURCE_PLAN", "BLOCKED"].includes(String(resourceReport.status));
+
+  // Also check chapter index status: state-degraded / blocked-resource-plan block even if resource report is missing or non-blocking
+  const chapterStatus = await readChapterIndexStatus(params.bookDir, params.chapter);
+  const chapterIndexBlocked = chapterStatus === "state-degraded" || chapterStatus === "blocked-resource-plan";
+
+  if (resourceBlocked || chapterBlocked || chapterIndexBlocked) {
+    const warnings: string[] = [];
+    if (resourceBlocked || chapterBlocked) {
+      warnings.push(
+        `Resource consistency check: blocking=${resourceReport?.blocking ?? false}, closureStatus=${resourceReport?.closureStatus ?? "unknown"}. Fix resource issues before publishing.`,
+      );
+    }
+    if (chapterIndexBlocked) {
+      warnings.push(
+        `Chapter index status is "${chapterStatus}". Chapter must be repaired before publishing.`,
+      );
+    }
+    return writePublishReadyReport(params.bookDir, {
+      book: params.bookId,
+      chapter_index: params.chapter,
+      publish_status: "BLOCKED_BY_RESOURCE",
+      final_candidate_file: "",
+      source_chain: [...sourceChain],
+      continuity: { final_status: "UNKNOWN" },
+      quality: {},
+      warnings,
+      word_count: resourceReport?.wordCount ?? 0,
+      min_chapter_words: params.minChapterWords,
+      report_json_path: "",
+      report_markdown_path: "",
+    });
+  }
 
   let candidateOverride: string | undefined = await resolvePublishReadyStartingCandidate(
     params.bookDir,
@@ -3475,6 +3512,37 @@ async function readPublishReadyReportIfExists(
 ): Promise<Partial<PublishReadyResult> | null> {
   const file = join(bookDir, "reviews", "publish-ready", `${chapterNumberPrefix(chapter)}.publish-report.json`);
   return readJsonIfExists<Partial<PublishReadyResult>>(file);
+}
+
+async function readResourceConsistencyReportIfExists(
+  bookDir: string,
+  chapter: number,
+): Promise<Partial<{
+  blocking: boolean;
+  closureStatus: string;
+  status: string;
+  wordCount: number;
+  closureRequirement: string;
+}> | null> {
+  const file = join(bookDir, "reviews", "resource-consistency", `${chapterNumberPrefix(chapter)}.report.json`);
+  return readJsonIfExists(file);
+}
+
+interface ChapterIndexEntry {
+  readonly number: number;
+  readonly status: string;
+  readonly wordCount?: number;
+}
+
+export async function readChapterIndexStatus(
+  bookDir: string,
+  chapter: number,
+): Promise<string | null> {
+  const indexFile = join(bookDir, "chapters", "index.json");
+  const index = await readJsonIfExists<ChapterIndexEntry[]>(indexFile);
+  if (!index) return null;
+  const entry = index.find((c) => c.number === chapter);
+  return entry?.status ?? null;
 }
 
 async function readJsonIfExists<T>(file: string): Promise<T | null> {

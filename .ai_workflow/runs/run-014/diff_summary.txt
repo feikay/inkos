@@ -1,0 +1,50 @@
+DIFF SUMMARY — Run-014 (5.8B-FIX-TEST)
+=========================================
+
+Timestamp: 2026-05-20 | Branch: feature/story_up2.0_methods
+
+1. RUN-014 ONLY (this run)
+============================
+
+$ git diff -- packages/cli/src/commands/review.ts
+
+  -  async function readChapterIndexStatus(
+  +  export async function readChapterIndexStatus(
+
+  1 line changed: added "export" keyword for test import access.
+  No business logic modified.
+
+$ git diff -- packages/cli/src/__tests__/review-continuity-verdict.test.ts
+
+  + import { readChapterIndexStatus } from "../commands/review.js";
+  + describe("readChapterIndexStatus", () => { ... });  // 50 lines, 2 tests
+
+  51 lines added: new test suite covering blocked-resource-plan and
+  state-degraded chapter index status reading.
+
+Total run-014: +52 / -1 lines, 2 files
+
+2. CUMULATIVE (run-012 + run-013 + run-014)
+=============================================
+
+$ git diff --stat
+
+ packages/cli/src/__tests__/review-continuity-verdict.test.ts |  51 ++++++
+ packages/cli/src/commands/review.ts                          |  70 +++++++-
+ packages/core/src/__tests__/resource-consistency.test.ts     | 171 +++++++++++++++++-
+ packages/core/src/agents/fanqie-quality.ts                   |   4 +
+ packages/core/src/agents/resource-consistency.ts             |  63 ++++++-
+ packages/core/src/agents/resource-plan.ts                    | 165 ++++++++++++++++-
+ packages/core/src/interaction/export-artifact.ts             |   2 +-
+ packages/core/src/pipeline/runner.ts                         |  30 +++-
+ 8 files changed, 539 insertions(+), 17 deletions(-)
+
+3. RUN BREAKDOWN
+=================
+
+| Run | Files | +Lines | -Lines | Focus |
+|-----|-------|--------|--------|-------|
+| run-012 | 6 | +417 | -16 | 5 abstract gaps |
+| run-013 | 3 | +70  | -0  | 2 Codex blocker fixes |
+| run-014 | 2 | +52  | -1  | Test gap fill |
+| TOTAL | 8 | +539 | -17 | |

@@ -1,0 +1,29 @@
+结论：APPROVE_TO_EXECUTE
+
+审查摘要（12 项逐条）：
+
+1. [PASS] 03_prompt.txt 包含 Design Anchor（第9-13行，4个锚点：章节生成层4.5、审稿增强层4.6、发布优化层4.7、§7 Resource Engine）
+2. [PASS] Design Anchor 对应 01_design.md：4.5(L90)、4.6(L94)、4.7(L106)、§7(L137-145) 全部可精确追溯
+3. [PASS] 对应 02_todo.md 子任务："5.8B-FIX-TEST：补齐 publish-ready blocked-resource-plan 门禁测试并复核 5.8B 修复闭环"（02_todo.md 第140-156行定义完整）
+4. [PASS] 未要求未授权修改 01_design.md（第62-63行列入禁止修改范围，第107-111行重申受控变更原则）
+5. [N/A] 不适用
+6. [PASS] 未脱离 inkos 2.0 主线——补齐测试缺口仍服务于发布优化层的资源门禁
+7. [PASS] 未把 .ai_workflow 当作业务主线——修改对象是测试文件，不改业务逻辑
+8. [PASS] 未诱导直接修改业务验证输出（第62-72行明确禁止，第104-105行重申）
+9. [PASS] 允许/禁止修改范围清晰（第45-72行：测试文件 + .ai_workflow 报告 vs 01_design.md、生成章节、reviews、publish 输出等）
+10. [PASS] 遵守验证样本不可直接修复原则（第104-105行重申）
+11. [PASS] 本轮可不跑新的真实业务验证（第80-81行），如需运行必须后台并记录 PID/log/exit
+12. [PASS] 遵守不自动 commit 原则（第113-116行）
+
+关键约束：
+- 本轮为纯测试补齐轮（5.8B-FIX-TEST），不改业务逻辑。优先只加测试和写报告
+- run-013 review 指出：publish-ready 对 `state-degraded` 的覆盖已有（真实验证），缺 `blocked-resource-plan` 的测试覆盖
+- 允许修改范围：测试文件、.ai_workflow 报告；仅测试接入需要时可小范围调整 review.ts 导出，不得改业务逻辑
+- 禁止修改 01_design.md、业务输出、特例补丁
+- 需要重跑相关测试确认 run-012/run-013 已修复项继续通过
+
+git 状态：7 个文件有未提交修改（run-012 + run-013 改动），488 insertions / 17 deletions
+
+风险：极低。本轮只加测试，不改业务逻辑，不改业务输出。
+
+判定：APPROVE_TO_EXECUTE

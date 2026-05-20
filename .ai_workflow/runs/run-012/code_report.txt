@@ -1,0 +1,90 @@
+CODE REPORT — Run-012 (5.8B Implementation)
+============================================
+
+Timestamp: 2026-05-20 | Executor: Claude Code
+Branch: feature/story_up2.0_methods | Git: clean (unstaged)
+
+1. FILES MODIFIED
+==================
+
+| File | +Lines | -Lines | Gap |
+|------|--------|--------|-----|
+| packages/core/src/agents/resource-consistency.ts | +55 | -8 | Gap 1, 2 |
+| packages/core/src/agents/resource-plan.ts | +166 | -1 | Gap 3 |
+| packages/core/src/pipeline/runner.ts | +25 | -5 | Gap 4 |
+| packages/core/src/agents/fanqie-quality.ts | +4 | 0 | Gap 5A |
+| packages/cli/src/commands/review.ts | +38 | -1 | Gap 5B |
+| packages/core/src/interaction/export-artifact.ts | +1 | -1 | Gap 5C |
+| packages/core/src/__tests__/resource-consistency.test.ts | +143 | -1 | Tests |
+| TOTAL | +432 | -17 | |
+
+2. GAP-LEVEL CHANGE DETAIL
+===========================
+
+Gap 1 — Book-level Resource Schema Gate
+  File: resource-consistency.ts, parseResourceRules() (L394-425)
+  Change: Extract resourceTypes block from book_rules.md. If explicit
+  declaration exists, only inject declared types + their aliases from
+  DEFAULT_RESOURCE_TYPES / RESOURCE_ALIASES. No declaration → inject all.
+
+Gap 2 — Narrative Financial Number Filter
+  File: resource-consistency.ts, new isNarrativeFinancialContext()
+  Change: 5 NARRATIVE_FINANCIAL_PATTERNS regex groups. Wired into
+  detectBalanceJumpResource(), collectSentenceBalanceEvents(), and
+  inferResourceForNumericContext() (联邦币 path). Financial text without
+  system context keywords → not a resource event.
+
+Gap 3 — System Bootstrap & Resource Rule Reveal Modes
+  File: resource-plan.ts, ChapterResourcePlanMode + 2 detect functions
+  Change: Mode type 5→7. detectSystemBootstrapStage() uses
+  /系统.{0,16}(?:激活|绑定|觉醒|赋予|开启|初始化|唤醒)/u.
+  detectResourceRuleRevealStage() uses reveal/explain/rule patterns.
+  Both wired before hardcoded fallbacks in buildChapterResourcePlan().
+
+Gap 4 — Fallback Recovery Schema/Mode Gate
+  File: runner.ts, new isExchangeStrategyAllowed() + updated call site
+  Change: defer_exchange only selected when exchangeRates.length > 0
+  AND planMode not in ["system_bootstrap", "resource_rule_reveal"].
+
+Gap 5A — FanqieQualityReport field
+  File: fanqie-quality.ts
+  Change: Added publish_blocked_by_resource: boolean to interface+builder.
+
+Gap 5B — Publish-Ready Resource Hard Gate
+  File: review.ts (CLI), runPublishReadyChapter()
+  Change: readResourceConsistencyReportIfExists() + BLOCKED_BY_RESOURCE
+  status. Gates on blocking===true, closureStatus===resource_failed,
+  or chapter status BLOCKED/BLOCKED_BY_RESOURCE_PLAN.
+
+Gap 5C — Export Resource Filter
+  File: export-artifact.ts, buildExportArtifact()
+  Change: Default filter excludes "blocked-resource-plan" + "state-degraded".
+
+3. TEST RESULTS
+================
+
+pnpm --filter @actalk/inkos-core test
+→ 85/85 test files, 1083/1083 tests passed, 0 failures
+
+New tests: 9 in resource-consistency.test.ts
+  - parseResourceRules schema gate (3 tests): Gap 1 + backward compat
+  - isNarrativeFinancialContext filter (3 tests): Gap 2 + non-regression
+  - system_bootstrap / resource_rule_reveal modes (2 tests): Gap 3
+
+4. BUILD
+=========
+
+pnpm build: passes (@actalk/inkos-core + @actalk/inkos)
+pnpm typecheck: passes, no new errors
+
+5. SUGGESTED COMMIT (not executed)
+====================================
+
+git add packages/core/src/agents/resource-consistency.ts \
+        packages/core/src/agents/resource-plan.ts \
+        packages/core/src/pipeline/runner.ts \
+        packages/core/src/agents/fanqie-quality.ts \
+        packages/cli/src/commands/review.ts \
+        packages/core/src/interaction/export-artifact.ts \
+        packages/core/src/__tests__/resource-consistency.test.ts
+git commit -m "feat(core): add book-level resource schema gate, narrative financial filter, stage-based resource plan modes, fallback gating, and publish-ready/export resource hard gates"

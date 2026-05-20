@@ -1,0 +1,49 @@
+CODE REPORT — Run-014 (5.8B-FIX-TEST)
+=====================================
+
+Timestamp: 2026-05-20 | Branch: feature/story_up2.0_methods
+Status: IMPLEMENTATION_COMPLETE
+
+1. FILES MODIFIED (this run)
+==============================
+
+| File | +Lines | -Lines | Purpose |
+|------|--------|--------|---------|
+| packages/cli/src/commands/review.ts | +1 | -1 | Export readChapterIndexStatus |
+| packages/cli/src/__tests__/review-continuity-verdict.test.ts | +51 | 0 | New test suite |
+| TOTAL (run-014 only) | +52 | -1 | |
+
+2. CHANGE DETAIL
+=================
+
+2.1 review.ts — Export readChapterIndexStatus
+  Line 3546: async function → export async function
+  One keyword added. Function body unchanged. No business logic modified.
+
+2.2 review-continuity-verdict.test.ts — New test suite
+  Added import: readChapterIndexStatus from ../commands/review.js
+  Added describe("readChapterIndexStatus") with 2 tests:
+    - "returns the chapter status from the index"
+      Tests: draft, blocked-resource-plan, approved, missing chapter, missing index
+    - "returns state-degraded status correctly"
+      Tests: state-degraded status reading
+
+3. TEST RESULTS
+================
+
+Core: 85/85 files, 1084/1084 tests (0 failures)
+CLI:  36/36 files,  200/200 tests (2 new, 0 failures)
+Total: 1284 tests passed
+
+4. BUILD
+=========
+
+pnpm build: passes
+pnpm typecheck: passes
+
+5. SUGGESTED COMMIT
+=====================
+
+git add packages/cli/src/commands/review.ts \
+        packages/cli/src/__tests__/review-continuity-verdict.test.ts
+git commit -m "test(cli): add blocked-resource-plan and state-degraded unit test coverage for readChapterIndexStatus"

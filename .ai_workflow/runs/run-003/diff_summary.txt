@@ -1,0 +1,32 @@
+================================================================================
+DIFF SUMMARY — 5.7B-2R 执行 diff 摘要
+================================================================================
+
+## 本轮修改
+
+无源码修改。本轮为流程确认（记录用户对 run-002 的批准确认和 index.ts 导出接受）。
+
+## git status（与 run-002 结束时一致）
+
+M .gitignore
+M packages/core/src/__tests__/resource-consistency.test.ts
+M packages/core/src/agents/resource-consistency.ts
+M packages/core/src/index.ts
+M packages/core/src/pipeline/runner.ts
+?? .ai_workflow/
+
+## 源码 diff（run-002 遗留，已确认接受）
+
+4 files changed, 189 insertions(+)
+- resource-consistency.test.ts: +124 (10 test cases)
+- resource-consistency.ts: +25 (ClosureStatus type, classifyClosureStatus fn, field)
+- index.ts: +2 (exports)
+- runner.ts: +38 (closureStatus computation + report output)
+
+## 本轮新增文件（.ai_workflow 内）
+
+.ai_workflow/reports/03_preflight_review.txt（更新）
+.ai_workflow/reports/04_output_code_report.txt（更新）
+.ai_workflow/reports/05_output_biz_report.txt（更新）
+.ai_workflow/reports/06_output_biz_filspath.txt（更新）
+.ai_workflow/runs/run-003/*（新建）

@@ -1,0 +1,31 @@
+结论：FAIL
+
+审查摘要：
+- preflight 状态：PASS。run-012 preflight 输出 `APPROVE_TO_EXECUTE`。
+- 用户批准状态：PASS。用户要求按 run-012 进入本轮执行，可视为已批准。
+- Design Anchor 对齐：部分对齐。整体方向服务章节生成层、审稿增强层、发布优化层和 Resource Engine 目标，但实现没有完全遵守“抽象规则，不写资源名特例”的任务约束。
+- 当前任务推进情况：部分推进。完成了 schema gate、叙事金融过滤、stage mode、fallback gate、publish-ready/export 门禁的初步实现，但存在阻断缺陷。
+- 03_prompt.txt 完成情况：FAIL。prompt 明确要求禁止书名/题材名/资源名/章节号特例补丁，并要求 publish-ready 对 `state-degraded` / `blocked-resource-plan` 硬阻断；实际实现未完全满足。
+- 01_design.md 是否被未授权修改：否。`git diff -- .ai_workflow/01_design.md` 为空。
+- 是否直接修改业务验证输出：未发现手工修改。业务验证通过 publish-ready 命令自然生成输出。
+- 真实业务验证是否实际运行新输出：是。publish-ready 验证后台执行，结果为 `BLOCKED_BY_RESOURCE`。
+- 后台命令记录：
+  - PID 文件：`.ai_workflow/runs/run-012/logs/publish-ready-resource-failed.pid`
+  - log 文件：`.ai_workflow/runs/run-012/logs/publish-ready-resource-failed.log`
+  - exit 文件：`.ai_workflow/runs/run-012/logs/publish-ready-resource-failed.exit`
+- git status 摘要：7 个允许范围内源码/测试文件被修改。
+- git diff --stat 摘要：`packages/cli/src/commands/review.ts`、`packages/core/src/__tests__/resource-consistency.test.ts`、`packages/core/src/agents/fanqie-quality.ts`、`packages/core/src/agents/resource-consistency.ts`、`packages/core/src/agents/resource-plan.ts`、`packages/core/src/interaction/export-artifact.ts`、`packages/core/src/pipeline/runner.ts`，共 432 insertions / 17 deletions。
+
+问题清单：
+- [FAIL] `packages/core/src/agents/resource-plan.ts:496` 在 run-012 新增的 `system_bootstrap` 逻辑里直接判断 `params.openingBalances["民望值"]` 和 `params.openingBalances["联邦币"]`。这违反本轮禁止资源名特例补丁的核心约束，也会让其他 book-level resource schema 的开篇系统绑定章节无法稳定获得 `balance_claim`。
+- [FAIL] `packages/cli/src/commands/review.ts:1107-1110` 的 publish-ready 硬门禁只读取 resource consistency report，没有读取 chapter index 的真实章节状态。因此当章节 index 已是 `state-degraded` 或 `blocked-resource-plan`，但 resource report 缺失或未标 blocking 时，仍可能进入后续 publish-ready 流程。
+- [FAIL] 新增测试对 `system_bootstrap` 的断言过弱：测试允许 `system_bootstrap`、`no_resource_change`、`normal` 都通过，不能锁定本轮要求的 stage mode 行为；同时测试样本仍以 `民望值/联邦币` 为主，没有证明非该资源组合也成立。
+
+下一轮建议：
+- 进入 `5.8B-FIX`，只修 run-012 review 阻断点，不扩大战线。
+- 将 `system_bootstrap` 的 allowedEvents 由 `resourceRules.resources` 与 `openingBalances` 推导，不得判断具体资源名。
+- publish-ready 读取 chapter index，并对 `state-degraded` / `blocked-resource-plan` 返回 `BLOCKED_BY_RESOURCE`。
+- 补充强断言测试：非 `民望值/联邦币` 资源 schema 的 bootstrap，以及 chapter index 双状态阻断。
+
+提交状态：
+- 不自动 commit。

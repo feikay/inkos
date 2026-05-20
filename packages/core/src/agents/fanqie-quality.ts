@@ -40,6 +40,7 @@ export interface FanqieQualityReport {
   readonly polish_suggestions: ReadonlyArray<string>;
   readonly polish_prompt: string;
   readonly publish_blocked_by_continuity: boolean;
+  readonly publish_blocked_by_resource: boolean;
   readonly polish_attempt?: number;
   readonly max_polish_attempts?: number;
   readonly final_quality_score?: number;
@@ -62,6 +63,7 @@ export interface RunFanqieQualityCheckInput {
   readonly continuityFinalStatus?: "PASS" | "MANUAL_REVIEW" | "DROP";
   readonly qualityFinalStatus?: FanqieFinalQualityStatus;
   readonly publishBlockedByContinuity?: boolean;
+  readonly publishBlockedByResource?: boolean;
   readonly polishAttempt?: number;
   readonly maxPolishAttempts?: number;
   readonly finalQualityScore?: number;
@@ -286,6 +288,7 @@ function buildLocalFanqieQualityReport(input: Omit<RunFanqieQualityCheckInput, "
     continuity_final_status: input.continuityFinalStatus,
     quality_final_status: input.qualityFinalStatus,
     publish_blocked_by_continuity: Boolean(input.publishBlockedByContinuity),
+    publish_blocked_by_resource: Boolean(input.publishBlockedByResource),
   };
 }
 
@@ -312,6 +315,7 @@ function normalizeFanqieQualityReport(report: Partial<FanqieQualityReport>, inpu
     polish_suggestions: stringArray(report.polish_suggestions).length ? stringArray(report.polish_suggestions) : buildSuggestions(scores),
     polish_prompt: "",
     publish_blocked_by_continuity: Boolean(input.publishBlockedByContinuity),
+    publish_blocked_by_resource: Boolean(input.publishBlockedByResource),
     polish_attempt: input.polishAttempt ?? report.polish_attempt,
     max_polish_attempts: input.maxPolishAttempts ?? report.max_polish_attempts,
     final_quality_score: input.finalQualityScore ?? report.final_quality_score,

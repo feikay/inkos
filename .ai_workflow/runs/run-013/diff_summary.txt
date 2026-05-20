@@ -1,0 +1,26 @@
+DIFF SUMMARY — Run-013 (5.8B-FIX)
+===================================
+
+Timestamp: 2026-05-20 | Branch: feature/story_up2.0_methods
+
+git diff --stat:
+
+ packages/cli/src/commands/review.ts                |  70 ++++++++-
+ .../src/__tests__/resource-consistency.test.ts     | 171 ++++++++++++++++++++-
+ packages/core/src/agents/fanqie-quality.ts         |   4 +
+ packages/core/src/agents/resource-consistency.ts   |  63 +++++++-
+ packages/core/src/agents/resource-plan.ts          | 165 +++++++++++++++++++-
+ packages/core/src/interaction/export-artifact.ts   |   2 +-
+ packages/core/src/pipeline/runner.ts               |  30 +++-
+ 7 files changed, 488 insertions(+), 17 deletions(-)
+
+RUN-013 SPECIFIC (vs run-012):
+  resource-plan.ts:   -2 lines hardcoded check, +1 line schema-driven map
+  review.ts:          +31 lines (readChapterIndexStatus + chapter index gate)
+  resource-consistency.test.ts: +27 lines (1 strengthened + 1 new test)
+
+ABSTRACTION COMPLIANCE:
+  - buildSystemBootstrapPlanIfMatched: zero hardcoded resource names
+  - publish-ready gate: generic status string comparison ("state-degraded",
+    "blocked-resource-plan") — not resource/book/chapter specific
+  - All detection is schema-driven, regex-driven, or data-structure-driven

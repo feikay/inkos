@@ -1,0 +1,28 @@
+================================================================================
+BIZ FILESPATH — run-009
+================================================================================
+
+## 本轮输出
+.ai_workflow/reports/04_output_code_report.txt
+.ai_workflow/reports/05_output_biz_report.txt
+.ai_workflow/reports/06_output_biz_filspath.txt
+.ai_workflow/reports/task5_resource_stage_closure_report.md
+.ai_workflow/runs/run-009/*
+
+## 日志
+.ai_workflow/runs/run-009/logs/write-next.log
+.ai_workflow/runs/run-009/logs/write-next3.log
+.ai_workflow/runs/run-009/logs/write-next4.log (完整管线日志)
+
+## 程序生成的新业务输出（只读禁止手工编辑）
+my-novel/books/我使用系统当上美国总统3/chapters/0004_敲门人送来的破局录像.md
+my-novel/books/我使用系统当上美国总统3/chapters/index.json
+my-novel/books/我使用系统当上美国总统3/reviews/resource-consistency/0004.report.json
+my-novel/books/我使用系统当上美国总统3/reviews/resource-consistency/0004.report.md
+
+## 未修改的源码
+packages/core/src/agents/resource-consistency.ts
+packages/core/src/pipeline/runner.ts
+packages/core/src/__tests__/resource-consistency.test.ts
+packages/core/src/__tests__/resource-plan.test.ts
+packages/core/src/__tests__/pipeline-runner.test.ts

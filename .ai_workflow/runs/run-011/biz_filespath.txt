@@ -1,0 +1,24 @@
+=== BIZ FILESPATH (run-011) ===
+
+NEW FILES CREATED:
+  .ai_workflow/reports/resource_schema_stage_plan_inventory.md
+  .ai_workflow/reports/04_output_code_report.txt
+  .ai_workflow/reports/05_output_biz_report.txt
+  .ai_workflow/reports/06_output_biz_filspath.txt
+  .ai_workflow/runs/run-011/resource_schema_stage_plan_inventory.md
+  .ai_workflow/runs/run-011/code_report.txt
+  .ai_workflow/runs/run-011/biz_report.txt
+  .ai_workflow/runs/run-011/biz_filespath.txt
+  .ai_workflow/runs/run-011/diff_summary.txt
+
+EXISTING FILES MODIFIED (by this run):
+  .ai_workflow/reports/03_preflight_review.txt (preflight 阶段更新)
+  .ai_workflow/runs/run-011/preflight_review.txt (preflight 阶段更新)
+
+FILES NOT MODIFIED (per constraints):
+  .ai_workflow/01_design.md — 设计冻结
+  任何业务源码
+  任何生成章节
+  任何 reviews 报告
+  任何 publish 输出
+  任何 analysis json/md

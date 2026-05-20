@@ -1,0 +1,22 @@
+BIZ FILESPATH — Run-014
+========================
+
+Timestamp: 2026-05-20
+
+1. SOURCE FILES MODIFIED (run-014)
+===================================
+
+  packages/cli/src/commands/review.ts
+    Change: export async function readChapterIndexStatus (+1/-1)
+
+  packages/cli/src/__tests__/review-continuity-verdict.test.ts
+    Change: Add readChapterIndexStatus test suite (+51 lines)
+
+2. FILES NOT MODIFIED
+======================
+
+  .ai_workflow/01_design.md
+  packages/core/src/agents/resource-plan.ts
+  packages/core/src/agents/resource-consistency.ts
+  packages/core/src/pipeline/runner.ts
+  任何生成章节 / reviews / publish / analysis 输出

@@ -47,10 +47,12 @@ import {
   ResourceBlockingRewriterAgent,
   ResourceConsistencyReviserAgent,
   selectResourceRecoveryPlan,
+  parseResourceRules,
   syncCurrentStateResources,
   validateResourceMath,
   type ClosureStatus,
   type ResourceConsistencyPipelineResult,
+  type ResourceRules,
   type ResourceValidationResult,
   type ResourceConsistencyStatus,
 } from "../agents/resource-consistency.js";
@@ -3393,15 +3395,23 @@ ${matrix}`,
           secondValidation = "FAILED";
           recoveryPlanResult = "FAILED";
           this.config.logger?.child("writer")?.warn(`resource-engine: recovery validation failed for ${recoveryPlan.planId}`);
-          const fallback = buildFallbackRecoveryPlan({
-            validation,
-            chapterIntent,
-            failedPlan: recoveryPlan,
+          const resourceRulesForFallback = parseResourceRules(bookRules, currentLedger, currentState);
+          const planModeForFallback = params.resourcePlan?.mode ?? "no_resource_change";
+          const exchangeAllowed = isExchangeStrategyAllowed({
+            resourceRules: resourceRulesForFallback,
+            planMode: planModeForFallback,
           });
+          const fallback = exchangeAllowed
+            ? buildFallbackRecoveryPlan({
+              validation,
+              chapterIntent,
+              failedPlan: recoveryPlan,
+            })
+            : undefined;
           if (fallback && fallback.planId !== recoveryPlan.planId) {
             fallbackRecoveryAttempted = true;
             fallbackRecoveryPlan = fallback;
-            this.config.logger?.child("writer")?.info("resource-engine: falling back to defer_exchange");
+            this.config.logger?.child("writer")?.info(`resource-engine: falling back to ${fallback.strategy}`);
             this.config.logger?.child("writer")?.info(`resource-engine: fallback recovery plan selected: ${fallbackRecoveryPlan.planId}`);
             const fallbackAttempt = await this.tryResourceBlockingRewrite({
               rewriter,
@@ -4845,4 +4855,14 @@ function buildFallbackRecoveryPlan(params: {
     validation: params.validation,
     chapterIntent: params.chapterIntent,
   }).find((plan) => plan.strategy === "defer_exchange");
+}
+
+function isExchangeStrategyAllowed(params: {
+  resourceRules: ResourceRules;
+  planMode: string;
+}): boolean {
+  const hasExchangeRates = params.resourceRules.exchangeRates.length > 0;
+  // Only block exchange when the plan mode explicitly forbids resource events
+  const exchangeBlocked = ["system_bootstrap", "resource_rule_reveal"].includes(params.planMode);
+  return hasExchangeRates && !exchangeBlocked;
 }

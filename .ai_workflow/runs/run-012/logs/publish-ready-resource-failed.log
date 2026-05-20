@@ -1,0 +1,25 @@
+{
+  "bookId": "情绪值系统",
+  "results": [
+    {
+      "book": "情绪值系统",
+      "chapter_index": 1,
+      "publish_status": "BLOCKED_BY_RESOURCE",
+      "final_candidate_file": "",
+      "source_chain": [
+        "chapters/0001_超时两分钟的差评.md"
+      ],
+      "continuity": {
+        "final_status": "UNKNOWN"
+      },
+      "quality": {},
+      "warnings": [
+        "Resource consistency check: blocking=true, closureStatus=resource_failed. Fix resource issues before publishing."
+      ],
+      "word_count": 0,
+      "min_chapter_words": 1000,
+      "report_json_path": "/Users/feikay/Documents/mycode/node-workspace/inkos/my-novel/books/情绪值系统/reviews/publish-ready/0001.publish-report.json",
+      "report_markdown_path": "/Users/feikay/Documents/mycode/node-workspace/inkos/my-novel/books/情绪值系统/reviews/publish-ready/0001.publish-report.md"
+    }
+  ]
+}

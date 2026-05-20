@@ -1,0 +1,28 @@
+DIFF SUMMARY — Run-012 (5.8B Implementation)
+=============================================
+
+Timestamp: 2026-05-20 | Branch: feature/story_up2.0_methods
+
+git diff --stat HEAD:
+
+ packages/cli/src/commands/review.ts                |  39 ++++-
+ .../src/__tests__/resource-consistency.test.ts     | 144 +++++++++++++++++-
+ packages/core/src/agents/fanqie-quality.ts         |   4 +
+ packages/core/src/agents/resource-consistency.ts   |  63 +++++++-
+ packages/core/src/agents/resource-plan.ts          | 167 ++++++++++++++++++++-
+ packages/core/src/interaction/export-artifact.ts   |   2 +-
+ packages/core/src/pipeline/runner.ts               |  30 +++-
+ 7 files changed, 432 insertions(+), 17 deletions(-)
+
+PER-FILE BREAKDOWN:
+  resource-plan.ts:          +166/-1   (Gap 3 — new modes + detection functions)
+  resource-consistency.ts:   +55/-8    (Gap 1 — schema gate, Gap 2 — financial filter)
+  review.ts (CLI):           +38/-1    (Gap 5B — publish-ready resource hard gate)
+  runner.ts:                 +25/-5    (Gap 4 — fallback recovery schema/mode gate)
+  fanqie-quality.ts:         +4/-0     (Gap 5A — publish_blocked_by_resource field)
+  export-artifact.ts:        +1/-1     (Gap 5C — export resource filter)
+  resource-consistency.test.ts: +143/-1 (new tests for Gap 1-3)
+
+ABSTRACTION: All changes are data-structure-driven, regex-driven (generic
+Chinese vocabulary), or YAML-driven. Zero book names, resource names, or
+chapter numbers appear in new branching conditions.

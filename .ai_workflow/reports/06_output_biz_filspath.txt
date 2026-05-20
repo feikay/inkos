@@ -1,0 +1,65 @@
+=== BIZ FILESPATH (run-014) ===
+
+Timestamp: 2026-05-20
+
+1. SOURCE FILES MODIFIED (run-014 only)
+=========================================
+
+  packages/cli/src/__tests__/review-continuity-verdict.test.ts
+    → /Users/feikay/Documents/mycode/node-workspace/inkos/packages/cli/src/__tests__/review-continuity-verdict.test.ts
+    Change: Add readChapterIndexStatus test suite (2 tests, +51 lines)
+
+  packages/cli/src/commands/review.ts
+    → /Users/feikay/Documents/mycode/node-workspace/inkos/packages/cli/src/commands/review.ts
+    Change: Export readChapterIndexStatus for test import (+1 line, -1 line)
+
+2. SOURCE FILES CARRIED FROM run-012/run-013 (unchanged this run)
+==================================================================
+
+  packages/core/src/agents/resource-plan.ts
+    → /Users/feikay/Documents/mycode/node-workspace/inkos/packages/core/src/agents/resource-plan.ts
+
+  packages/core/src/agents/resource-consistency.ts
+    → /Users/feikay/Documents/mycode/node-workspace/inkos/packages/core/src/agents/resource-consistency.ts
+
+  packages/core/src/pipeline/runner.ts
+    → /Users/feikay/Documents/mycode/node-workspace/inkos/packages/core/src/pipeline/runner.ts
+
+  packages/core/src/agents/fanqie-quality.ts
+    → /Users/feikay/Documents/mycode/node-workspace/inkos/packages/core/src/agents/fanqie-quality.ts
+
+  packages/core/src/interaction/export-artifact.ts
+    → /Users/feikay/Documents/mycode/node-workspace/inkos/packages/core/src/interaction/export-artifact.ts
+
+  packages/core/src/__tests__/resource-consistency.test.ts
+    → /Users/feikay/Documents/mycode/node-workspace/inkos/packages/core/src/__tests__/resource-consistency.test.ts
+
+3. WORKFLOW REPORTS (run-014)
+==============================
+
+  .ai_workflow/reports/03_preflight_review.txt
+  .ai_workflow/reports/04_output_code_report.txt
+  .ai_workflow/reports/05_output_biz_report.txt
+  .ai_workflow/reports/06_output_biz_filspath.txt
+  .ai_workflow/reports/resource_schema_stage_plan_gate_test.md
+  .ai_workflow/runs/run-014/preflight_review.txt
+  .ai_workflow/runs/run-014/code_report.txt
+  .ai_workflow/runs/run-014/biz_report.txt
+  .ai_workflow/runs/run-014/biz_filespath.txt
+  .ai_workflow/runs/run-014/diff_summary.txt
+  .ai_workflow/runs/run-014/resource_schema_stage_plan_gate_test.md
+
+4. BUSINESS VALIDATION OUTPUTS (none this run)
+===============================================
+
+  本轮未运行真实业务验证。
+
+5. FILES NOT MODIFIED (per constraints)
+========================================
+
+  .ai_workflow/01_design.md
+  任何生成章节 (chapters/)
+  任何 reviews 业务报告 (reviews/)
+  任何 publish 输出
+  任何 analysis json/md
+  任何 chapters-fixed 输出

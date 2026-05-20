@@ -1,0 +1,149 @@
+项目名称：inkos 小说生成项目
+
+当前阶段：inkos 2.0：故事性大升级
+
+当前任务：任务五点七 B：No-Change Resource Closure 无资源变化章节的资源闭合机制
+
+当前子任务：5.7B-2：定义 no-change resource closure 判定语义
+
+Design Anchor：
+- .ai_workflow/01_design.md 的“章节生成层”
+- .ai_workflow/01_design.md 的“审稿增强层”
+- .ai_workflow/01_design.md 的“发布优化层”
+- .ai_workflow/01_design.md 的“Resource Engine 与故事性升级的关系”
+- .ai_workflow/01_design.md 的“No-Change Resource Closure 的设计目标”
+
+当前任务对应 02_todo.md：
+- 任务五点七 B：No-Change Resource Closure 无资源变化章节的资源闭合机制
+- 当前子任务 5.7B-2：定义 no-change resource closure 判定语义
+
+为什么没有脱离 01_design.md：
+No-Change Resource Closure 是 Resource Engine 确定性数值底座的闭环补强，服务于章节生成层、审稿增强层和发布优化层。5.7B-2 延续 5.7B-1 的盘点结论，把“无资源变化但已闭合”和“资源检查缺失”的语义边界落实到程序类型、报告字段和最小测试中，不修改总体设计，不直接修复业务输出。
+
+背景：
+5.7B-1 盘点报告已确认：
+- 有 Resource Plan 且为 no-change 模式时，零事件章节通常能 PASS 且不阻断；
+- 无 Resource Plan 时，报告缺少明确 closure 语义，无法稳定区分“无资源变化”和“检查缺失”；
+- `no_resource_change` plan 下如果正文出现资源事件，目前语义不够明确；
+- 当前报告缺少稳定的 `closureStatus` 字段供后续 publish-ready、continuity、review、export 消费。
+
+本轮核心目标：
+在最小范围内定义并实现 no-change resource closure 判定语义。目标是让程序和报告能够明确区分：
+- `no_change_closed`：已检查，确认无资源变化；
+- `normal_closed`：有资源事件且资源计算闭合；
+- `not_checked`：缺少必要检查或缺少 Resource Plan，不能当作 no-change closure；
+- `resource_failed`：资源计算失败、阻断或存在真实资源异常。
+
+本轮不是 publish-ready 全量接入任务，也不是业务输出修复任务。
+
+必读文件：
+- .ai_workflow/00_state.json
+- .ai_workflow/01_design.md
+- .ai_workflow/02_todo.md
+- .ai_workflow/03_prompt.txt
+- .ai_workflow/reports/resource_no_change_closure_inventory.md
+- packages/core/src/agents/resource-plan.ts
+- packages/core/src/agents/resource-consistency.ts
+- packages/core/src/pipeline/runner.ts
+- packages/core/src/__tests__/resource-plan.test.ts
+- packages/core/src/__tests__/resource-consistency.test.ts
+
+建议搜索关键词：
+- ChapterResourcePlanFinalValidation
+- validateTextAgainstChapterResourcePlanFinal
+- no_resource_change
+- inferred_no_change
+- noChangeInferred
+- closureRequirement
+- closureSource
+- ResourceConsistencyPipelineResult
+- runResourceConsistencyPass
+- writeResourceConsistencyReport
+- resourcePlanViolations
+- blocking
+- WARN
+- FAILED
+
+允许修改范围：
+- packages/core/src/agents/resource-plan.ts
+- packages/core/src/agents/resource-consistency.ts
+- packages/core/src/pipeline/runner.ts
+- packages/core/src/__tests__/resource-plan.test.ts
+- packages/core/src/__tests__/resource-consistency.test.ts
+- .ai_workflow/reports/04_output_code_report.txt
+- .ai_workflow/reports/05_output_biz_report.txt
+- .ai_workflow/reports/06_output_biz_filspath.txt
+- .ai_workflow/runs/run-002/code_report.txt
+- .ai_workflow/runs/run-002/biz_report.txt
+- .ai_workflow/runs/run-002/biz_filespath.txt
+- .ai_workflow/runs/run-002/diff_summary.txt
+
+禁止修改范围：
+- 不要修改 .ai_workflow/01_design.md。
+- 不要修改生成章节。
+- 不要修改 chapters-fixed 输出。
+- 不要修改 publish 输出。
+- 不要修改 reviews 旧报告。
+- 不要修改任何业务验证输出。
+- 不要改 long novel write next flow，除非只是类型或报告字段的必要编译修复。
+- 不要改 scripts/fanqie/export-fanqie.mjs。
+- 不要改 publish-ready final decision logic。
+- 不要改 continuity-auto logic。
+- 不要自动 commit。
+
+实现要求：
+1. 定义稳定的 closure 语义，优先使用 `closureStatus` 或等价字段。
+2. `no_change_closed` 必须只表示“已执行检查，且确认无资源变化已闭合”。
+3. `not_checked` 必须与 `no_change_closed` 区分，不能把缺失 Resource Plan 的情况静默当作已闭合。
+4. 正常资源变化闭合应保留现有 PASS 行为，并能标记为 `normal_closed` 或等价语义。
+5. 真实资源异常仍必须保持 FAILED / WARN / blocking 语义，不能为了 no-change 放宽失败条件。
+6. 不允许 LLM 临时补写收益、消耗或余额声明。
+7. 不直接修改章节正文或业务报告来伪造验收通过。
+
+建议最小实现方向：
+- 在 Resource Plan final validation 或 Resource Consistency pipeline result 中补充明确的检查状态字段。
+- 在 resource consistency report JSON/MD 中输出 closure 语义。
+- 保持 no-change 章节不触发错误 BLOCKED / WARN。
+- 对 `no_resource_change` plan 下出现资源事件的情况，至少在报告中给出清晰语义；是否升级 WARN 如有风险请在报告中说明。
+
+代码级测试：
+本轮需要补充或更新聚焦测试。建议至少覆盖：
+- no-change 章节：有 no_resource_change plan、零事件、零 issue，应输出 `no_change_closed`，status PASS，blocking false；
+- 缺失检查：无 Resource Plan 且零事件，不能输出 `no_change_closed`，应输出 `not_checked` 或等价语义；
+- 正常资源变化：有资源事件且计算闭合，应输出 `normal_closed` 或等价语义，保持 PASS；
+- 真实资源异常：仍应 FAILED / WARN / blocking，不得被 no-change closure 误放行；
+- `no_resource_change` plan 下出现资源事件：必须有可审计语义，不能静默伪装成 no-change closure。
+
+真实业务验证：
+本轮可以运行轻量真实样本验证或只提供验证建议。若运行真实验证，只允许新增本轮报告记录，不得直接修改生成章节、chapters-fixed、publish 输出、旧 reviews、analysis json/md 或任何业务验证输出。
+
+输出要求：
+请输出或更新：
+- .ai_workflow/reports/04_output_code_report.txt
+- .ai_workflow/reports/05_output_biz_report.txt
+- .ai_workflow/reports/06_output_biz_filspath.txt
+- .ai_workflow/runs/run-002/code_report.txt
+- .ai_workflow/runs/run-002/biz_report.txt
+- .ai_workflow/runs/run-002/biz_filespath.txt
+- .ai_workflow/runs/run-002/diff_summary.txt
+
+报告至少包含：
+- 实际修改文件；
+- closure 语义定义；
+- no-change、not_checked、normal_closed、resource_failed 的判定规则；
+- 测试命令和结果；
+- 未执行测试的原因；
+- 真实业务验证路径或未执行原因；
+- 是否存在需要用户确认的边界风险。
+
+用户批准记录要求：
+Claude preflight 通过后，仍必须等待用户批准才能执行。执行报告中请记录“用户已批准执行”的依据；如果没有明确批准记录，必须停止并要求用户确认。
+
+验证样本不可直接修复原则：
+业务验证输出只是用来判断程序是否符合规划设计要求，不是本轮开发的修复对象。禁止直接修改生成章节、chapters-fixed、publish 导出 txt、continuity report、publish-ready report、analysis json/md、short-story 生成结果或任何真实验证产生的业务结果文件来让验收通过。若发现问题，必须判断是单次内容波动还是系统性缺陷，并追溯到程序逻辑、Prompt、规则阈值、数据读取、状态传递、模型调用、LLM 输出解析或测试样例设计。
+
+01_design.md 受控变更原则：
+.ai_workflow/01_design.md 是 inkos 2.0：故事性大升级总体规划，是 02_todo.md、03_prompt.txt、preflight、review 的最高依据。常规研发循环不得修改它。只有用户明确发起“设计变更任务”并确认 design change proposal 后，才允许修改 01_design.md。如果本 prompt 或执行过程要求未授权修改 01_design.md，preflight 必须 REJECT_NEEDS_REWRITE；如果执行结果未授权修改 01_design.md，Codex review 必须 FAIL。
+
+不自动 commit 原则：
+本轮不得自动 commit。所有修改必须等待用户最终确认。

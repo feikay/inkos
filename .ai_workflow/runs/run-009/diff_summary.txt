@@ -1,0 +1,25 @@
+================================================================================
+DIFF SUMMARY — run-009
+================================================================================
+时间：2026-05-19
+
+## 源码变更
+无。未修改任何业务源码。
+
+## .ai_workflow 变更
+新增/更新文件：
+- .ai_workflow/reports/04_output_code_report.txt
+- .ai_workflow/reports/05_output_biz_report.txt
+- .ai_workflow/reports/06_output_biz_filspath.txt
+- .ai_workflow/reports/task5_resource_stage_closure_report.md
+- .ai_workflow/runs/run-009/ 目录及其所有文件
+
+## 业务输出变更（程序生成，非手工编辑）
+- my-novel/books/我使用系统当上美国总统3/chapters/0004_敲门人送来的破局录像.md（新章节）
+- my-novel/books/我使用系统当上美国总统3/chapters/index.json（新增 Ch4 条目）
+- my-novel/books/我使用系统当上美国总统3/reviews/resource-consistency/0004.report.json（新增）
+- my-novel/books/我使用系统当上美国总统3/reviews/resource-consistency/0004.report.md（新增）
+- my-novel/books/我使用系统当上美国总统3/story/runtime/chapter-0004.*（新运行时文件）
+
+## Git 状态
+工作区干净（write-next 命令生成的文件未纳入 git 追踪）。

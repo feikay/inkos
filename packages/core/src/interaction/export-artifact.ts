@@ -69,7 +69,7 @@ export async function buildExportArtifact(
   const book = await state.loadBookConfig(bookId);
   const chapters = options.approvedOnly
     ? index.filter((chapter) => chapter.status === "approved")
-    : index;
+    : index.filter((chapter) => chapter.status !== "blocked-resource-plan" && chapter.status !== "state-degraded");
 
   if (chapters.length === 0) {
     throw new Error("No chapters to export.");

@@ -1,0 +1,170 @@
+INFO  [inkos] 阶段：准备章节输入
+INFO  [writer] 阶段 0：生成章节意图卡（第4章）
+INFO  [writer] Resource Plan generated: explore_conversion_path
+INFO [llm] start stage=chapter-intent provider=custom model=doubao-seed-2.0-pro
+INFO  [inkos] streaming 30s, 0 chars (0 CJK)
+INFO  [inkos] streaming 60s, 1559 chars (1262 CJK)
+INFO [llm] done stage=chapter-intent provider=custom model=doubao-seed-2.0-pro input=20196 output=4121 total=24317 duration=75.8s
+INFO [llm] start stage=chapter-intent provider=custom model=doubao-seed-2.0-pro
+INFO  [inkos] streaming 30s, 0 chars (0 CJK)
+INFO  [inkos] streaming 60s, 1411 chars (1099 CJK)
+INFO [llm] done stage=chapter-intent provider=custom model=doubao-seed-2.0-pro input=20237 output=3945 total=24182 duration=77.1s
+INFO  [writer] chapter-intent resource plan injected
+INFO  [writer] 章节意图卡已写入：story/runtime/chapter-intents/0004.md
+INFO  [inkos] 阶段：撰写章节草稿
+INFO  [writer] writer resource plan injected
+INFO  [writer] 阶段 1：创作正文（第4章）
+INFO [llm] start stage=writer provider=custom model=doubao-seed-2.0-lite
+INFO  [inkos] streaming 30s, 1272 chars (916 CJK)
+INFO [llm] done stage=writer provider=custom model=doubao-seed-2.0-lite input=9551 output=2983 total=12534 duration=34.1s
+INFO  [writer] writer pre-scan passed
+WARN  [writer] Writer PAYOFF MODE：第4章 rewrite attempt 1，payoff 冲击层缺失
+INFO [llm] start stage=writer provider=custom model=doubao-seed-2.0-lite
+INFO  [inkos] streaming 30s, 0 chars (0 CJK)
+INFO [llm] done stage=writer provider=custom model=doubao-seed-2.0-lite input=2617 output=4647 total=7264 duration=43.2s
+INFO  [writer] rewrite decision [payoff-rewrite-attempt-1]: beforeWords=1220, afterWords=1648, accepted=true, rejectedReason=none
+WARN  [writer] Writer PAYOFF MODE：第4章 rewrite attempt 2，payoff 冲击层缺失
+INFO [llm] start stage=writer provider=custom model=doubao-seed-2.0-lite
+INFO [llm] done stage=writer provider=custom model=doubao-seed-2.0-lite input=2961 output=2965 total=5926 duration=26.7s
+WARN  [writer] rewrite decision [payoff-rewrite-attempt-2]: beforeWords=1648, afterWords=0, accepted=false, rejectedReason=empty-candidate
+WARN  [writer] Style guard：第4章触发自动重写（1项）
+INFO [llm] start stage=writer provider=custom model=doubao-seed-2.0-lite
+INFO [llm] done stage=writer provider=custom model=doubao-seed-2.0-lite input=1433 output=2911 total=4344 duration=23.1s
+INFO  [writer] rewrite decision [style-guard]: beforeWords=1648, afterWords=1665, accepted=true, rejectedReason=none
+WARN  [writer] Consistency guard：第4章重写后仍有断裂，触发二次重写（1项）
+INFO [llm] start stage=writer provider=custom model=doubao-seed-2.0-lite
+INFO  [inkos] streaming 30s, 0 chars (0 CJK)
+INFO [llm] done stage=writer provider=custom model=doubao-seed-2.0-lite input=1421 output=5022 total=6443 duration=38.9s
+INFO  [writer] rewrite decision [consistency-guard]: beforeWords=1665, afterWords=1736, accepted=true, rejectedReason=none
+INFO  [writer] 阶段 2：状态结算（第4章，1736字）
+INFO  [writer] 阶段 2a：提取第4章事实
+INFO [llm] start stage=writer provider=custom model=doubao-seed-2.0-lite
+INFO  [inkos] streaming 30s, 0 chars (0 CJK)
+INFO [llm] done stage=writer provider=custom model=doubao-seed-2.0-lite input=1796 output=4213 total=6009 duration=39.4s
+INFO  [writer] 阶段 2b：把观察结果回写到真相文件
+INFO [llm] start stage=writer provider=custom model=doubao-seed-2.0-lite
+INFO  [inkos] streaming 30s, 0 chars (0 CJK)
+INFO [llm] done stage=writer provider=custom model=doubao-seed-2.0-lite input=12005 output=7267 total=19272 duration=59.1s
+WARN  [writer] 后写校验：第4章 1 个错误，3 个警告
+WARN  [writer] [error] 禁止破折号: 出现了破折号「——」
+WARN  [writer] [warning] 转折词密度: 转折/惊讶标记词共2次（上限1次/1770字），明细："猛地"×2
+WARN  [writer] [warning] consistency-guard: 自动重写后仍需人工 review：节奏异常：连续长句过多，信息挤压导致节奏失衡。
+WARN  [writer] [warning] payoff-impact-missing: payoff 已发生但缺少关键冲击层（瞬间爆发点、爆点后收束、代价层、结果层）。
+WARN  [inkos] 检测到 1 条后写修补信号，审计前触发 spot-fix 修补
+INFO [llm] start stage=reviser provider=custom model=doubao-seed-2.0-pro
+INFO  [inkos] streaming 30s, 542 chars (307 CJK)
+INFO [llm] done stage=reviser provider=custom model=doubao-seed-2.0-pro input=7738 output=2850 total=10588 duration=42.2s
+INFO  [inkos] rewrite decision [pre-audit-spot-fix]: beforeWords=1736, afterWords=1735, accepted=true, rejectedReason=none
+INFO [llm] start stage=length-normalizer provider=custom model=doubao-seed-2.0-pro
+INFO  [inkos] streaming 30s, 472 chars (421 CJK)
+INFO [llm] done stage=length-normalizer provider=custom model=doubao-seed-2.0-pro input=3532 output=2260 total=5792 duration=36.7s
+INFO  [inkos] 审计前字数归一化：第4章 1735 -> 1217
+INFO  [inkos] 阶段：审计草稿
+INFO [llm] start stage=continuity-auditor provider=custom model=doubao-seed-2.0-pro
+INFO  [inkos] streaming 30s, 0 chars (0 CJK)
+INFO [llm] done stage=continuity-auditor provider=custom model=doubao-seed-2.0-pro input=11630 output=2104 total=13734 duration=36.9s
+INFO  [writer] 阶段 1c：资源引擎校验（第4章）
+WARN  [writer] resource-engine: resource plan violations detected (2), forcing blocking state
+INFO  [inkos] 阶段：落盘最终章节
+INFO  [inkos] 阶段：生成最终真相文件
+INFO [llm] start stage=chapter-analyzer provider=custom model=doubao-seed-2.0-pro
+INFO  [inkos] streaming 30s, 0 chars (0 CJK)
+INFO  [inkos] streaming 60s, 2104 chars (1539 CJK)
+INFO  [inkos] streaming 90s, 6466 chars (3597 CJK)
+INFO [llm] done stage=chapter-analyzer provider=custom model=doubao-seed-2.0-pro input=9695 output=8133 total=17828 duration=105.6s
+WARN  [writer] final resource-plan validation failed: closingBalances 民望值 expected 100, actual 106；closing-balance-mismatch: expected 100 actual 106
+WARN  [writer] resource-engine: skipped particle_ledger update to avoid pollution
+INFO  [inkos] 阶段：校验真相文件变更
+INFO [llm] start stage=state-validator provider=custom model=doubao-seed-2.0-pro
+INFO  [inkos] streaming 30s, 0 chars (0 CJK)
+INFO [llm] done stage=state-validator provider=custom model=doubao-seed-2.0-pro input=2547 output=2743 total=5290 duration=45.8s
+WARN  [inkos] 状态校验：第4章发现 3 条警告
+WARN  [inkos]   [unsupported_change] State card lists "lack of required state senator endorsement for election" as a current restriction, which is not mentioned in the chapter text
+WARN  [inkos]   [minor] Hook 001's note that the old copper medal can boost skill effects is extrapolated from narrative context, not explicitly confirmed
+WARN  [inkos]   [minor] Hook 006's description of Su Rui's black material as core evidence against the Rodman consortium is a reasonable extrapolation not explicitly stated in the chapter
+INFO  [inkos] 阶段：章节意图一致性审核
+INFO  [inkos] Intent alignment: N/A/100 SKIPPED_DUE_RESOURCE_FAILURE
+WARN  [writer] resource-engine: final resource closure guard forced blocked-resource-plan
+[
+  {
+    "chapterNumber": 4,
+    "title": "敲门人送来的破局录像",
+    "wordCount": 1217,
+    "auditResult": {
+      "passed": false,
+      "issues": [
+        {
+          "severity": "warning",
+          "category": "设定冲突",
+          "description": "待审章节新增「林默被汤姆推倒摔断左臂」的伤情设定，前文第1-3章及所有官方状态设定文档均未提及该伤情，与既有设定冲突。",
+          "suggestion": "删除该伤情描述，可保留前文提及的虎口受伤的设定，保持前后一致性。"
+        },
+        {
+          "severity": "warning",
+          "category": "配角行为逻辑",
+          "description": "苏芮作为主动上门寻求合作的潜在盟友，毫无理由撞门的行为不符合其冷静聪慧的人设，也不符合其寻求合作的行为动机，逻辑不通。",
+          "suggestion": "修改为苏芮正常敲门进入的情节，契合本章控制输入中「老旧的木门被轻轻敲响，穿冲锋衣戴黑框眼镜的苏芮站在门口」的既定设定。"
+        },
+        {
+          "severity": "warning",
+          "category": "段落等长",
+          "description": "段落长度变异系数仅0.131（阈值<0.15），段落长度过于均匀，呈现AI生成特征",
+          "suggestion": "增加段落长度差异：短段落用于节奏加速或冲击，长段落用于沉浸描写"
+        },
+        {
+          "severity": "critical",
+          "category": "resource-plan",
+          "description": "RESOURCE_PLAN_NOT_CLOSED: closingBalances 民望值 expected 100, actual 106",
+          "suggestion": "Resource Plan 是本章资源真相；修复正文资源链并二次验证通过前，不得更新 state/ledger，也不得标记 ready-for-review。"
+        },
+        {
+          "severity": "critical",
+          "category": "resource-plan",
+          "description": "RESOURCE_PLAN_NOT_CLOSED: closing-balance-mismatch: expected 100 actual 106",
+          "suggestion": "Resource Plan 是本章资源真相；修复正文资源链并二次验证通过前，不得更新 state/ledger，也不得标记 ready-for-review。"
+        },
+        {
+          "severity": "critical",
+          "category": "resource-plan",
+          "description": "RESOURCE_PLAN_NOT_CLOSED: closingBalances 民望值 expected 100, actual 106",
+          "suggestion": "Resource Plan 是本章资源真相；修复正文资源链并二次验证通过前，不得更新 state/ledger，也不得标记 ready-for-review。"
+        },
+        {
+          "severity": "critical",
+          "category": "resource-plan",
+          "description": "RESOURCE_PLAN_NOT_CLOSED: closing-balance-mismatch: expected 100 actual 106",
+          "suggestion": "Resource Plan 是本章资源真相；修复正文资源链并二次验证通过前，不得更新 state/ledger，也不得标记 ready-for-review。"
+        },
+        {
+          "severity": "critical",
+          "category": "resource-consistency",
+          "description": "RESOURCE_CONSISTENCY_NOT_CLOSED: Resource Engine blocking=true",
+          "suggestion": "资源账本闭合前不得标记 ready-for-review；请修复正文资源链或重写本章。"
+        }
+      ],
+      "summary": "本章整体符合卷纲规划、人设设定与数值规则，爽点明确伏笔回收到位，仅存在2处轻微瑕疵，修改后可正式使用。"
+    },
+    "revised": true,
+    "status": "blocked-resource-plan",
+    "lengthWarnings": [],
+    "lengthTelemetry": {
+      "target": 1200,
+      "softMin": 1037,
+      "softMax": 1363,
+      "hardMin": 873,
+      "hardMax": 1527,
+      "countingMode": "zh_chars",
+      "writerCount": 1736,
+      "postWriterNormalizeCount": 1217,
+      "postReviseCount": 0,
+      "finalCount": 1217,
+      "normalizeApplied": true,
+      "lengthWarning": false
+    },
+    "tokenUsage": {
+      "promptTokens": 52888,
+      "completionTokens": 33009,
+      "totalTokens": 85897
+    }
+  }
+]

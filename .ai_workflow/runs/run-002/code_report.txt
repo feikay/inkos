@@ -1,0 +1,50 @@
+================================================================================
+CODE REPORT — 5.7B-2 No-Change Resource Closure 判定语义实现
+================================================================================
+
+## 修改文件清单
+
+| 文件 | 修改类型 | 行数 |
+|------|---------|------|
+| packages/core/src/agents/resource-consistency.ts | 新增类型+函数+字段 | +30 |
+| packages/core/src/pipeline/runner.ts | 调用+报告输出 | +35 |
+| packages/core/src/index.ts | 导出 | +2 |
+| packages/core/src/__tests__/resource-consistency.test.ts | 新增测试 | +110 |
+
+## 具体修改
+
+### 1. resource-consistency.ts
+
+- 新增 `ClosureStatus` 类型（4个值）：
+  - `"no_change_closed"` — 已检查，确认无资源变化
+  - `"normal_closed"` — 有资源事件且资源计算闭合
+  - `"not_checked"` — 缺少必要检查或 Resource Plan
+  - `"resource_failed"` — 资源计算失败、阻断或真实异常
+
+- 新增 `classifyClosureStatus()` 函数：基于 hasResourcePlan / hasEvents / hasIssues /
+  hasResourcePlanViolations / blocking / status 六项输入计算 closureStatus
+
+- `ResourceConsistencyPipelineResult` 接口新增 `closureStatus: ClosureStatus` 必填字段
+
+### 2. runner.ts
+
+- 导入 `classifyClosureStatus` 和 `ClosureStatus`
+- `runResourceConsistencyPass()` 中：
+  - 零事件快速路径：计算并返回 closureStatus
+  - 零 issue 快速路径：计算并返回 closureStatus
+  - 最终返回：计算并返回 closureStatus
+- `writeResourceConsistencyReport()`：
+  - 参数新增 `closureStatus: ClosureStatus`
+  - JSON report 新增 `closureStatus` 字段
+  - MD report 新增 `- Closure Status：<value>` 行
+  - 程序账本 JSON 新增 `closureStatus` 字段
+- 3 处外部调用 `writeResourceConsistencyReport()` 均传递 `closureStatus`
+
+### 3. index.ts
+
+- 导出 `classifyClosureStatus` 函数
+- 导出 `ClosureStatus` 类型
+
+### 4. resource-consistency.test.ts
+
+- 新增 `describe("classifyClosureStatus")` 块，含 10 个测试用例

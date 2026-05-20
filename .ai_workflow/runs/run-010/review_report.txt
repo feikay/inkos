@@ -1,0 +1,29 @@
+结论：MANUAL_CONFIRM_REQUIRED
+
+审查摘要：
+- preflight 状态：已通过，结论为 `APPROVE_TO_EXECUTE`。
+- 用户批准状态：用户明确要求“再做一次 no-change 验证”，可视为批准 run-010；执行报告未单独写批准来源。
+- Design Anchor 对齐：对齐章节生成层、审稿增强层、发布优化层、Resource Engine 与故事性升级的关系、No-Change Resource Closure 设计目标。
+- 当前任务推进情况：实际后台运行了真实命令，但因 Ch4 为 `blocked-resource-plan` 在入口处失败。
+- 03_prompt.txt 完成情况：未完成核心目标；没有生成新章节或新 report，未观察到 `closureStatus: "no_change_closed"`。
+- 01_design.md 是否被未授权修改：未发现。
+- 是否直接修改业务验证输出：未发现。
+- 真实业务验证是否实际运行新输出：实际运行了程序，但未产生新输出。
+- 后台命令记录：
+  - PID 文件：`.ai_workflow/runs/run-010/logs/write-next.pid`
+  - log 文件：`.ai_workflow/runs/run-010/logs/write-next.log`
+  - exit 文件：`.ai_workflow/runs/run-010/logs/write-next.exit`，值为 `1`
+- git status 摘要：`M .gitignore`、`D packages/core/logs/llm-usage.jsonl`；二者为用户管理的日志忽略处理。
+- git diff --stat 摘要：unstaged `.gitignore | 3 ++-`；staged `packages/core/logs/llm-usage.jsonl | 714 deletions(-)`。
+
+问题清单：
+- P1：no-change 真实验证未完成。没有新 resource consistency report，因此没有 `no_change_closed` 证据。
+- P1：验证书最新 Ch4 被 Resource Engine 阻断，必须先处理 Ch4 或更换验证书。
+- P2：本轮确认了 Resource Engine 防污染阻断有效，但这不能替代 no-change closure 验证。
+
+下一轮建议：
+- 用户选择：修复/重写 Ch4 后再验；换书验；创建受控临时真实验证 book/fixture；或接受 `TASK5_PASS_WITH_RECORDED_GAP` 关闭任务五。
+
+提交状态：
+- 不自动 commit。
+- 当前不是 PASS，不输出 git add / git commit 命令。

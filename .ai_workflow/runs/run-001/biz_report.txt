@@ -1,0 +1,39 @@
+================================================================================
+BIZ REPORT — 5.7B-1 No-Change Resource Closure 盘点
+================================================================================
+
+## 业务问题
+
+系统流小说中，并非每章都有资源变化（获得、消耗、兑换、解锁）。对话章、日常章、
+过渡章、纯情绪章可能完全没有资源事件。当前 inkos 的 Resource Engine 对这些"无资源
+变化"章节的处理存在语义缺口：系统能正确处理（PASS，不阻断），但无法在下游明确告
+诉 publish-ready / continuity / review "本章已检查，确认无资源变化"。
+
+## 业务风险
+
+1. **"无资源变化"可能被误读为"检查缺失"**：如果下游消费者（人工或程序）看不到
+   明确的 closure 标记，可能认为资源检查被跳过了。
+
+2. **no_resource_change plan 下的意外资源事件被静默**：如果 Resource Plan 误判章节
+   为 no-change，但 LLM 仍然写了资源事件，当前系统不报错也不警告。
+
+3. **旧书无 Resource Plan 时完全缺失 closure 语义**：旧书可能在 2.0 升级前没有
+   Resource Plan，这些书的 no-change 章节在报告中 closureSource 为 "not_applicable"。
+
+## 业务影响评估
+
+- 影响范围：所有使用 Resource Engine 的书籍
+- 严重程度：低至中（不会导致错误发布，但缺少质量门）
+- 修复优先级：中（不阻塞发布，但需要在 5.7B-4 补齐）
+
+## 业务验证路径
+
+1. 选取 no-change 章节样本 → 查看 resource consistency report
+2. 确认 report 中 closureSource/closureRequirement/noChangeInferred 字段
+3. 验证下游 publish-ready 是否正确消费这些字段
+4. 验证真实异常章节仍然被正确阻断
+
+## 结论
+
+当前状态可接受（不会错误发布资源污染章节）。补齐 closure 语义后，系统将从
+"不报错"升级到"明确声明已闭合"。

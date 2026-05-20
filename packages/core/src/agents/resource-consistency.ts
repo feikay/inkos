@@ -391,18 +391,36 @@ export function parseResourceRules(bookRules = "", currentLedger = "", currentSt
     }
   };
 
-  for (const resource of DEFAULT_RESOURCE_TYPES) {
-    addResource(resource);
-  }
-  for (const [alias, canonical] of Object.entries(RESOURCE_ALIASES)) {
-    addResource(canonical, { aliases: [alias] });
+  // Extract explicitly declared resource types from book_rules first
+  const resourceTypesBlock = bookRules.match(/resourceTypes\s*:\s*\n((?:\s*-\s*[^\n]+\n?)+)/iu)?.[1];
+  const declaredTypes = new Set<string>();
+  if (resourceTypesBlock) {
+    for (const line of resourceTypesBlock.split(/\n/u)) {
+      const value = line.replace(/^\s*-\s*/u, "").trim();
+      if (value) declaredTypes.add(value);
+    }
   }
 
-  const resourceTypes = bookRules.match(/resourceTypes\s*:\s*\n((?:\s*-\s*[^\n]+\n?)+)/iu)?.[1];
-  if (resourceTypes) {
-    for (const line of resourceTypes.split(/\n/u)) {
-      const value = line.replace(/^\s*-\s*/u, "").trim();
-      if (value) addResource(value);
+  const hasExplicitDeclaration = declaredTypes.size > 0;
+  // Only inject defaults that match the book's declared resourceTypes;
+  // if no resourceTypes declared, fall back to all defaults (backward compatible)
+  for (const resource of DEFAULT_RESOURCE_TYPES) {
+    if (!hasExplicitDeclaration || declaredTypes.has(resource)) {
+      addResource(resource);
+    }
+  }
+  for (const [alias, canonical] of Object.entries(RESOURCE_ALIASES)) {
+    if (!hasExplicitDeclaration || declaredTypes.has(canonical) || declaredTypes.has(alias)) {
+      addResource(canonical, { aliases: [alias] });
+    }
+  }
+
+  // Add declared types that aren't in DEFAULT_RESOURCE_TYPES
+  if (resourceTypesBlock) {
+    for (const type of declaredTypes) {
+      if (!DEFAULT_RESOURCE_TYPES.includes(type as typeof DEFAULT_RESOURCE_TYPES[number])) {
+        addResource(type);
+      }
     }
   }
 
@@ -2032,11 +2050,32 @@ function collectBalanceJumpEvents(text: string, resourceTypes: ReadonlyArray<str
   }
 }
 
+// Patterns that indicate ordinary financial narration (prices, fees, salaries, transfers)
+// rather than system-panel resource balance display
+const NARRATIVE_FINANCIAL_PATTERNS = [
+  /价格|单价|总价|订单金额|消费金额|打车费|外卖费|快递费|运费|房租|水电费|物业费|餐费|路费|油费|过路费/,
+  /花了.{0,4}元|付了.{0,4}元|转账|汇款|工资|薪水|奖金.{0,4}元|报销|找零|零钱|找.{0,4}元/,
+  /收银|买单|结账|AA制|分摊|凑钱|垫付|预付款|订金|押金|退款|到付/,
+  /购买|买了|卖(?:了|出|给)|售价|成交价|市场价|成本|亏了|赚了.{0,4}元/,
+  /\d+元[以之]?内|\d+块[以之]?内|\d+块钱|\d+毛钱|\d+分钱/,
+];
+
+function isNarrativeFinancialContext(textWindow: string): boolean {
+  const hasFinancialPattern = NARRATIVE_FINANCIAL_PATTERNS.some((p) => p.test(textWindow));
+  if (!hasFinancialPattern) return false;
+  // System panel / resource balance context overrides narrative financial
+  const hasSystemContext = /(系统面板|系统商店|系统商城|兑换|资源余额|资源面板|当前民望|民望值|灵石|金币|银两|气血|灵力|修为|功德|好感度|技能点|系统积分)/u.test(textWindow);
+  return !hasSystemContext;
+}
+
 function detectBalanceJumpResource(sentence: string, resourceTypes: ReadonlyArray<string>): string | undefined {
   if (!/(民望|民望值|系统面板|面板|数值|当前值|余额|兑换|资源|积分|灵石|金币|联邦币|技能点|银行|手机|账户|入账|到账|现金)/u.test(sentence)) {
     return undefined;
   }
   if (/(第\s*110\s*街|110号公路|110栋|110号|三号仓库|第\s*\d+\s*章|电话|房号|日期|时间)/u.test(sentence)) {
+    return undefined;
+  }
+  if (isNarrativeFinancialContext(sentence)) {
     return undefined;
   }
   return inferResourceForNumericContext(sentence, undefined, resourceTypes) ?? undefined;
@@ -2050,7 +2089,11 @@ function inferResourceForNumericContext(
   if (/(当前民望|民望值|民望余额|系统民望|面板[^。！？!?；;\n]{0,12}民望|民望[^。！？!?；;\n]{0,12}(?:停在|定格|跳到|显示|变成|余额))/u.test(textWindow)) {
     return "民望值";
   }
-  if (/(手机|银行|账户|银行卡|银行APP|银行短信|余额页面|入账|到账|现金|联邦币|联邦现金|账户余额|银行余额|手机余额|现金余额|钱)/u.test(textWindow)) {
+  if (/(联邦币|联邦现金)/u.test(textWindow)) {
+    return "联邦币";
+  }
+  if (/(手机|银行|账户|银行卡|银行APP|银行短信|余额页面|入账|到账|现金|账户余额|银行余额|手机余额|现金余额|钱)/u.test(textWindow)) {
+    if (isNarrativeFinancialContext(textWindow)) return null;
     return "联邦币";
   }
   if (/技能点/u.test(textWindow)) return "技能点";
@@ -2082,6 +2125,10 @@ function collectSentenceBalanceEvents(text: string, resourceTypes: ReadonlyArray
     }
     const balance = sentence.match(new RegExp(`(?:余额|剩余|正好余|余)\\s*(${NUMBER_SOURCE})\\s*(?:点|元)?`, "iu"));
     if (balance?.[1] && /余额|剩余|正好余|余/u.test(sentence) && /民望|余额|兑换|联邦币|现金/u.test(sentence)) {
+      if (isNarrativeFinancialContext(sentence)) {
+        offset += sentence.length;
+        continue;
+      }
       const resource = inferResourceForNumericContext(sentence, lastResource, resourceTypes);
       if (!resource) {
         offset += sentence.length;

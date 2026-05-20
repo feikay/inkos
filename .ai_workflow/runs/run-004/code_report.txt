@@ -1,0 +1,35 @@
+================================================================================
+CODE REPORT — run-004 (5.7B-3)
+================================================================================
+
+## 执行摘要
+
+5.7B-3 目标：补齐 no-change closure report 输出。复核发现 closureStatus 在 5.7B-2 已完整输出到 report JSON/MD/Program Ledger。本轮仅补充 pipeline 集成测试的 closureStatus 断言，无源码修改。
+
+## 修改清单
+
+文件：packages/core/src/__tests__/pipeline-runner.test.ts（+8 行）
+
+4 个已有资源报告测试中，各新增 1 个 type 字段声明和 1 个断言：
+1. resource_failed 场景 → `expect(resourceReport.closureStatus).toBe("resource_failed")`
+2. rewrite recovery 场景 → `expect(resourceReport.closureStatus).toBe("normal_closed")`
+3. defer_exchange fallback 场景 → `expect(resourceReport.closureStatus).toBe("normal_closed")`
+4. template patch 场景 → `expect(resourceReport.closureStatus).toBe("normal_closed")`
+
+## 当前 closureStatus 数据流（无变化）
+
+classifyClosureStatus({ hasResourcePlan, hasEvents, hasIssues, hasResourcePlanViolations, blocking, status })
+  → ClosureStatus ("no_change_closed" | "normal_closed" | "not_checked" | "resource_failed")
+  → ResourceConsistencyPipelineResult.closureStatus
+  → writeResourceConsistencyReport({ ..., closureStatus })
+  → report JSON: { closureStatus }
+  → report MD: `Closure Status：${closureStatus}`
+  → Program Ledger JSON in MD: { closureStatus }
+
+## 测试结果
+
+pnpm --filter @actalk/inkos-core test -- resource-consistency pipeline-runner
+→ 85 files, 1072 tests — ALL PASSED
+
+pnpm typecheck
+→ 3 packages — ALL PASSED

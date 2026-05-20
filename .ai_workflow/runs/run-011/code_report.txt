@@ -1,0 +1,29 @@
+=== CODE REPORT (run-011) ===
+
+Status: INVENTORY_ONLY (no code changes)
+
+本轮为盘点轮（5.8A），不修改业务源码。以下为只读源码分析摘要。
+
+FILES INSPECTED:
+  - packages/core/src/agents/resource-consistency.ts (全文件)
+  - packages/core/src/agents/resource-plan.ts (全文件)
+  - packages/core/src/pipeline/runner.ts (关键段落)
+  - packages/core/src/pipeline/chapter-persistence.ts (关键段落)
+  - packages/core/src/agents/fanqie-quality.ts (全文件)
+  - packages/core/src/interaction/export-artifact.ts (全文件)
+  - packages/cli/src/commands/review.ts (publish-ready 段落)
+  - scripts/fanqie/write-publish-export.mjs (grep 分析)
+
+CODE QUALITY ASSESSMENT:
+  - Resource Engine 核心逻辑正确（classifyClosureStatus / validateResourceMath）
+  - 缺陷集中在"全局默认注入"和"叙事数字过滤"两个抽象层
+  - buildFallbackRecoveryPlan 缺少 schema/mode 入参（参数缺口）
+  - publish-ready 管线缺少资源报告读取步骤（流程缺口）
+
+NEXT ROUND FILES TO MODIFY:
+  1. resource-consistency.ts — 注入 gate + 叙事数字过滤
+  2. resource-plan.ts — 新增 system_bootstrap / resource_rule_reveal mode
+  3. runner.ts — fallback recovery schema/mode gate
+  4. fanqie-quality.ts — publish_blocked_by_resource 字段
+  5. export-artifact.ts — blocked-resource-plan 过滤
+  6. review.ts (CLI) — publish-ready 资源门禁

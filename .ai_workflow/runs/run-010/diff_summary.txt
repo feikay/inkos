@@ -1,0 +1,23 @@
+================================================================================
+DIFF SUMMARY — run-010
+================================================================================
+时间：2026-05-19
+
+## 源码变更
+无。
+
+## .ai_workflow 变更
+新增/更新：
+- .ai_workflow/reports/03_preflight_review.txt
+- .ai_workflow/reports/04_output_code_report.txt
+- .ai_workflow/reports/05_output_biz_report.txt
+- .ai_workflow/reports/06_output_biz_filspath.txt
+- .ai_workflow/reports/task5_no_change_real_validation_report.md
+- .ai_workflow/runs/run-010/ 目录及全部文件
+
+## 业务输出变更
+无。write-next 在管线入口处失败，未生成新章节或报告。
+
+## Git 状态
+- M .gitignore（用户管理的日志忽略规则）
+- D packages/core/logs/llm-usage.jsonl（用户管理的日志文件）

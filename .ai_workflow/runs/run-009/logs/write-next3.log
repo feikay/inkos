@@ -1,0 +1,105 @@
+INFO  [inkos] 阶段：准备章节输入
+INFO  [writer] 阶段 0：生成章节意图卡（第4章）
+INFO  [writer] Resource Plan generated: explore_conversion_path
+INFO [llm] start stage=chapter-intent provider=custom model=doubao-seed-2.0-pro
+INFO  [inkos] streaming 30s, 307 chars (221 CJK)
+INFO [llm] done stage=chapter-intent provider=custom model=doubao-seed-2.0-pro input=20196 output=3013 total=23209 duration=54.1s
+INFO [llm] start stage=chapter-intent provider=custom model=doubao-seed-2.0-pro
+INFO  [inkos] streaming 30s, 0 chars (0 CJK)
+INFO  [inkos] streaming 60s, 2485 chars (1988 CJK)
+INFO [llm] done stage=chapter-intent provider=custom model=doubao-seed-2.0-pro input=20223 output=3684 total=23907 duration=63.9s
+INFO  [writer] chapter-intent resource plan injected
+INFO  [writer] 章节意图卡已写入：story/runtime/chapter-intents/0004.md
+INFO  [inkos] 阶段：撰写章节草稿
+INFO  [writer] writer resource plan injected
+INFO  [writer] 阶段 1：创作正文（第4章）
+INFO [llm] start stage=writer provider=custom model=doubao-seed-2.0-lite
+INFO  [inkos] streaming 30s, 1559 chars (1191 CJK)
+INFO [llm] done stage=writer provider=custom model=doubao-seed-2.0-lite input=9528 output=3209 total=12737 duration=30.9s
+WARN  [writer] writer pre-scan detected resource plan violation: 正文出现1000联邦币或一千现金
+WARN  [writer] writer rewrite due to resource plan violation
+INFO [llm] start stage=writer provider=custom model=doubao-seed-2.0-lite
+INFO  [inkos] streaming 30s, 740 chars (469 CJK)
+INFO [llm] done stage=writer provider=custom model=doubao-seed-2.0-lite input=9628 output=3228 total=12856 duration=35.1s
+INFO  [writer] rewrite decision [resource-plan-prescan]: beforeWords=1172, afterWords=1071, accepted=true, rejectedReason=none
+INFO  [writer] writer pre-scan passed after rewrite
+WARN  [writer] Writer PAYOFF MODE：第4章 rewrite attempt 1，payoff 尚未真正兑现
+INFO [llm] start stage=writer provider=custom model=doubao-seed-2.0-lite
+INFO  [inkos] streaming 30s, 1728 chars (1306 CJK)
+INFO [llm] done stage=writer provider=custom model=doubao-seed-2.0-lite input=2509 output=4222 total=6731 duration=33.4s
+WARN  [writer] rewrite decision [payoff-rewrite-attempt-1]: beforeWords=1071, afterWords=0, accepted=false, rejectedReason=empty-candidate
+WARN  [writer] Style guard：第4章触发自动重写（1项）
+INFO [llm] start stage=writer provider=custom model=doubao-seed-2.0-lite
+INFO [llm] done stage=writer provider=custom model=doubao-seed-2.0-lite input=1042 output=1902 total=2944 duration=13.6s
+INFO  [writer] rewrite decision [style-guard]: beforeWords=1071, afterWords=1107, accepted=true, rejectedReason=none
+WARN  [writer] Consistency guard：第4章重写后仍有断裂，触发二次重写（1项）
+INFO [llm] start stage=writer provider=custom model=doubao-seed-2.0-lite
+INFO [llm] done stage=writer provider=custom model=doubao-seed-2.0-lite input=1031 output=3727 total=4758 duration=26.8s
+INFO  [writer] rewrite decision [consistency-guard]: beforeWords=1107, afterWords=1208, accepted=true, rejectedReason=none
+INFO  [writer] 阶段 2：状态结算（第4章，1208字）
+INFO  [writer] 阶段 2a：提取第4章事实
+INFO [llm] start stage=writer provider=custom model=doubao-seed-2.0-lite
+INFO  [inkos] streaming 30s, 0 chars (0 CJK)
+INFO [llm] done stage=writer provider=custom model=doubao-seed-2.0-lite input=1412 output=5968 total=7380 duration=50.5s
+INFO  [writer] 阶段 2b：把观察结果回写到真相文件
+INFO [llm] start stage=writer provider=custom model=doubao-seed-2.0-lite
+INFO  [inkos] streaming 30s, 1483 chars (660 CJK)
+INFO [llm] done stage=writer provider=custom model=doubao-seed-2.0-lite input=11519 output=4894 total=16413 duration=35.9s
+WARN  [writer] 后写校验：第4章 2 个错误，3 个警告
+WARN  [writer] [error] 禁止破折号: 出现了破折号「——」
+WARN  [writer] [warning] 转折词密度: 转折/惊讶标记词共2次（上限1次/1230字），明细："忽然"×1、"猛地"×1
+WARN  [writer] [warning] action-density-low: 认知链的行为/感知密度过低："掀开樟木箱盖，樟脑香裹着旧纸的霉味漫出来，蹭过林默的手背。"
+WARN  [writer] [warning] style-guard: 开头检测：首句缺少明确动作、异象或事件触发：“掀开樟木箱盖，樟脑香裹着旧纸的霉味漫出来，蹭过林默的手背。”。
+WARN  [writer] [error] payoff-missing: 本章 promised payoff 完全未发生：门被强行打开。
+WARN  [inkos] 检测到 2 条后写修补信号，审计前触发 spot-fix 修补
+INFO [llm] start stage=reviser provider=custom model=doubao-seed-2.0-pro
+INFO  [inkos] streaming 30s, 0 chars (0 CJK)
+INFO [llm] done stage=reviser provider=custom model=doubao-seed-2.0-pro input=7381 output=4385 total=11766 duration=57.8s
+INFO  [inkos] rewrite decision [pre-audit-spot-fix]: beforeWords=1208, afterWords=1262, accepted=true, rejectedReason=none
+INFO  [inkos] 阶段：审计草稿
+INFO [llm] start stage=continuity-auditor provider=custom model=doubao-seed-2.0-pro
+INFO  [inkos] streaming 30s, 0 chars (0 CJK)
+INFO [llm] done stage=continuity-auditor provider=custom model=doubao-seed-2.0-pro input=11648 output=3060 total=14708 duration=51.6s
+INFO  [writer] 阶段 1c：资源引擎校验（第4章）
+WARN  [inkos] Chapter 0004 payoff still missing: 本章 promised payoff 完全未发生：门被强行打开。. State update skipped.
+[
+  {
+    "chapterNumber": 4,
+    "title": "未剪辑的视频",
+    "wordCount": 1262,
+    "revised": true,
+    "status": "audit-failed",
+    "auditResult": {
+      "passed": false,
+      "issues": [
+        {
+          "severity": "critical",
+          "category": "failed-write-payoff-missing",
+          "description": "Chapter 0004 payoff still missing: 本章 promised payoff 完全未发生：门被强行打开。. State update skipped.",
+          "suggestion": "必须立刻补一个 payoff 场景，本章至少要出现部分兑现。"
+        }
+      ],
+      "summary": "Chapter 0004 payoff still missing: 本章 promised payoff 完全未发生：门被强行打开。. State update skipped."
+    },
+    "lengthWarnings": [],
+    "lengthTelemetry": {
+      "target": 1200,
+      "softMin": 1037,
+      "softMax": 1363,
+      "hardMin": 873,
+      "hardMax": 1527,
+      "countingMode": "zh_chars",
+      "writerCount": 1208,
+      "postWriterNormalizeCount": 1262,
+      "postReviseCount": 0,
+      "finalCount": 1262,
+      "normalizeApplied": false,
+      "lengthWarning": false
+    },
+    "tokenUsage": {
+      "promptTokens": 54286,
+      "completionTokens": 28627,
+      "totalTokens": 82913
+    }
+  }
+]

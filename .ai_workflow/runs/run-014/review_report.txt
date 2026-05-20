@@ -1,0 +1,29 @@
+结论：PASS
+
+审查摘要：
+- preflight 状态：PASS。run-014 preflight 输出 `APPROVE_TO_EXECUTE`。
+- 用户批准状态：PASS。用户请求继续按模板审查本轮结果；run-014 已按当前 prompt 执行。
+- Design Anchor 对齐：PASS。本轮只补齐 publish-ready 资源门禁测试，符合章节生成层、审稿增强层、发布优化层与 Resource Engine 目标。
+- 当前任务推进情况：PASS。已补齐 `blocked-resource-plan` chapter index 状态读取测试，复核 run-013 的 `state-degraded` 与 schema-driven bootstrap 覆盖。
+- 03_prompt.txt 完成情况：PASS。本轮没有改业务逻辑，只导出 `readChapterIndexStatus` 供测试调用，并新增 2 个 helper 级单元测试。
+- 01_design.md 是否被未授权修改：否。`git diff -- .ai_workflow/01_design.md` 为空。
+- 是否直接修改业务验证输出：否。本轮未运行新的真实业务验证，也未编辑业务输出。
+- 真实业务验证是否实际运行新输出：N/A。本轮 prompt 允许不跑新的真实业务验证。
+- 后台命令记录：
+  - PID 文件：N/A
+  - log 文件：N/A
+  - exit 文件：N/A
+- git status 摘要：8 个源码/测试文件修改，均属于 run-012/run-014 任务范围。
+- git diff --stat 摘要：`review-continuity-verdict.test.ts` 新增 51 行；累计 8 个文件，539 insertions / 17 deletions。
+
+问题清单：
+- 无阻断问题。
+- Codex 复跑 `pnpm --filter @actalk/inkos test -- review-continuity-verdict` 时 Vitest 仍执行整包，遇到无关 TUI dashboard 超时；随后用目标文件命令 `pnpm --filter @actalk/inkos exec vitest run src/__tests__/review-continuity-verdict.test.ts` 复跑通过，13/13 tests passed。
+- `blocked-resource-plan` 覆盖为 helper 级测试，结合代码审查确认 publish-ready 对 helper 返回值直接等值判断并返回 `BLOCKED_BY_RESOURCE`。后续重构时可补更完整的 CLI 集成测试。
+
+下一轮建议：
+- 用户确认后提交本轮 5.8 系列改动。
+- 提交后进入任务六：story-effectiveness review 与 Resource Engine / chapter_intent 的衔接复核。
+
+提交状态：
+- 不自动 commit。

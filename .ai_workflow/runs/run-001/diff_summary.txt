@@ -1,0 +1,23 @@
+================================================================================
+DIFF SUMMARY — 5.7B-1 执行 diff 摘要
+================================================================================
+
+## 本轮修改文件
+无代码修改。本轮仅盘点，不修改业务代码。
+
+## git status 快照
+M docs/inkos_v2.0.md（非本任务相关）
+?? .ai_workflow/（AI 协作承载层，本任务新增）
+
+## 新增文件
+- .ai_workflow/reports/03_preflight_review.txt
+- .ai_workflow/reports/04_output_code_report.txt
+- .ai_workflow/reports/05_output_biz_report.txt
+- .ai_workflow/reports/06_output_biz_filspath.txt
+- .ai_workflow/reports/resource_no_change_closure_inventory.md
+- .ai_workflow/runs/run-001/preflight_review.txt
+- .ai_workflow/runs/run-001/code_report.txt
+- .ai_workflow/runs/run-001/biz_report.txt
+- .ai_workflow/runs/run-001/biz_filespath.txt
+- .ai_workflow/runs/run-001/diff_summary.txt
+- .ai_workflow/runs/run-001/resource_no_change_closure_inventory.md

@@ -1,0 +1,55 @@
+CODE REPORT — Run-013 (5.8B-FIX)
+=================================
+
+Timestamp: 2026-05-20 | Branch: feature/story_up2.0_methods
+Status: IMPLEMENTATION_COMPLETE
+
+1. FILES MODIFIED (this run)
+==============================
+
+| File | +Lines | -Lines |
+|------|--------|--------|
+| packages/core/src/agents/resource-plan.ts | +164 | -1 |
+| packages/cli/src/commands/review.ts | +69 | -1 |
+| packages/core/src/__tests__/resource-consistency.test.ts | +170 | -1 |
+| TOTAL (run-013 only) | +88 | -3 |
+
+2. FIX SUMMARY
+================
+
+Fix 1 — Schema-driven system_bootstrap balance_claim
+  File: resource-plan.ts, buildSystemBootstrapPlanIfMatched()
+  Removed: params.openingBalances["民望值"] / ["联邦币"] hardcoded checks
+  Replaced: Object.keys(params.resourceRules.resources).map(...) for all
+    declared resources → balance_claim events generated per resource
+
+Fix 2 — Chapter index status gate in publish-ready
+  File: review.ts, runPublishReadyChapter()
+  Added: readChapterIndexStatus() reading chapters/index.json
+  Added: ChapterIndexEntry interface
+  Added: chapter index status check for "state-degraded" / "blocked-resource-plan"
+  Added: distinct warning for chapter index block
+
+3. TEST RESULTS
+================
+
+Core: 85/85 files, 1084/1084 tests (0 failures)
+CLI:  36/36 files,  198/198 tests (0 failures)
+Total: 1282 tests passed
+
+New tests: 1 (non-civic schema: 灵石/金币 bootstrap balance_claim)
+Strengthened tests: 1 (system_bootstrap now asserts mode + schema-driven events)
+
+4. BUILD
+=========
+
+pnpm build: passes
+pnpm typecheck: passes
+
+5. SUGGESTED COMMIT
+=====================
+
+git add packages/core/src/agents/resource-plan.ts \
+        packages/cli/src/commands/review.ts \
+        packages/core/src/__tests__/resource-consistency.test.ts
+git commit -m "fix(core): make system_bootstrap balance_claim schema-driven, add chapter index status gate to publish-ready"

@@ -1,0 +1,39 @@
+结论：PASS_WITH_RECORDED_GAP
+
+审查摘要：
+- 当前复核对象：任务五点七 B：No-Change Resource Closure 无资源变化章节的资源闭合机制。
+- Design Anchor 对齐：对齐。任务成果服务于 `01_design.md` 中 Resource Engine 确定性数值底座、No-Change Resource Closure 设计目标、审稿增强层、发布优化层。
+- 任务目标完成情况：已完成程序语义、报告输出、防污染测试、覆盖矩阵和只读真实样本验证。
+- 01_design.md 是否被未授权修改：未发现。`git diff -- .ai_workflow/01_design.md` 无输出。
+- 是否直接修改业务验证输出：未发现。run-007 只读检查现有业务文件；没有续写新章，没有 reject/rewrite 章节，没有修改章节、publish 输出、旧 reviews 或 analysis。
+- git status 摘要：当前工作区 tracked/untracked 均干净。
+- git diff --stat 摘要：无输出。
+
+完成项：
+- `ClosureStatus` 四态语义建立：`no_change_closed`、`normal_closed`、`not_checked`、`resource_failed`。
+- Resource Consistency pipeline result 已携带 `closureStatus`。
+- Resource consistency report JSON 已输出 `closureStatus`。
+- Resource consistency report MD 已输出 `Closure Status`。
+- MD 内嵌 Program Ledger 已输出 `closureStatus`。
+- `not_checked` 不会被伪装成 `no_change_closed`。
+- blocking / FAILED / WARN / plan violation 优先归入 `resource_failed`。
+- no-change closure 不会在异常条件下误触发 BLOCKED/WARN。
+- 测试覆盖 resource-consistency、pipeline-runner、resource-plan 相关路径；复跑测试和 typecheck 均通过。
+
+验证结果：
+- `pnpm --filter @actalk/inkos-core test -- resource-consistency pipeline-runner resource-plan`：通过，85 files / 1074 tests passed。
+- `pnpm --filter @actalk/inkos-core typecheck`：通过。
+- `git diff --check`：通过。
+- run-007 真实样本只读检查：`my-novel/books/我使用系统当上美国总统3` 第 2/3 章 resource report 均为旧报告，PASS、blocking=false，chapter index 为 ready-for-review，未发现 false BLOCKED/WARN。
+
+记录缺口：
+- 现有真实业务样本是 pre-5.7B-2 报告，缺少 `closureStatus` 字段。
+- 尚未在 post-5.7B-2 新生成的真实 no_resource_change 章节中完成端到端 `closureStatus: "no_change_closed"` 验证。
+- 该缺口已写入 `02_todo.md` 后续任务池，不作为本任务失败项。
+
+最终判断：
+- 任务五点七 B 的系统实现与测试目标通过。
+- 真实样本验证遵守“验证样本不可直接修复原则”，但后续仍需在新报告样本中补做端到端验证。
+
+提交状态：
+- 不自动 commit。

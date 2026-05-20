@@ -1,0 +1,60 @@
+BIZ REPORT — Run-012 (5.8B Implementation)
+==========================================
+
+Timestamp: 2026-05-20 | Executor: Claude Code
+
+1. REAL BUSINESS VALIDATION
+============================
+
+Validation: Publish-Ready Resource Hard Gate
+  Book: 情绪值系统
+  Chapter: 0001 (超时两分钟的差评)
+  Command: inkos review publish-ready --book "情绪值系统" --chapter 1
+  Execution: background per docs/write-book.md
+
+  Result: BLOCKED_BY_RESOURCE — CONFIRMED ✓
+
+  Output excerpt:
+  {
+    "publish_status": "BLOCKED_BY_RESOURCE",
+    "warnings": [
+      "Resource consistency check: blocking=true, closureStatus=resource_failed.
+       Fix resource issues before publishing."
+    ],
+    "continuity": { "final_status": "UNKNOWN" }
+  }
+
+  Exit code: 0
+  Log: .ai_workflow/runs/run-012/logs/publish-ready-resource-failed.log
+  Exit: .ai_workflow/runs/run-012/logs/publish-ready-resource-failed.exit
+
+  Interpretation:
+  - Before fix: resource_failed chapters passed publish-ready silently
+  - After fix: publish-ready correctly blocks on blocking=true +
+    closureStatus=resource_failed
+  - Continuity UNKNOWN = resource gate fires before continuity audit
+    (correct priority ordering)
+
+2. GAP-LEVEL VALIDATION
+========================
+
+  Gap 1: Unit tests confirm schema gate + backward compat
+  Gap 2: Unit tests confirm financial filter (taxi, salary) + non-regression
+  Gap 3: Unit tests confirm mode detection + constraints (forbiddenEvents)
+  Gap 4: Pipeline tests confirm defer_exchange gating
+  Gap 5: Real biz validation confirms BLOCKED_BY_RESOURCE
+
+3. BACKWARD COMPATIBILITY
+==========================
+
+  - Books without resourceTypes block: unchanged (all 17 defaults)
+  - defer_exchange pipeline tests: all pass
+  - Export: works; blocked-resource-plan + state-degraded now excluded
+  - Test suite: 1083/1083, zero regressions
+
+4. KNOWN LIMITATIONS
+=====================
+
+  - Narrative filter: Chinese regex only
+  - system_bootstrap detection: chapter <= 3 heuristic
+  - Real validation: minimal (1 book, 1 chapter)
