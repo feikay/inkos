@@ -385,6 +385,136 @@ describe("parseResourceRules schema gate", () => {
   });
 });
 
+describe("parseResourceRules inline/nested resourceTypes detection", () => {
+  it("should detect inline array format: resourceTypes: [A, B]", () => {
+    const rules = parseResourceRules(
+      "resourceTypes: [民望值, 联邦币]\n",
+      "",
+      "",
+    );
+    expect(Object.keys(rules.resources)).toContain("民望值");
+    expect(Object.keys(rules.resources)).toContain("联邦币");
+    expect(Object.keys(rules.resources)).not.toContain("灵石");
+    expect(Object.keys(rules.resources)).not.toContain("金币");
+  });
+
+  it("should detect nested inline array: numericalSystemOverrides.resourceTypes: [A, B]", () => {
+    const rules = parseResourceRules(
+      [
+        "numericalSystemOverrides:",
+        "  hardCap: 999",
+        "  resourceTypes: [震惊值, 爱慕值, 愤怒值]",
+      ].join("\n"),
+      "",
+      "",
+    );
+    // Custom resources declared in nested inline should enter resources
+    expect(Object.keys(rules.resources)).toContain("震惊值");
+    expect(Object.keys(rules.resources)).toContain("爱慕值");
+    expect(Object.keys(rules.resources)).toContain("愤怒值");
+    // Must not include irrelevant global defaults
+    expect(Object.keys(rules.resources)).not.toContain("灵石");
+    expect(Object.keys(rules.resources)).not.toContain("灵力");
+    expect(Object.keys(rules.resources)).not.toContain("修为");
+  });
+
+  it("should detect nested multi-line list: numericalSystemOverrides.resourceTypes:\n    - A", () => {
+    const rules = parseResourceRules(
+      [
+        "numericalSystemOverrides:",
+        "  hardCap: 999",
+        "  resourceTypes:",
+        "    - 震惊值",
+        "    - 爱慕值",
+      ].join("\n"),
+      "",
+      "",
+    );
+    expect(Object.keys(rules.resources)).toContain("震惊值");
+    expect(Object.keys(rules.resources)).toContain("爱慕值");
+    expect(Object.keys(rules.resources)).not.toContain("灵石");
+  });
+
+  it("should NOT fall back to global defaults when explicit resourceTypes exist (any format)", () => {
+    // All 4 formats should prevent default resource injection
+    const formats = [
+      "resourceTypes:\n  - 民望值\n  - 联邦币\n",
+      "resourceTypes: [民望值, 联邦币]",
+      "numericalSystemOverrides:\n  resourceTypes: [民望值, 联邦币]",
+      "numericalSystemOverrides:\n  resourceTypes:\n    - 民望值\n    - 联邦币",
+    ];
+    for (const bookRules of formats) {
+      const rules = parseResourceRules(bookRules, "", "");
+      // Should have declared resources
+      expect(Object.keys(rules.resources)).toContain("民望值");
+      // Should NOT have cross-genre defaults
+      expect(Object.keys(rules.resources)).not.toContain("灵石");
+      expect(Object.keys(rules.resources)).not.toContain("金币");
+      expect(Object.keys(rules.resources)).not.toContain("气血");
+      expect(Object.keys(rules.resources)).not.toContain("灵力");
+      expect(Object.keys(rules.resources)).not.toContain("修为");
+      expect(Object.keys(rules.resources)).not.toContain("功德");
+    }
+  });
+
+  it("should inject all defaults when no resourceTypes in any format (backward compat)", () => {
+    const rules = parseResourceRules(
+      "initialResources:\n  民望值: 100\n",
+      "",
+      "",
+    );
+    expect(Object.keys(rules.resources)).toContain("民望值");
+    expect(Object.keys(rules.resources)).toContain("灵石");
+    expect(Object.keys(rules.resources)).toContain("金币");
+  });
+
+  it("custom resources declared in resourceTypes should survive the full chain: resources -> pattern -> event extraction", () => {
+    const bookRules = [
+      "numericalSystemOverrides:",
+      "  resourceTypes: [震惊值, 爱慕值]",
+      "initialResources:",
+      "  震惊值: 0",
+      "  爱慕值: 100",
+    ].join("\n");
+    const rules = parseResourceRules(bookRules, "", "");
+    // Must be in resources
+    expect(Object.keys(rules.resources)).toContain("震惊值");
+    expect(Object.keys(rules.resources)).toContain("爱慕值");
+    expect(rules.resources["震惊值"]?.initial).toBe(0);
+    expect(rules.resources["爱慕值"]?.initial).toBe(100);
+
+    // Must be usable in event extraction
+    const events = extractResourceEvents(
+      "系统激活，获得100点爱慕值。震惊值+50。",
+      bookRules,
+      "",
+    );
+    const aimuEvents = events.filter((e) => e.resource === "爱慕值");
+    const zhenjingEvents = events.filter((e) => e.resource === "震惊值");
+    expect(aimuEvents.length).toBeGreaterThan(0);
+    expect(zhenjingEvents.length).toBeGreaterThan(0);
+  });
+
+  it("parseResourceRules with inline array at top level should coexist with initialResources", () => {
+    const rules = parseResourceRules(
+      [
+        "resourceTypes: [灵石, 金币]",
+        "initialResources:",
+        "  灵石: 500",
+        "  金币: 1000",
+      ].join("\n"),
+      "",
+      "",
+    );
+    expect(Object.keys(rules.resources)).toContain("灵石");
+    expect(Object.keys(rules.resources)).toContain("金币");
+    expect(rules.resources["灵石"]?.initial).toBe(500);
+    expect(rules.resources["金币"]?.initial).toBe(1000);
+    // Should not have irrelevant defaults
+    expect(Object.keys(rules.resources)).not.toContain("民望值");
+  });
+});
+
 describe("isNarrativeFinancialContext", () => {
   it("should detect ordinary financial transaction as narrative", () => {
     const events = extractResourceEvents(
@@ -492,5 +622,153 @@ describe("system_bootstrap and resource_rule_reveal modes", () => {
       expect(plan.forbiddenEvents).toContain("gain");
       expect(plan.forbiddenEvents).toContain("consume");
     }
+  });
+
+  it("should NOT include global default resources not referenced in the book context for system_bootstrap", () => {
+    // Books without explicit resourceTypes get all 17 global defaults in
+    // resourceRules.resources, but system_bootstrap must only create balance_claim
+    // for resources that actually appear in the book's context documents.
+    const plan = buildChapterResourcePlan({
+      chapter: 1,
+      bookRules: "genreLock:\n  primary: urban\n",
+      particleLedger: "",
+      currentState: "系统刚刚激活，宿主首次打开系统面板。",
+      chapterGoal: "系统激活与初始绑定",
+      chapterHooks: "",
+      genre: "urban",
+      systemMode: "tomato",
+    });
+    // The book context contains no resource names → no balance_claim events.
+    // system_bootstrap must not leak 16 global default resources into the plan.
+    if (plan.mode === "system_bootstrap") {
+      expect(plan.allowedEvents.length).toBe(0);
+    }
+  });
+
+  it("should only include context-relevant resources in system_bootstrap, not all defaults", () => {
+    // Simulates the run-025 scenario: a book WITHOUT a machine-detectable
+    // resourceTypes block (e.g., resourceTypes is nested under
+    // numericalSystemOverrides or uses inline array format). parseResourceRules
+    // falls back to all 17 global defaults. system_bootstrap must filter to
+    // only resources actually mentioned in the book's context documents.
+    const plan = buildChapterResourcePlan({
+      chapter: 1,
+      bookRules: [
+        "numericalSystemOverrides:",
+        "  resourceTypes: [灵石, 技能点]",
+        "initialResources:",
+        "  灵石: 100",
+      ].join("\n"),
+      particleLedger: "",
+      currentState: "系统刚刚激活，宿主首次打开修炼面板。",
+      chapterGoal: "系统激活与初始绑定，获得初始灵石",
+      chapterHooks: "",
+      genre: "other",
+      systemMode: "tomato",
+    });
+    if (plan.mode === "system_bootstrap") {
+      const claimedResources = plan.allowedEvents.map((e) => e.resource);
+      // Should include resources that appear in context (灵石 mentioned in
+      // bookRules initialResources + chapterGoal, 技能点 not detected as
+      // declared resource due to inline array format, but appears in bookRules)
+      // At minimum, must NOT include irrelevant global defaults.
+      expect(claimedResources).not.toContain("金币");
+      expect(claimedResources).not.toContain("灵力");
+      expect(claimedResources).not.toContain("修为");
+      expect(claimedResources).not.toContain("功德");
+      expect(claimedResources).not.toContain("气血");
+      expect(claimedResources).not.toContain("银两");
+      expect(claimedResources).not.toContain("经验值");
+      expect(claimedResources).not.toContain("好感度");
+      expect(claimedResources).not.toContain("民望值");
+      expect(claimedResources).not.toContain("联邦币");
+      // Must not have 16+ balance_claim events (the run-025 pollution)
+      expect(plan.allowedEvents.length).toBeLessThan(10);
+    }
+  });
+
+  it("should preserve no_change_closed behavior for normal mode with book-specific resources", () => {
+    // Books with explicit resourceTypes and no ledger activity should still
+    // get no_resource_change mode — the fix must not regress this path.
+    const plan = buildChapterResourcePlan({
+      chapter: 1,
+      bookRules: "resourceTypes:\n  - 灵晶\n  - 灵食\n",
+      particleLedger: "",
+      currentState: "主角刚穿越到仙界。",
+      chapterGoal: "了解仙界基本环境",
+      chapterHooks: "",
+      genre: "xianxia",
+      systemMode: "tomato",
+    });
+    // No ledger activity + has resources → no_resource_change (clean no-change path)
+    expect(plan.mode).toBe("no_resource_change");
+    expect(plan.closureRequirement).toBe("inferred_no_change_allowed");
+  });
+
+  it("should degrade safely with only context-relevant resources in system_bootstrap", () => {
+    // A book with no resourceTypes declaration but some resources in context
+    // should not crash and should only include those context-relevant resources.
+    const plan = buildChapterResourcePlan({
+      chapter: 1,
+      bookRules: "protagonist:\n  name: 测试\n",
+      particleLedger: "| 经验值 | 50 |\n",
+      currentState: "系统刚刚激活。",
+      chapterGoal: "系统激活",
+      chapterHooks: "",
+      genre: "other",
+      systemMode: "tomato",
+    });
+    // Should produce a valid plan (any non-crashing mode)
+    expect(plan.mode).toBeDefined();
+    if (plan.mode === "system_bootstrap") {
+      // Only 经验值 appears in context (via particleLedger)
+      const claimedResources = plan.allowedEvents.map((e) => e.resource);
+      expect(claimedResources).toContain("经验值");
+      // Global defaults not in context must be absent
+      expect(claimedResources).not.toContain("灵石");
+      expect(claimedResources).not.toContain("金币");
+    }
+  });
+
+  it("should NOT regress: explicit resourceTypes with balances gets correct system_bootstrap balance_claim", () => {
+    // Book with explicit resourceTypes and those resources in context
+    // must still produce correct balance_claim events.
+    const plan = buildChapterResourcePlan({
+      chapter: 1,
+      bookRules: "resourceTypes:\n  - 民望值\n  - 联邦币\n",
+      particleLedger: "| 民望值 | 0 |\n| 联邦币 | 0 |\n",
+      currentState: "系统刚刚激活，宿主首次打开系统面板。",
+      chapterGoal: "系统激活与初始绑定",
+      chapterHooks: "",
+      genre: "civic",
+      systemMode: "tomato",
+    });
+    expect(plan.mode).toBe("system_bootstrap");
+    expect(plan.allowedEvents.length).toBeGreaterThanOrEqual(1);
+    expect(plan.allowedEvents.every((e) => e.kind === "balance_claim")).toBe(true);
+    const claimedResources = plan.allowedEvents.map((e) => e.resource);
+    expect(claimedResources).toContain("民望值");
+    expect(claimedResources).toContain("联邦币");
+  });
+
+  it("should NOT regress: non-civic resource schema in system_bootstrap only includes declared resources", () => {
+    const plan = buildChapterResourcePlan({
+      chapter: 1,
+      bookRules: "resourceTypes:\n  - 灵石\n  - 金币\n",
+      particleLedger: "",
+      currentState: "系统刚刚激活，宿主首次打开系统面板。",
+      chapterGoal: "系统激活与初始绑定",
+      chapterHooks: "",
+      genre: "other",
+      systemMode: "tomato",
+    });
+    expect(plan.mode).toBe("system_bootstrap");
+    expect(plan.allowedEvents.length).toBe(2);
+    expect(plan.allowedEvents.every((e) => e.kind === "balance_claim")).toBe(true);
+    const claimedResources = plan.allowedEvents.map((e) => e.resource);
+    expect(claimedResources).toContain("灵石");
+    expect(claimedResources).toContain("金币");
+    expect(claimedResources).not.toContain("民望值");
+    expect(claimedResources).not.toContain("联邦币");
   });
 });

@@ -144,9 +144,10 @@ export function buildChapterResourcePlan(params: {
   readonly systemMode?: string;
 }): ChapterResourcePlan {
   const resourceRules = parseResourceRules(params.bookRules, params.particleLedger, params.currentState);
+  const resourceNames = Object.keys(resourceRules.resources);
   const openingBalances = {
-    ...pickKnownBalances(resourceRules, ["民望值", "联邦币"]),
-    ...extractPlanOpeningBalances([params.particleLedger, params.currentState, params.bookRules].join("\n")),
+    ...pickKnownBalances(resourceRules),
+    ...extractPlanOpeningBalances([params.particleLedger, params.currentState, params.bookRules].join("\n"), resourceNames),
   };
   const inferenceText = [
     params.chapterGoal,
@@ -488,15 +489,22 @@ function buildSystemBootstrapPlanIfMatched(params: {
     resourceRules: params.resourceRules,
   })) return null;
 
+  const allText = [params.bookRules, params.particleLedger, params.currentState, params.chapterGoal, params.chapterHooks].filter(Boolean).join("\n");
+  // Schema-driven: only include resources that appear in the book's context,
+  // avoiding pollution from global default resources irrelevant to this book.
+  const bootstrapResources = Object.entries(params.openingBalances).filter(([resource]) =>
+    allText.includes(resource)
+  );
   return {
     chapter: params.chapter,
     mode: "system_bootstrap",
     source: "resource-engine",
     openingBalances: params.openingBalances,
-    allowedEvents: Object.keys(params.resourceRules.resources).map((resource, index) => ({
+    allowedEvents: bootstrapResources.map(([resource, amount], index) => ({
       order: index + 1,
       kind: "balance_claim" as const,
       resource,
+      amount,
       reason: "系统首次激活：声明初始资源余额",
       requiredInText: true,
     })),
@@ -506,7 +514,7 @@ function buildSystemBootstrapPlanIfMatched(params: {
       "balance_transfer",
       "earn_resource_before_closure",
     ],
-    expectedClosingBalances: params.openingBalances,
+    expectedClosingBalances: Object.fromEntries(bootstrapResources),
     unlockedSkills: [],
     resourceRules: params.resourceRules,
     closureRequirement: "explicit_balance_required",
@@ -1227,18 +1235,16 @@ function scanTextAgainstResourcePlan(text: string, plan: ChapterResourcePlan, ta
   return { ok: violations.length === 0, violations: [...new Set(violations)] };
 }
 
-function pickKnownBalances(rules: ResourceRules, resources: ReadonlyArray<string>): Record<string, number> {
+function pickKnownBalances(rules: ResourceRules): Record<string, number> {
   const balances: Record<string, number> = {};
-  for (const resource of resources) {
-    const rule = rules.resources[resource];
-    if (rule) balances[resource] = rule.initial;
+  for (const [resource, rule] of Object.entries(rules.resources)) {
+    balances[resource] = rule.initial;
   }
   return balances;
 }
 
-function extractPlanOpeningBalances(text: string): Record<string, number> {
+function extractPlanOpeningBalances(text: string, resourceNames: ReadonlyArray<string>): Record<string, number> {
   const balances: Record<string, number> = {};
-  const resourceNames = ["民望值", "联邦币"] as const;
   for (const resource of resourceNames) {
     const escaped = resource.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const summaryPatterns = [

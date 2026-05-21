@@ -363,7 +363,7 @@ export function parseResourceRules(bookRules = "", currentLedger = "", currentSt
     aliases?: ReadonlyArray<string>;
   } = {}) => {
     const canonical = normalizeResourceName(name);
-    if (!isAllowedResource(canonical)) return;
+    if (!isAllowedResource(canonical) && !declaredResourceNames.has(canonical)) return;
     const existing = resources.get(canonical);
     const allowNegative = options.allowNegative ?? existing?.allowNegative ?? false;
     const creditLimit = options.creditLimit ?? existing?.creditLimit;
@@ -391,14 +391,58 @@ export function parseResourceRules(bookRules = "", currentLedger = "", currentSt
     }
   };
 
-  // Extract explicitly declared resource types from book_rules first
-  const resourceTypesBlock = bookRules.match(/resourceTypes\s*:\s*\n((?:\s*-\s*[^\n]+\n?)+)/iu)?.[1];
+  // Extract explicitly declared resource types from book_rules first.
+  // Supports multiple formats:
+  //   1. Multi-line list:  resourceTypes:\n  - A\n  - B
+  //   2. Inline array:     resourceTypes: [A, B]
+  //   3. Nested inline:    numericalSystemOverrides:\n  resourceTypes: [A, B]
+  //   4. Nested list:      numericalSystemOverrides:\n  resourceTypes:\n    - A\n    - B
   const declaredTypes = new Set<string>();
+
+  // Format 1 & 2: top-level resourceTypes (multi-line list or inline array)
+  const resourceTypesBlock = bookRules.match(/resourceTypes\s*:\s*\n((?:\s*-\s*[^\n]+\n?)+)/iu)?.[1];
   if (resourceTypesBlock) {
     for (const line of resourceTypesBlock.split(/\n/u)) {
       const value = line.replace(/^\s*-\s*/u, "").trim();
       if (value) declaredTypes.add(value);
     }
+  }
+  // Inline array at top level: resourceTypes: [A, B]
+  const inlineArray = bookRules.match(/resourceTypes\s*:\s*\[([^\]]+)\]/iu)?.[1];
+  if (inlineArray) {
+    for (const value of inlineArray.split(/[\s,]+/u)) {
+      const cleaned = value.replace(/["']/gu, "").trim();
+      if (cleaned) declaredTypes.add(cleaned);
+    }
+  }
+
+  // Format 3 & 4: nested under numericalSystemOverrides
+  const numericalBlock = bookRules.match(/numericalSystemOverrides\s*:\s*\n([\s\S]*?)(?:\n\S|$)/iu)?.[1];
+  if (numericalBlock) {
+    // Nested inline array: resourceTypes: [A, B]
+    const nestedInline = numericalBlock.match(/^\s{2}resourceTypes\s*:\s*\[([^\]]+)\]/ium)?.[1];
+    if (nestedInline) {
+      for (const value of nestedInline.split(/[\s,]+/u)) {
+        const cleaned = value.replace(/["']/gu, "").trim();
+        if (cleaned) declaredTypes.add(cleaned);
+      }
+    }
+    // Nested multi-line list: resourceTypes:\n    - A
+    const nestedBlock = numericalBlock.match(/^\s{2}resourceTypes\s*:\s*\n((?:\s{4}-\s*[^\n]+\n?)+)/ium)?.[1];
+    if (nestedBlock) {
+      for (const line of nestedBlock.split(/\n/u)) {
+        const value = line.replace(/^\s*-\s*/u, "").trim();
+        if (value) declaredTypes.add(value);
+      }
+    }
+  }
+
+  // Build a local set of declared resource names that bypass the global whitelist.
+  // Book-level declarations are authoritative — custom resource names must not be
+  // silently dropped by isAllowedResource / CANONICAL_RESOURCE_WHITELIST.
+  const declaredResourceNames = new Set<string>();
+  for (const name of declaredTypes) {
+    declaredResourceNames.add(normalizeResourceName(name));
   }
 
   const hasExplicitDeclaration = declaredTypes.size > 0;
@@ -415,8 +459,8 @@ export function parseResourceRules(bookRules = "", currentLedger = "", currentSt
     }
   }
 
-  // Add declared types that aren't in DEFAULT_RESOURCE_TYPES
-  if (resourceTypesBlock) {
+  // Add declared types that aren't in DEFAULT_RESOURCE_TYPES (any format)
+  if (hasExplicitDeclaration) {
     for (const type of declaredTypes) {
       if (!DEFAULT_RESOURCE_TYPES.includes(type as typeof DEFAULT_RESOURCE_TYPES[number])) {
         addResource(type);
@@ -432,7 +476,7 @@ export function parseResourceRules(bookRules = "", currentLedger = "", currentSt
   const resourcesBlock = bookRules.match(/resources\s*:\s*\n([\s\S]*?)(?:\n\S|$)/iu)?.[1] ?? "";
   for (const match of resourcesBlock.matchAll(/^\s{2}([^:\n]+):\s*$/gmu)) {
     const name = normalizeResourceName(match[1] ?? "");
-    if (!isAllowedResource(name)) continue;
+    if (!isAllowedResource(name) && !declaredResourceNames.has(name)) continue;
     const start = (match.index ?? 0) + match[0].length;
     const next = resourcesBlock.slice(start).search(/^\s{2}[^:\n]+:\s*$/mu);
     const body = next >= 0 ? resourcesBlock.slice(start, start + next) : resourcesBlock.slice(start);
@@ -735,8 +779,8 @@ export function validateResourceMath(params: {
   return {
     events,
     issues,
-    openingBalances: filterBalances(openingBalances, activeResources),
-    closingBalances: filterBalances(balances, activeResources),
+    openingBalances: filterBalances(openingBalances, activeResources, rules),
+    closingBalances: filterBalances(balances, activeResources, rules),
     unlockedSkills,
     rules,
   };
@@ -1258,7 +1302,7 @@ export function buildResourceLedgerUpdate(params: {
     ? [...new Set([...params.validation.unlockedSkills, ...params.resourcePlan.unlockedSkills])]
     : params.validation.unlockedSkills;
   const resources = Object.entries(effectiveClosingBalances)
-    .filter(([resource]) => isAllowedResource(resource) && resource !== "技能")
+    .filter(([resource]) => resource && resource !== "技能")
     .sort(([left], [right]) => left.localeCompare(right, "zh-Hans-CN"));
   const overviewRows = resources.map(([resource, value]) => {
     const note = buildResourceNote(resource, params.validation.events, effectiveUnlockedSkills);
@@ -1315,7 +1359,7 @@ export function syncCurrentStateResources(params: {
     ? [...new Set([...params.validation.unlockedSkills, ...params.resourcePlan.unlockedSkills])]
     : params.validation.unlockedSkills;
   const resourceSummary = Object.entries(effectiveClosingBalances)
-    .filter(([resource]) => isAllowedResource(resource))
+    .filter(([resource]) => resource && resource !== "技能")
     .sort(([left], [right]) => left.localeCompare(right, "zh-Hans-CN"))
     .map(([resource, value]) => `${resource}=${value}`)
     .join("；");
@@ -1331,7 +1375,7 @@ export function syncCurrentStateResources(params: {
 
 export function buildAuthoritativeResourceContext(validation: ResourceValidationResult): string {
   const resourceLines = Object.entries(validation.closingBalances)
-    .filter(([resource]) => isAllowedResource(resource))
+    .filter(([resource]) => resource && resource !== "技能")
     .sort(([left], [right]) => left.localeCompare(right, "zh-Hans-CN"))
     .map(([resource, after]) => {
       const before = validation.openingBalances[resource] ?? 0;
@@ -1376,7 +1420,7 @@ export function buildResourceAuthoritySummary(params: {
   readonly recoveryPlan?: ResourceRecoveryPlan;
 }): string {
   const resources = Object.entries(params.validation.closingBalances)
-    .filter(([resource]) => isAllowedResource(resource))
+    .filter(([resource]) => resource && resource !== "技能")
     .sort(([left], [right]) => left.localeCompare(right, "zh-Hans-CN"))
     .map(([resource, value]) => `${resource}=${value}`)
     .join("；") || "无";
@@ -1690,11 +1734,11 @@ function canonicalResourceName(value: string, rules: ResourceRules): string | un
   const trimmed = value.trim();
   const normalized = normalizeResourceName(trimmed);
   const candidate = rules.aliases[trimmed] ?? rules.aliases[normalized] ?? normalized;
-  return isAllowedResource(candidate) ? candidate : undefined;
+  return isAllowedResource(candidate, rules) ? candidate : undefined;
 }
 
-function isAllowedResource(resource: string): boolean {
-  return CANONICAL_RESOURCE_WHITELIST.has(resource);
+function isAllowedResource(resource: string, rules?: ResourceRules): boolean {
+  return CANONICAL_RESOURCE_WHITELIST.has(resource) || (rules !== undefined && resource in rules.resources);
 }
 
 function isCoreResource(resource: string): boolean {
@@ -2199,7 +2243,7 @@ function parseOpeningBalancesWithRules(text: string, rules: ResourceRules): Reco
     }
   }
   return Object.fromEntries(
-    Object.entries(balances).filter(([resource]) => isAllowedResource(resource)),
+    Object.entries(balances).filter(([resource]) => isAllowedResource(resource, rules)),
   );
 }
 
@@ -2216,9 +2260,9 @@ function extractExplicitOpeningResources(text: string, rules: ResourceRules): st
   return [...resources];
 }
 
-function filterBalances(balances: Record<string, number>, activeResources: ReadonlySet<string>): Record<string, number> {
+function filterBalances(balances: Record<string, number>, activeResources: ReadonlySet<string>, rules?: ResourceRules): Record<string, number> {
   return Object.fromEntries(
-    Object.entries(balances).filter(([resource]) => activeResources.has(resource) && isAllowedResource(resource)),
+    Object.entries(balances).filter(([resource]) => activeResources.has(resource) && isAllowedResource(resource, rules)),
   );
 }
 
