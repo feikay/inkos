@@ -109,6 +109,21 @@ export {
   type Golden3ChapterReviewInput,
 } from "./agents/golden-3-chapter.js";
 export {
+  OpeningHookReviewerAgent,
+  OPENING_HOOK_DIMENSIONS,
+  writeOpeningHookReportFiles,
+  buildSkippedOpeningHookReport,
+  renderOpeningHookMarkdown,
+  readOpeningHookSummary,
+  type OpeningHookDimension,
+  type OpeningHookStatus,
+  type HookStrength,
+  type OpeningHookIssue,
+  type OpeningHookChecklist,
+  type OpeningHookReviewReport,
+  type OpeningHookReviewInput,
+} from "./agents/opening-hook-reviewer.js";
+export {
   ResourceBlockingRewriterAgent,
   ResourceConsistencyReviserAgent,
   buildAuthoritativeResourceContext,

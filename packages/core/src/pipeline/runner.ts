@@ -29,6 +29,11 @@ import {
   type Golden3ChapterReport,
 } from "../agents/golden-3-chapter.js";
 import {
+  OpeningHookReviewerAgent,
+  writeOpeningHookReportFiles,
+  type OpeningHookReviewReport,
+} from "../agents/opening-hook-reviewer.js";
+import {
   cleanNonNarrativeArtifacts,
   detectNonNarrativeArtifacts,
   type CleanNarrativeResult,
@@ -2143,6 +2148,22 @@ export class PipelineRunner {
       );
     }
 
+    // Opening-hook review: all chapters
+    this.logStage(stageLanguage, { zh: "开头钩子审核", en: "reviewing opening hook" });
+    const openingHookReport = await this.runOpeningHookReview({
+      bookId,
+      bookDir,
+      chapterNumber,
+      chapterContent: finalContent,
+      chapterTitle: frozenFinalTitle.title,
+      language: pipelineLang,
+      resourceBlocking: resourceConsistency.blocking,
+      chapterIndexStatus: chapterStatus ?? undefined,
+    });
+    this.config.logger?.info(
+      `Opening hook: ${openingHookReport.score ?? "N/A"}/100 ${openingHookReport.status}`,
+    );
+
     const resourceIndexGuard = detectResourceIndexReadinessBlocker({
       auditIssues: auditResult.issues,
       updatedState: persistenceOutput.updatedState,
@@ -3378,6 +3399,83 @@ ${matrix}`,
     }
 
     await writeGolden3ChapterReportFiles({ report, jsonPath, markdownPath });
+    return report;
+  }
+
+  private async runOpeningHookReview(params: {
+    readonly bookId: string;
+    readonly bookDir: string;
+    readonly chapterNumber: number;
+    readonly chapterContent: string;
+    readonly chapterTitle: string;
+    readonly language: LengthLanguage;
+    readonly resourceBlocking?: boolean;
+    readonly chapterIndexStatus?: string;
+  }): Promise<OpeningHookReviewReport> {
+    const padded = String(params.chapterNumber).padStart(4, "0");
+    const reportDir = join(params.bookDir, "reviews", "opening-hook");
+    const jsonPath = join(reportDir, `${padded}.opening-hook.report.json`);
+    const markdownPath = join(reportDir, `${padded}.opening-hook.report.md`);
+
+    const input = {
+      chapterContent: params.chapterContent,
+      chapterIndex: params.chapterNumber,
+      chapterTitle: params.chapterTitle,
+      resourceBlocking: params.resourceBlocking,
+      chapterIndexStatus: params.chapterIndexStatus,
+    };
+
+    let report: OpeningHookReviewReport;
+    try {
+      const reviewer = new OpeningHookReviewerAgent(this.agentCtxFor("opening-hook-reviewer", params.bookId));
+      report = await reviewer.review(input);
+    } catch (error) {
+      report = {
+        chapterIndex: params.chapterNumber,
+        chapterTitle: params.chapterTitle,
+        status: "SKIPPED",
+        score: null,
+        detectedHookType: null,
+        hookStrength: "undetected",
+        dimensions: {
+          suspense_gap: 55,
+          extreme_contrast: 55,
+          conflict_first: 55,
+          worldview_bomb: 55,
+          extreme_emotion: 55,
+        },
+        dimensionConclusions: {
+          suspense_gap: "reviewer 调用失败，未执行审核。",
+          extreme_contrast: "reviewer 调用失败，未执行审核。",
+          conflict_first: "reviewer 调用失败，未执行审核。",
+          worldview_bomb: "reviewer 调用失败，未执行审核。",
+          extreme_emotion: "reviewer 调用失败，未执行审核。",
+        },
+        checklist: {
+          abnormalImage100: false,
+          conflict300: false,
+          dilemma500: false,
+          continueReason: false,
+          hookTypeMatched: false,
+        },
+        strengths: [],
+        issues: [{
+          severity: "warning",
+          dimension: "resource_consistency",
+          message: `opening-hook-reviewer 调用失败：${error instanceof Error ? error.message : String(error)}`,
+          suggestion: "稍后重新运行 opening-hook review。",
+        }],
+        suggestions: ["稍后重新执行 opening-hook review。"],
+        summary: `跳过：reviewer error: ${error instanceof Error ? error.message : String(error)}`,
+        skippedReason: `reviewer error: ${error instanceof Error ? error.message : String(error)}`,
+      };
+      this.logWarn(params.language, {
+        zh: `opening-hook-reviewer 调用失败，已生成 SKIPPED 报告：${error instanceof Error ? error.message : String(error)}`,
+        en: `opening-hook-reviewer failed; wrote SKIPPED report: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+
+    await writeOpeningHookReportFiles({ report, jsonPath, markdownPath });
     return report;
   }
 

@@ -23,6 +23,7 @@ import {
   type FanqieQualityReport,
   type StoryEffectivenessReport,
   type Golden3ChapterReport,
+  readOpeningHookSummary,
 } from "@actalk/inkos-core";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
@@ -1065,6 +1066,11 @@ interface PublishReadyResult {
     readonly score: number | null;
     readonly summary: string;
   };
+  readonly opening_hook?: {
+    readonly status: string;
+    readonly score: number | null;
+    readonly summary: string;
+  };
 }
 
 interface PublishReadyManualContinuityAcceptance {
@@ -1943,6 +1949,42 @@ export function applyGolden3ChapterDecision(
   return { publishStatus, warnings: existingWarnings };
 }
 
+export function applyOpeningHookDecision(
+  publishStatus: string,
+  existingWarnings: ReadonlyArray<string> | undefined,
+  ohSummary: { status: string; score: number | null; summary: string } | undefined,
+): { publishStatus: string; warnings: ReadonlyArray<string> | undefined } {
+  if (!ohSummary || ohSummary.status === "PASS" || ohSummary.status === "SKIPPED") {
+    return { publishStatus, warnings: existingWarnings };
+  }
+
+  const hardBlocked = publishStatus === "BLOCKED_BY_RESOURCE"
+    || publishStatus === "BLOCKED_BY_CONTINUITY"
+    || publishStatus === "BLOCKED_BY_QUALITY"
+    || publishStatus === "NEED_REWRITE";
+
+  // Never override existing hard blocks
+  if (hardBlocked) {
+    return { publishStatus, warnings: existingWarnings };
+  }
+
+  const ohWarning = `opening-hook: ${ohSummary.summary} (score: ${ohSummary.score ?? "n/a"})`;
+  const warnings = existingWarnings ? [...existingWarnings, ohWarning] : [ohWarning];
+
+  if (ohSummary.status === "WARN") {
+    return { publishStatus, warnings };
+  }
+
+  if (ohSummary.status === "FAIL_STRUCTURAL") {
+    if (publishStatus === "READY_TO_EXPORT" || publishStatus === "READY_WITH_WARNINGS") {
+      return { publishStatus: "MANUAL_REVIEW", warnings };
+    }
+    return { publishStatus, warnings };
+  }
+
+  return { publishStatus, warnings: existingWarnings };
+}
+
 function qualityWarnings(decision: PublishQualityDecision, score: number, passThreshold: number): ReadonlyArray<string> | undefined {
   return decision === "QUALITY_WARN_POLISH_OPTIONAL"
     ? [`quality_score ${score} is below ideal ${passThreshold}; polish is optional before export.`]
@@ -1970,12 +2012,19 @@ async function writePublishReadyReport(bookDir: string, report: PublishReadyResu
   // Important: use the result of story-effectiveness decision as input, so both can contribute
   const gcDecision = applyGolden3ChapterDecision(seDecision.publishStatus, seDecision.warnings, gcSummary);
 
+  // Merge opening-hook summary (all chapters)
+  const ohSummary = report.opening_hook ?? await readOpeningHookSummaryLocal(bookDir, report.chapter_index);
+
+  // Apply opening-hook decision semantics (same pattern, chain after SE and golden_3)
+  const ohDecision = applyOpeningHookDecision(gcDecision.publishStatus, gcDecision.warnings, ohSummary);
+
   const finalReport = {
     ...report,
     story_effectiveness: seSummary,
     golden_3_chapter: gcSummary,
-    publish_status: gcDecision.publishStatus as PublishReadyResult["publish_status"],
-    warnings: gcDecision.warnings,
+    opening_hook: ohSummary,
+    publish_status: ohDecision.publishStatus as PublishReadyResult["publish_status"],
+    warnings: ohDecision.warnings,
     final_candidate_file: report.final_candidate_file
       ? `books/${report.book}/${report.final_candidate_file}`
       : "",
@@ -2017,7 +2066,9 @@ ${report.accepted_reason ? `- accepted_reason: ${report.accepted_reason}\n` : ""
 - story_effectiveness: ${report.story_effectiveness.status} (${report.story_effectiveness.score ?? "n/a"})
   ${report.story_effectiveness.summary}` : ""}${report.golden_3_chapter ? `
 - golden_3_chapter: ${report.golden_3_chapter.status} (${report.golden_3_chapter.score ?? "n/a"})
-  ${report.golden_3_chapter.summary}` : ""}
+  ${report.golden_3_chapter.summary}` : ""}${report.opening_hook ? `
+- opening_hook: ${report.opening_hook.status} (${report.opening_hook.score ?? "n/a"})
+  ${report.opening_hook.summary}` : ""}
 
 ## Source Chain
 
@@ -3679,6 +3730,13 @@ async function readGolden3ChapterSummary(
   const status = report.status ?? "UNKNOWN";
   const summary = report.summary ?? "";
   return { status, score, summary };
+}
+
+async function readOpeningHookSummaryLocal(
+  bookDir: string,
+  chapter: number,
+): Promise<{ status: string; score: number | null; summary: string } | undefined> {
+  return readOpeningHookSummary(bookDir, chapter);
 }
 
 async function readResourceConsistencyReportIfExists(

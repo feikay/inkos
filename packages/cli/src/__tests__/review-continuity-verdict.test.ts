@@ -15,6 +15,7 @@ import {
   readChapterIndexStatus,
   applyStoryEffectivenessDecision,
   applyGolden3ChapterDecision,
+  applyOpeningHookDecision,
 } from "../commands/review.js";
 
 function makeReport(overrides: Partial<ContinuityReport> = {}): ContinuityReport {
@@ -481,6 +482,103 @@ describe("applyGolden3ChapterDecision", () => {
 
   it("returns unchanged when gcSummary is undefined", () => {
     const result = applyGolden3ChapterDecision("READY_TO_EXPORT", undefined, undefined);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeUndefined();
+  });
+});
+
+describe("applyOpeningHookDecision", () => {
+  const ohPass = { status: "PASS", score: 88, summary: "章节开头钩子审核通过（88/100）。" };
+  const ohWarn = { status: "WARN", score: 65, summary: "章节开头钩子审核警告（65/100）。前100字未检测到异常画面。" };
+  const ohFail = { status: "FAIL_STRUCTURAL", score: 35, summary: "章节开头钩子审核未通过（35/100）。未检测到五类钩子信号。" };
+  const ohSkipped = { status: "SKIPPED", score: null, summary: "跳过：资源账本校验失败，跳过开头钩子审核。" };
+
+  it("PASS: returns unchanged publish_status and warnings", () => {
+    const result = applyOpeningHookDecision("READY_TO_EXPORT", undefined, ohPass);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeUndefined();
+  });
+
+  it("SKIPPED: returns unchanged publish_status and warnings", () => {
+    const result = applyOpeningHookDecision("READY_TO_EXPORT", ["story warning"], ohSkipped);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toEqual(["story warning"]);
+  });
+
+  it("SKIPPED: does not alter READY_WITH_WARNINGS", () => {
+    const result = applyOpeningHookDecision("READY_WITH_WARNINGS", ["quality warning"], ohSkipped);
+    expect(result.publishStatus).toBe("READY_WITH_WARNINGS");
+    expect(result.warnings).toEqual(["quality warning"]);
+  });
+
+  it("WARN: appends warning without changing publish_status", () => {
+    const result = applyOpeningHookDecision("READY_TO_EXPORT", undefined, ohWarn);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings![0]).toContain("opening-hook");
+    expect(result.warnings![0]).toContain("65");
+  });
+
+  it("WARN: appends to existing warnings", () => {
+    const result = applyOpeningHookDecision("READY_WITH_WARNINGS", ["quality warning"], ohWarn);
+    expect(result.publishStatus).toBe("READY_WITH_WARNINGS");
+    expect(result.warnings).toHaveLength(2);
+    expect(result.warnings![1]).toContain("opening-hook");
+  });
+
+  it("FAIL_STRUCTURAL: turns READY_TO_EXPORT into MANUAL_REVIEW", () => {
+    const result = applyOpeningHookDecision("READY_TO_EXPORT", undefined, ohFail);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings![0]).toContain("opening-hook");
+    expect(result.warnings![0]).toContain("35");
+  });
+
+  it("FAIL_STRUCTURAL: turns READY_WITH_WARNINGS into MANUAL_REVIEW", () => {
+    const result = applyOpeningHookDecision("READY_WITH_WARNINGS", ["quality warning"], ohFail);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings).toHaveLength(2);
+  });
+
+  it("FAIL_STRUCTURAL: keeps MANUAL_REVIEW as MANUAL_REVIEW", () => {
+    const result = applyOpeningHookDecision("MANUAL_REVIEW", ["continuity concern"], ohFail);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings!.length).toBe(2);
+  });
+
+  it("does NOT override BLOCKED_BY_RESOURCE", () => {
+    for (const oh of [ohWarn, ohFail]) {
+      const result = applyOpeningHookDecision("BLOCKED_BY_RESOURCE", ["resource blocking=true"], oh);
+      expect(result.publishStatus).toBe("BLOCKED_BY_RESOURCE");
+      expect(result.warnings).toEqual(["resource blocking=true"]);
+    }
+  });
+
+  it("does NOT override BLOCKED_BY_CONTINUITY", () => {
+    for (const oh of [ohWarn, ohFail]) {
+      const result = applyOpeningHookDecision("BLOCKED_BY_CONTINUITY", undefined, oh);
+      expect(result.publishStatus).toBe("BLOCKED_BY_CONTINUITY");
+      expect(result.warnings).toBeUndefined();
+    }
+  });
+
+  it("does NOT override BLOCKED_BY_QUALITY", () => {
+    for (const oh of [ohWarn, ohFail]) {
+      const result = applyOpeningHookDecision("BLOCKED_BY_QUALITY", ["quality < threshold"], oh);
+      expect(result.publishStatus).toBe("BLOCKED_BY_QUALITY");
+      expect(result.warnings).toEqual(["quality < threshold"]);
+    }
+  });
+
+  it("does NOT override NEED_REWRITE", () => {
+    for (const oh of [ohWarn, ohFail]) {
+      const result = applyOpeningHookDecision("NEED_REWRITE", undefined, oh);
+      expect(result.publishStatus).toBe("NEED_REWRITE");
+    }
+  });
+
+  it("returns unchanged when ohSummary is undefined", () => {
+    const result = applyOpeningHookDecision("READY_TO_EXPORT", undefined, undefined);
     expect(result.publishStatus).toBe("READY_TO_EXPORT");
     expect(result.warnings).toBeUndefined();
   });
