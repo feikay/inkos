@@ -34,6 +34,11 @@ import {
   type OpeningHookReviewReport,
 } from "../agents/opening-hook-reviewer.js";
 import {
+  AntagonistIntelligenceReviewerAgent,
+  writeAntagonistIntelligenceReportFiles,
+  type AntagonistIntelligenceReport,
+} from "../agents/antagonist-intelligence.js";
+import {
   cleanNonNarrativeArtifacts,
   detectNonNarrativeArtifacts,
   type CleanNarrativeResult,
@@ -2164,6 +2169,22 @@ export class PipelineRunner {
       `Opening hook: ${openingHookReport.score ?? "N/A"}/100 ${openingHookReport.status}`,
     );
 
+    // Antagonist-intelligence review: all chapters
+    this.logStage(stageLanguage, { zh: "反派智能审核", en: "reviewing antagonist intelligence" });
+    const antagonistIntelReport = await this.runAntagonistIntelligenceReview({
+      bookId,
+      bookDir,
+      chapterNumber,
+      finalContent,
+      storyDir,
+      language: pipelineLang,
+      resourceBlocking: resourceConsistency.blocking,
+      chapterIndexStatus: chapterStatus ?? undefined,
+    });
+    this.config.logger?.info(
+      `Antagonist intelligence: ${antagonistIntelReport.score ?? "N/A"}/100 ${antagonistIntelReport.status}`,
+    );
+
     const resourceIndexGuard = detectResourceIndexReadinessBlocker({
       auditIssues: auditResult.issues,
       updatedState: persistenceOutput.updatedState,
@@ -3476,6 +3497,86 @@ ${matrix}`,
     }
 
     await writeOpeningHookReportFiles({ report, jsonPath, markdownPath });
+    return report;
+  }
+
+  private async runAntagonistIntelligenceReview(params: {
+    readonly bookId: string;
+    readonly bookDir: string;
+    readonly chapterNumber: number;
+    readonly finalContent: string;
+    readonly storyDir: string;
+    readonly language: LengthLanguage;
+    readonly resourceBlocking?: boolean;
+    readonly chapterIndexStatus?: string;
+  }): Promise<AntagonistIntelligenceReport> {
+    const padded = String(params.chapterNumber).padStart(4, "0");
+    const reportDir = join(params.bookDir, "reviews", "antagonist-intelligence");
+    const jsonPath = join(reportDir, `${padded}.report.json`);
+    const markdownPath = join(reportDir, `${padded}.report.md`);
+
+    const input = {
+      chapter: params.chapterNumber,
+      chapterContent: params.finalContent,
+      antagonistMap: await readFile(join(params.storyDir, "antagonist_map.md"), "utf-8").catch(() => ""),
+      motivationMatrix: await readFile(join(params.storyDir, "motivation_matrix.md"), "utf-8").catch(() => ""),
+      resourceBlocking: params.resourceBlocking,
+      chapterIndexStatus: params.chapterIndexStatus,
+    };
+
+    let report: AntagonistIntelligenceReport;
+    try {
+      const reviewer = new AntagonistIntelligenceReviewerAgent(
+        this.agentCtxFor("antagonist-intelligence-reviewer", params.bookId),
+      );
+      report = await reviewer.review(input);
+    } catch (error) {
+      report = {
+        chapter: params.chapterNumber,
+        status: "SKIPPED",
+        score: null,
+        antagonistTypeDetected: [],
+        dimensions: {
+          antagonist_goal: 75,
+          antagonist_method: 75,
+          antagonist_constraint: 75,
+          antagonist_cost: 75,
+          antagonist_feedback: 75,
+          antagonist_foreshadowing: 75,
+        },
+        dimensionConclusions: {
+          antagonist_goal: "reviewer 调用失败，未执行审核。",
+          antagonist_method: "reviewer 调用失败，未执行审核。",
+          antagonist_constraint: "reviewer 调用失败，未执行审核。",
+          antagonist_cost: "reviewer 调用失败，未执行审核。",
+          antagonist_feedback: "reviewer 调用失败，未执行审核。",
+          antagonist_foreshadowing: "reviewer 调用失败，未执行审核。",
+        },
+        checklistResults: {
+          "反派是否有自洽目标，而不是单纯讨厌主角？": false,
+          "反派掌握的信息、资源和权力是否来自世界规则？": false,
+          "反派失败是否因为主角伏笔、代价、智慧或微小变量，而不是突然降智？": false,
+          "反派是否避免无理由送经验、送情报、送装备？": false,
+          "主角胜利后，反派是否仍留下代价、后果或下一层威胁？": false,
+          "读者回看前文时，是否能发现反派行动的合理痕迹？": false,
+        },
+        issues: [{
+          severity: "warning",
+          dimension: "resource_consistency",
+          message: `antagonist-intelligence-reviewer 调用失败：${error instanceof Error ? error.message : String(error)}`,
+          suggestion: "稍后重新运行 antagonist-intelligence review。",
+        }],
+        suggestions: ["稍后重新执行 antagonist-intelligence review。"],
+        summary: `跳过：reviewer error: ${error instanceof Error ? error.message : String(error)}`,
+        skippedReason: `reviewer error: ${error instanceof Error ? error.message : String(error)}`,
+      };
+      this.logWarn(params.language, {
+        zh: `antagonist-intelligence-reviewer 调用失败，已生成 SKIPPED 报告：${error instanceof Error ? error.message : String(error)}`,
+        en: `antagonist-intelligence-reviewer failed; wrote SKIPPED report: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+
+    await writeAntagonistIntelligenceReportFiles({ report, jsonPath, markdownPath });
     return report;
   }
 

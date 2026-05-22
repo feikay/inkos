@@ -124,6 +124,18 @@ export {
   type OpeningHookReviewInput,
 } from "./agents/opening-hook-reviewer.js";
 export {
+  AntagonistIntelligenceReviewerAgent,
+  ANTAGONIST_INTELLIGENCE_DIMENSIONS,
+  writeAntagonistIntelligenceReportFiles,
+  renderAntagonistIntelligenceMarkdown,
+  readAntagonistIntelligenceSummary,
+  type AntagonistIntelligenceDimension,
+  type AntagonistIntelligenceStatus,
+  type AntagonistIntelligenceIssue,
+  type AntagonistIntelligenceReport,
+  type AntagonistIntelligenceReviewInput,
+} from "./agents/antagonist-intelligence.js";
+export {
   ResourceBlockingRewriterAgent,
   ResourceConsistencyReviserAgent,
   buildAuthoritativeResourceContext,

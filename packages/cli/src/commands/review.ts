@@ -24,6 +24,7 @@ import {
   type StoryEffectivenessReport,
   type Golden3ChapterReport,
   readOpeningHookSummary,
+  readAntagonistIntelligenceSummary,
 } from "@actalk/inkos-core";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
@@ -1071,6 +1072,11 @@ interface PublishReadyResult {
     readonly score: number | null;
     readonly summary: string;
   };
+  readonly antagonist_intelligence?: {
+    readonly status: string;
+    readonly score: number | null;
+    readonly summary: string;
+  };
 }
 
 interface PublishReadyManualContinuityAcceptance {
@@ -1985,6 +1991,42 @@ export function applyOpeningHookDecision(
   return { publishStatus, warnings: existingWarnings };
 }
 
+export function applyAntagonistIntelligenceDecision(
+  publishStatus: string,
+  existingWarnings: ReadonlyArray<string> | undefined,
+  aiSummary: { status: string; score: number | null; summary: string } | undefined,
+): { publishStatus: string; warnings: ReadonlyArray<string> | undefined } {
+  if (!aiSummary || aiSummary.status === "PASS" || aiSummary.status === "SKIPPED") {
+    return { publishStatus, warnings: existingWarnings };
+  }
+
+  const hardBlocked = publishStatus === "BLOCKED_BY_RESOURCE"
+    || publishStatus === "BLOCKED_BY_CONTINUITY"
+    || publishStatus === "BLOCKED_BY_QUALITY"
+    || publishStatus === "NEED_REWRITE";
+
+  // Never override existing hard blocks
+  if (hardBlocked) {
+    return { publishStatus, warnings: existingWarnings };
+  }
+
+  const aiWarning = `antagonist-intelligence: ${aiSummary.summary} (score: ${aiSummary.score ?? "n/a"})`;
+  const warnings = existingWarnings ? [...existingWarnings, aiWarning] : [aiWarning];
+
+  if (aiSummary.status === "WARN") {
+    return { publishStatus, warnings };
+  }
+
+  if (aiSummary.status === "FAIL_REPORT_ONLY") {
+    if (publishStatus === "READY_TO_EXPORT" || publishStatus === "READY_WITH_WARNINGS") {
+      return { publishStatus: "MANUAL_REVIEW", warnings };
+    }
+    return { publishStatus, warnings };
+  }
+
+  return { publishStatus, warnings: existingWarnings };
+}
+
 function qualityWarnings(decision: PublishQualityDecision, score: number, passThreshold: number): ReadonlyArray<string> | undefined {
   return decision === "QUALITY_WARN_POLISH_OPTIONAL"
     ? [`quality_score ${score} is below ideal ${passThreshold}; polish is optional before export.`]
@@ -2018,13 +2060,20 @@ async function writePublishReadyReport(bookDir: string, report: PublishReadyResu
   // Apply opening-hook decision semantics (same pattern, chain after SE and golden_3)
   const ohDecision = applyOpeningHookDecision(gcDecision.publishStatus, gcDecision.warnings, ohSummary);
 
+  // Merge antagonist-intelligence summary (all chapters)
+  const aiSummary = report.antagonist_intelligence ?? await readAntagonistIntelligenceSummaryLocal(bookDir, report.chapter_index);
+
+  // Apply antagonist-intelligence decision semantics (chain after opening-hook)
+  const aiDecision = applyAntagonistIntelligenceDecision(ohDecision.publishStatus, ohDecision.warnings, aiSummary);
+
   const finalReport = {
     ...report,
     story_effectiveness: seSummary,
     golden_3_chapter: gcSummary,
     opening_hook: ohSummary,
-    publish_status: ohDecision.publishStatus as PublishReadyResult["publish_status"],
-    warnings: ohDecision.warnings,
+    antagonist_intelligence: aiSummary,
+    publish_status: aiDecision.publishStatus as PublishReadyResult["publish_status"],
+    warnings: aiDecision.warnings,
     final_candidate_file: report.final_candidate_file
       ? `books/${report.book}/${report.final_candidate_file}`
       : "",
@@ -2068,7 +2117,9 @@ ${report.accepted_reason ? `- accepted_reason: ${report.accepted_reason}\n` : ""
 - golden_3_chapter: ${report.golden_3_chapter.status} (${report.golden_3_chapter.score ?? "n/a"})
   ${report.golden_3_chapter.summary}` : ""}${report.opening_hook ? `
 - opening_hook: ${report.opening_hook.status} (${report.opening_hook.score ?? "n/a"})
-  ${report.opening_hook.summary}` : ""}
+  ${report.opening_hook.summary}` : ""}${report.antagonist_intelligence ? `
+- antagonist_intelligence: ${report.antagonist_intelligence.status} (${report.antagonist_intelligence.score ?? "n/a"})
+  ${report.antagonist_intelligence.summary}` : ""}
 
 ## Source Chain
 
@@ -3737,6 +3788,13 @@ async function readOpeningHookSummaryLocal(
   chapter: number,
 ): Promise<{ status: string; score: number | null; summary: string } | undefined> {
   return readOpeningHookSummary(bookDir, chapter);
+}
+
+async function readAntagonistIntelligenceSummaryLocal(
+  bookDir: string,
+  chapter: number,
+): Promise<{ status: string; score: number | null; summary: string } | undefined> {
+  return readAntagonistIntelligenceSummary(bookDir, chapter);
 }
 
 async function readResourceConsistencyReportIfExists(

@@ -30,6 +30,7 @@ import type { ChapterMeta } from "../models/chapter.js";
 import { MemoryDB } from "../state/memory-db.js";
 import * as memoryDbModule from "../state/memory-db.js";
 import { countChapterLength } from "../utils/length-metrics.js";
+import { AntagonistIntelligenceReviewerAgent, type AntagonistIntelligenceReport } from "../agents/antagonist-intelligence.js";
 
 const require = createRequire(import.meta.url);
 const hasNodeSqlite = (() => {
@@ -1790,6 +1791,51 @@ describe("PipelineRunner", () => {
 
       expect(report.status).toBe("MISSING_INTENT");
       expect(report.score).toBeNull();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("writes an antagonist-intelligence report and does not block chapter persistence", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({ inputGovernanceMode: "legacy" });
+    vi.spyOn(AntagonistIntelligenceReviewerAgent.prototype, "review").mockResolvedValue({
+      chapter: 1,
+      status: "WARN",
+      score: 78,
+      antagonistTypeDetected: ["谋局者"],
+      dimensions: {
+        antagonist_goal: 78, antagonist_method: 78, antagonist_constraint: 78,
+        antagonist_cost: 78, antagonist_feedback: 78, antagonist_foreshadowing: 78,
+      },
+      dimensionConclusions: {
+        antagonist_goal: "ok", antagonist_method: "ok", antagonist_constraint: "ok",
+        antagonist_cost: "ok", antagonist_feedback: "ok", antagonist_foreshadowing: "ok",
+      },
+      checklistResults: Object.fromEntries(
+        ["反派是否有自洽目标", "信息是否来自世界规则", "失败是否因主角伏笔", "是否避免送经验", "是否留下下一层威胁", "是否有合理痕迹"].map((k) => [k, true]),
+      ),
+      issues: [{
+        severity: "warning",
+        dimension: "antagonist_goal",
+        message: "反派目标信号偏弱。",
+        suggestion: "强化反派目标的可见性。",
+      }],
+      suggestions: ["强化反派目标。"],
+      summary: "反派智能审核警告（78/100）。",
+    } as AntagonistIntelligenceReport);
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(createWriterOutput({ chapterNumber: 1, content: "正文。", wordCount: 3 }));
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(createAuditResult({ passed: true, issues: [] }));
+
+    try {
+      const result = await runner.writeNextChapter(bookId, 220);
+      const reportPath = join(state.bookDir(bookId), "reviews", "antagonist-intelligence", "0001.report.json");
+      const report = JSON.parse(await readFile(reportPath, "utf-8")) as AntagonistIntelligenceReport;
+
+      expect(result.status).toBe("ready-for-review");
+      expect(report.status).toBe("WARN");
+      expect(report.score).toBe(78);
+      expect(report.chapter).toBe(1);
+      expect(report.antagonistTypeDetected).toContain("谋局者");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

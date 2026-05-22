@@ -16,6 +16,7 @@ import {
   applyStoryEffectivenessDecision,
   applyGolden3ChapterDecision,
   applyOpeningHookDecision,
+  applyAntagonistIntelligenceDecision,
 } from "../commands/review.js";
 
 function makeReport(overrides: Partial<ContinuityReport> = {}): ContinuityReport {
@@ -579,6 +580,116 @@ describe("applyOpeningHookDecision", () => {
 
   it("returns unchanged when ohSummary is undefined", () => {
     const result = applyOpeningHookDecision("READY_TO_EXPORT", undefined, undefined);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeUndefined();
+  });
+});
+
+describe("applyAntagonistIntelligenceDecision", () => {
+  const aiPass = { status: "PASS", score: 90, summary: "反派智能审核通过（90/100，LLM+硬扫描）。" };
+  const aiWarn = { status: "WARN", score: 72, summary: "反派智能审核警告（72/100，仅硬扫描）。未检测到反派明确目标信号。" };
+  const aiFail = { status: "FAIL_REPORT_ONLY", score: 55, summary: "反派智能审核未通过（55/100，LLM+硬扫描）。正文检测到反派降智信号。" };
+  const aiSkipped = { status: "SKIPPED", score: null, summary: "跳过：资源账本校验失败，跳过反派智能审核。" };
+
+  it("PASS: returns unchanged publish_status and warnings", () => {
+    const result = applyAntagonistIntelligenceDecision("READY_TO_EXPORT", undefined, aiPass);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeUndefined();
+  });
+
+  it("PASS: preserves existing warnings unchanged", () => {
+    const result = applyAntagonistIntelligenceDecision("READY_WITH_WARNINGS", ["quality warning"], aiPass);
+    expect(result.publishStatus).toBe("READY_WITH_WARNINGS");
+    expect(result.warnings).toEqual(["quality warning"]);
+  });
+
+  it("SKIPPED: returns unchanged publish_status and warnings", () => {
+    const result = applyAntagonistIntelligenceDecision("READY_TO_EXPORT", ["story warning"], aiSkipped);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toEqual(["story warning"]);
+  });
+
+  it("SKIPPED: does not alter READY_WITH_WARNINGS", () => {
+    const result = applyAntagonistIntelligenceDecision("READY_WITH_WARNINGS", ["quality warning"], aiSkipped);
+    expect(result.publishStatus).toBe("READY_WITH_WARNINGS");
+    expect(result.warnings).toEqual(["quality warning"]);
+  });
+
+  it("WARN: appends warning without changing publish_status", () => {
+    const result = applyAntagonistIntelligenceDecision("READY_TO_EXPORT", undefined, aiWarn);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings![0]).toContain("antagonist-intelligence");
+    expect(result.warnings![0]).toContain("72");
+  });
+
+  it("WARN: appends to existing warnings", () => {
+    const result = applyAntagonistIntelligenceDecision("READY_WITH_WARNINGS", ["quality warning"], aiWarn);
+    expect(result.publishStatus).toBe("READY_WITH_WARNINGS");
+    expect(result.warnings).toHaveLength(2);
+    expect(result.warnings![1]).toContain("antagonist-intelligence");
+  });
+
+  it("WARN: appends warnings for MANUAL_REVIEW without changing status", () => {
+    const result = applyAntagonistIntelligenceDecision("MANUAL_REVIEW", undefined, aiWarn);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings![0]).toContain("antagonist-intelligence");
+  });
+
+  it("FAIL_REPORT_ONLY: turns READY_TO_EXPORT into MANUAL_REVIEW", () => {
+    const result = applyAntagonistIntelligenceDecision("READY_TO_EXPORT", undefined, aiFail);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings![0]).toContain("antagonist-intelligence");
+    expect(result.warnings![0]).toContain("55");
+  });
+
+  it("FAIL_REPORT_ONLY: turns READY_WITH_WARNINGS into MANUAL_REVIEW", () => {
+    const result = applyAntagonistIntelligenceDecision("READY_WITH_WARNINGS", ["quality warning"], aiFail);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings).toHaveLength(2);
+  });
+
+  it("FAIL_REPORT_ONLY: keeps MANUAL_REVIEW as MANUAL_REVIEW", () => {
+    const result = applyAntagonistIntelligenceDecision("MANUAL_REVIEW", ["continuity concern"], aiFail);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings!.length).toBe(2);
+  });
+
+  it("does NOT override BLOCKED_BY_RESOURCE", () => {
+    for (const ai of [aiWarn, aiFail]) {
+      const result = applyAntagonistIntelligenceDecision("BLOCKED_BY_RESOURCE", ["resource blocking=true"], ai);
+      expect(result.publishStatus).toBe("BLOCKED_BY_RESOURCE");
+      expect(result.warnings).toEqual(["resource blocking=true"]);
+    }
+  });
+
+  it("does NOT override BLOCKED_BY_CONTINUITY", () => {
+    for (const ai of [aiWarn, aiFail]) {
+      const result = applyAntagonistIntelligenceDecision("BLOCKED_BY_CONTINUITY", undefined, ai);
+      expect(result.publishStatus).toBe("BLOCKED_BY_CONTINUITY");
+      expect(result.warnings).toBeUndefined();
+    }
+  });
+
+  it("does NOT override BLOCKED_BY_QUALITY", () => {
+    for (const ai of [aiWarn, aiFail]) {
+      const result = applyAntagonistIntelligenceDecision("BLOCKED_BY_QUALITY", ["quality < threshold"], ai);
+      expect(result.publishStatus).toBe("BLOCKED_BY_QUALITY");
+      expect(result.warnings).toEqual(["quality < threshold"]);
+    }
+  });
+
+  it("does NOT override NEED_REWRITE", () => {
+    for (const ai of [aiWarn, aiFail]) {
+      const result = applyAntagonistIntelligenceDecision("NEED_REWRITE", undefined, ai);
+      expect(result.publishStatus).toBe("NEED_REWRITE");
+    }
+  });
+
+  it("returns unchanged when aiSummary is undefined", () => {
+    const result = applyAntagonistIntelligenceDecision("READY_TO_EXPORT", undefined, undefined);
     expect(result.publishStatus).toBe("READY_TO_EXPORT");
     expect(result.warnings).toBeUndefined();
   });
