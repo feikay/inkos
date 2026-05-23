@@ -18,7 +18,9 @@ import {
   applyOpeningHookDecision,
   applyAntagonistIntelligenceDecision,
   applyTransitionQualityDecision,
+  applySixStepPlotDecision,
   generateTransitionQualityReport,
+  generateSixStepPlotReport,
   renderPublishReadyMarkdown,
   resolveContentForTransitionQuality,
 } from "../commands/review.js";
@@ -1109,6 +1111,395 @@ describe("resolveContentForTransitionQuality", () => {
 
     expect(result).not.toBeNull();
     expect(result!.content).toContain("only source");
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+});
+
+// ---- six-step-plot publish-ready integration tests ----
+
+describe("applySixStepPlotDecision", () => {
+  const ssPass = { status: "PASS", score: 88, summary: "六步剧情审核通过（88/100），6/6 维信号检出。" };
+  const ssWarn = { status: "WARN", score: 65, summary: "六步剧情审核警告（65/100），2/6 维弱。" };
+  const ssFail = { status: "FAIL_STRUCTURAL", score: 42, summary: "六步剧情审核未通过（42/100），1/6 维存在严重缺陷。" };
+  const ssSkipped = { status: "SKIPPED", score: null, summary: "跳过：资源账本校验失败，跳过六步剧情审核。" };
+
+  it("PASS: returns unchanged publish_status and warnings", () => {
+    const result = applySixStepPlotDecision("READY_TO_EXPORT", undefined, ssPass);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeUndefined();
+  });
+
+  it("PASS: preserves existing warnings unchanged", () => {
+    const result = applySixStepPlotDecision("READY_WITH_WARNINGS", ["quality warning"], ssPass);
+    expect(result.publishStatus).toBe("READY_WITH_WARNINGS");
+    expect(result.warnings).toEqual(["quality warning"]);
+  });
+
+  it("SKIPPED: returns unchanged publish_status and warnings", () => {
+    const result = applySixStepPlotDecision("READY_TO_EXPORT", ["story warning"], ssSkipped);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toEqual(["story warning"]);
+  });
+
+  it("SKIPPED: does not alter READY_WITH_WARNINGS", () => {
+    const result = applySixStepPlotDecision("READY_WITH_WARNINGS", ["quality warning"], ssSkipped);
+    expect(result.publishStatus).toBe("READY_WITH_WARNINGS");
+    expect(result.warnings).toEqual(["quality warning"]);
+  });
+
+  it("WARN: appends warning without changing publish_status", () => {
+    const result = applySixStepPlotDecision("READY_TO_EXPORT", undefined, ssWarn);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings![0]).toContain("six-step-plot");
+    expect(result.warnings![0]).toContain("65");
+  });
+
+  it("WARN: appends to existing warnings", () => {
+    const result = applySixStepPlotDecision("READY_WITH_WARNINGS", ["quality warning"], ssWarn);
+    expect(result.publishStatus).toBe("READY_WITH_WARNINGS");
+    expect(result.warnings).toHaveLength(2);
+    expect(result.warnings![1]).toContain("six-step-plot");
+  });
+
+  it("WARN: appends warnings for MANUAL_REVIEW without changing status", () => {
+    const result = applySixStepPlotDecision("MANUAL_REVIEW", undefined, ssWarn);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings![0]).toContain("six-step-plot");
+  });
+
+  it("FAIL_STRUCTURAL: turns READY_TO_EXPORT into MANUAL_REVIEW", () => {
+    const result = applySixStepPlotDecision("READY_TO_EXPORT", undefined, ssFail);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings![0]).toContain("six-step-plot");
+    expect(result.warnings![0]).toContain("42");
+  });
+
+  it("FAIL_STRUCTURAL: turns READY_WITH_WARNINGS into MANUAL_REVIEW", () => {
+    const result = applySixStepPlotDecision("READY_WITH_WARNINGS", ["quality warning"], ssFail);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings).toHaveLength(2);
+  });
+
+  it("FAIL_STRUCTURAL: keeps MANUAL_REVIEW as MANUAL_REVIEW", () => {
+    const result = applySixStepPlotDecision("MANUAL_REVIEW", ["continuity concern"], ssFail);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings!.length).toBe(2);
+  });
+
+  it("does NOT override BLOCKED_BY_RESOURCE", () => {
+    for (const ss of [ssWarn, ssFail]) {
+      const result = applySixStepPlotDecision("BLOCKED_BY_RESOURCE", ["resource blocking=true"], ss);
+      expect(result.publishStatus).toBe("BLOCKED_BY_RESOURCE");
+      expect(result.warnings).toEqual(["resource blocking=true"]);
+    }
+  });
+
+  it("does NOT override BLOCKED_BY_CONTINUITY", () => {
+    for (const ss of [ssWarn, ssFail]) {
+      const result = applySixStepPlotDecision("BLOCKED_BY_CONTINUITY", undefined, ss);
+      expect(result.publishStatus).toBe("BLOCKED_BY_CONTINUITY");
+      expect(result.warnings).toBeUndefined();
+    }
+  });
+
+  it("does NOT override BLOCKED_BY_QUALITY", () => {
+    for (const ss of [ssWarn, ssFail]) {
+      const result = applySixStepPlotDecision("BLOCKED_BY_QUALITY", ["quality < threshold"], ss);
+      expect(result.publishStatus).toBe("BLOCKED_BY_QUALITY");
+      expect(result.warnings).toEqual(["quality < threshold"]);
+    }
+  });
+
+  it("does NOT override NEED_REWRITE", () => {
+    for (const ss of [ssWarn, ssFail]) {
+      const result = applySixStepPlotDecision("NEED_REWRITE", undefined, ss);
+      expect(result.publishStatus).toBe("NEED_REWRITE");
+    }
+  });
+
+  it("returns unchanged when ssSummary is undefined", () => {
+    const result = applySixStepPlotDecision("READY_TO_EXPORT", undefined, undefined);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeUndefined();
+  });
+
+  it("returns unchanged for unknown ssSummary status", () => {
+    const result = applySixStepPlotDecision("READY_TO_EXPORT", undefined, { status: "UNKNOWN", score: null, summary: "" });
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeUndefined();
+  });
+});
+
+describe("renderPublishReadyMarkdown six_step_plot field", () => {
+  function makeBaseReport(overrides: Partial<Record<string, unknown>> = {}) {
+    return {
+      book: "test-book",
+      chapter_index: 1,
+      publish_status: "READY_TO_EXPORT",
+      final_candidate_file: "chapters-reviewed/0001_final.md",
+      source_chain: ["chapters/0001.md", "chapters-fixed/0001_v1.md", "chapters-reviewed/0001_final.md"],
+      continuity: { final_status: "PASS", score: 88 },
+      quality: { final_quality_status: "QUALITY_PASS", score: 92 },
+      quality_decision: "QUALITY_PASS" as const,
+      quality_score: 92,
+      quality_pass_threshold: 85,
+      quality_accept_threshold: 75,
+      min_chapter_words: 1000,
+      word_count: 2500,
+      report_json_path: "/tmp/test.json",
+      report_markdown_path: "/tmp/test.md",
+      ...overrides,
+    };
+  }
+
+  it("includes six_step_plot field when present", () => {
+    const report = makeBaseReport({
+      six_step_plot: { status: "PASS", score: 88, summary: "六步剧情审核通过（88/100），6/6 维信号检出。" },
+    });
+    const md = renderPublishReadyMarkdown(report as Parameters<typeof renderPublishReadyMarkdown>[0]);
+    expect(md).toContain("six_step_plot");
+    expect(md).toContain("PASS");
+    expect(md).toContain("88");
+    expect(md).toContain("六步剧情审核通过");
+  });
+
+  it("omits six_step_plot field when not present", () => {
+    const report = makeBaseReport();
+    const md = renderPublishReadyMarkdown(report as Parameters<typeof renderPublishReadyMarkdown>[0]);
+    expect(md).not.toContain("six_step_plot");
+  });
+
+  it("renders six_step_plot WARN status correctly", () => {
+    const report = makeBaseReport({
+      six_step_plot: { status: "WARN", score: 65, summary: "六步剧情审核警告（65/100），2/6 维弱。" },
+    });
+    const md = renderPublishReadyMarkdown(report as Parameters<typeof renderPublishReadyMarkdown>[0]);
+    expect(md).toContain("six_step_plot: WARN");
+    expect(md).toContain("65");
+    expect(md).toContain("六步剧情审核警告");
+  });
+
+  it("renders six_step_plot FAIL_STRUCTURAL status correctly", () => {
+    const report = makeBaseReport({
+      six_step_plot: { status: "FAIL_STRUCTURAL", score: 42, summary: "六步剧情审核未通过（42/100），1/6 维存在严重缺陷。" },
+    });
+    const md = renderPublishReadyMarkdown(report as Parameters<typeof renderPublishReadyMarkdown>[0]);
+    expect(md).toContain("six_step_plot: FAIL_STRUCTURAL");
+    expect(md).toContain("42");
+  });
+
+  it("renders six_step_plot SKIPPED status correctly", () => {
+    const report = makeBaseReport({
+      six_step_plot: { status: "SKIPPED", score: null, summary: "跳过：资源账本校验失败，跳过六步剧情审核。" },
+    });
+    const md = renderPublishReadyMarkdown(report as Parameters<typeof renderPublishReadyMarkdown>[0]);
+    expect(md).toContain("six_step_plot: SKIPPED");
+    expect(md).toContain("n/a");
+  });
+});
+
+describe("generateSixStepPlotReport", () => {
+  it("writes six-step-plot report files to disk and returns summary", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-ss-test-"));
+    const chapterContent = "主角握紧拳头，一股愤怒涌上心头。出现压迫——那人不公地夺走了他的一切，这是赤裸裸的不公或冲突画面。他的目标是拿到灵石逃出此地。阻碍来自故事内在规则，制度门槛高不可攀。虽然局势危险，但保留了可破局的线索。高潮时刻，行动来自主角选择而不是外力代劳。战斗结束后，主角变强了，新敌意在暗处滋生。";
+
+    const summary = await generateSixStepPlotReport(tmp, 1, chapterContent);
+
+    expect(summary).toBeDefined();
+    expect(summary!.status).toBeDefined();
+    expect(typeof summary!.status).toBe("string");
+    expect(summary!.score !== undefined).toBe(true);
+    expect(typeof summary!.summary).toBe("string");
+
+    // Verify files were written
+    const { existsSync } = await import("node:fs");
+    const prefix = "0001";
+    const jsonPath = join(tmp, "reviews", "six-step-plot", `${prefix}.six-step-plot.report.json`);
+    const mdPath = join(tmp, "reviews", "six-step-plot", `${prefix}.six-step-plot.report.md`);
+    expect(existsSync(jsonPath)).toBe(true);
+    expect(existsSync(mdPath)).toBe(true);
+
+    // Verify json file content structure
+    const jsonRaw = await import("node:fs/promises").then((fs) => fs.readFile(jsonPath, "utf-8"));
+    const report = JSON.parse(jsonRaw);
+    expect(report.status).toBeDefined();
+    expect(report.score === null || typeof report.score === "number").toBe(true);
+    expect(typeof report.summary).toBe("string");
+    expect(report.dimensions).toBeDefined();
+    expect(report.methodCompliance).toBeDefined();
+
+    // Verify markdown includes six_step_plot info
+    const mdRaw = await import("node:fs/promises").then((fs) => fs.readFile(mdPath, "utf-8"));
+    expect(mdRaw).toContain("六步剧情");
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it("returns programmatic report (no LLM call, signal detection only)", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-ss-test-"));
+    const chapterContent = "Some content with emotion and goal signals.";
+
+    const summary = await generateSixStepPlotReport(tmp, 1, chapterContent);
+    expect(summary).toBeDefined();
+    // Programmatic scan should always produce a valid status
+    expect(["PASS", "WARN", "FAIL_STRUCTURAL", "SKIPPED"]).toContain(summary!.status);
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it("report path matches readSixStepPlotSummary convention", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-ss-test-"));
+    const chapterContent = "第一章正文内容";
+
+    await generateSixStepPlotReport(tmp, 42, chapterContent);
+
+    const { existsSync } = await import("node:fs");
+    const expectedPath = join(tmp, "reviews", "six-step-plot", "0042.six-step-plot.report.json");
+    expect(existsSync(expectedPath)).toBe(true);
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it("respects chapterTitle parameter", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-ss-test-"));
+    const content = "Test content for title.";
+
+    const summary = await generateSixStepPlotReport(tmp, 1, content, "测试标题");
+    expect(summary).toBeDefined();
+
+    // Should not crash - title is optional
+    const summary2 = await generateSixStepPlotReport(tmp, 2, content);
+    expect(summary2).toBeDefined();
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it("generates report from empty content (SKIPPED)", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-ss-test-"));
+
+    const summary = await generateSixStepPlotReport(tmp, 1, "");
+    expect(summary).toBeDefined();
+    expect(summary!.status).toBe("SKIPPED");
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it("optionally reads chapterIntent when file exists", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-ss-test-"));
+    const content = "主角遭遇了不公，目标明确，阻碍来自内在规则，找到了线索，主动选择行动，战斗后获得收益。";
+
+    // Create chapter-intents directory and file
+    const intentsDir = join(tmp, "story", "runtime", "chapter-intents");
+    await mkdir(intentsDir, { recursive: true });
+    await writeFile(join(intentsDir, "0001.md"), "情绪事件 欲望目标 阻碍 解法 高潮 反馈", "utf-8");
+
+    const summary = await generateSixStepPlotReport(tmp, 1, content);
+    expect(summary).toBeDefined();
+    expect(summary!.status).toBeDefined();
+
+    // Verify the generated report includes intentFidelity when chapterIntent was provided
+    const prefix = "0001";
+    const jsonPath = join(tmp, "reviews", "six-step-plot", `${prefix}.six-step-plot.report.json`);
+    const jsonRaw = await import("node:fs/promises").then((fs) => fs.readFile(jsonPath, "utf-8"));
+    const report = JSON.parse(jsonRaw);
+    // When chapterIntent is provided, intentFidelity should be present
+    expect(report.intentFidelity).toBeDefined();
+    expect(report.intentFidelity.fieldsTotal).toBeGreaterThan(0);
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it("does NOT block when chapterIntent file is missing", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-ss-test-"));
+    const content = "主角遭遇了不公，目标明确。";
+
+    // No chapter-intents directory at all
+    const summary = await generateSixStepPlotReport(tmp, 1, content);
+    expect(summary).toBeDefined();
+    expect(summary!.status).toBeDefined();
+    // Should not have crashed or returned undefined
+
+    // Verify report was still generated (without intentFidelity)
+    const prefix = "0001";
+    const jsonPath = join(tmp, "reviews", "six-step-plot", `${prefix}.six-step-plot.report.json`);
+    const { existsSync } = await import("node:fs");
+    expect(existsSync(jsonPath)).toBe(true);
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+});
+
+describe("resolveContentForTransitionQuality with six_step_plot priority", () => {
+  it("priority 1: final_candidate_file over source_file and original", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-ss-resolve-"));
+    const chaptersDir = join(tmp, "chapters");
+    await mkdir(chaptersDir, { recursive: true });
+    await writeFile(join(chaptersDir, "0001_test.md"), "原始章节内容 ORIGINAL", "utf-8");
+
+    const reviewedDir = join(tmp, "chapters-reviewed");
+    await mkdir(reviewedDir, { recursive: true });
+    const finalPath = join(reviewedDir, "0001_final.md");
+    await writeFile(finalPath, "最终候选稿内容 FINAL", "utf-8");
+
+    const result = await resolveContentForTransitionQuality(
+      tmp, 1,
+      "chapters-reviewed/0001_final.md",
+      undefined,
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.content).toContain("最终候选稿内容 FINAL");
+    expect(result!.content).not.toContain("原始章节内容 ORIGINAL");
+    expect(result!.path).toBe(finalPath);
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it("priority 2: source_file when final_candidate_file unavailable", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-ss-resolve-"));
+    const chaptersDir = join(tmp, "chapters");
+    await mkdir(chaptersDir, { recursive: true });
+    await writeFile(join(chaptersDir, "0001_test.md"), "原始章节内容 ORIGINAL", "utf-8");
+
+    const fixedDir = join(tmp, "chapters-fixed");
+    await mkdir(fixedDir, { recursive: true });
+    const sourcePath = join(fixedDir, "0001_fixed_v1.md");
+    await writeFile(sourcePath, "修复后的章节 SOURCE_FILE", "utf-8");
+
+    const result = await resolveContentForTransitionQuality(
+      tmp, 1,
+      "",
+      "chapters-fixed/0001_fixed_v1.md",
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.content).toContain("修复后的章节 SOURCE_FILE");
+    expect(result!.content).not.toContain("原始章节内容 ORIGINAL");
+    expect(result!.path).toBe(sourcePath);
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it("priority 3: findChapterFile when both final_candidate_file and source_file unavailable", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-ss-resolve-"));
+    const chaptersDir = join(tmp, "chapters");
+    await mkdir(chaptersDir, { recursive: true });
+    const origPath = join(chaptersDir, "0001_test.md");
+    await writeFile(origPath, "原始章节内容 ORIGINAL", "utf-8");
+
+    const result = await resolveContentForTransitionQuality(
+      tmp, 1,
+      "",
+      undefined,
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.content).toContain("原始章节内容 ORIGINAL");
+    expect(result!.path).toBe(origPath);
 
     await rm(tmp, { recursive: true, force: true });
   });

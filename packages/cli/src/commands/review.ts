@@ -28,6 +28,9 @@ import {
   readTransitionQualitySummary,
   TransitionQualityReviewerAgent,
   writeTransitionQualityReportFiles,
+  readSixStepPlotSummary,
+  SixStepPlotReviewerAgent,
+  writeSixStepPlotReportFiles,
   type AgentContext,
 } from "@actalk/inkos-core";
 import { existsSync } from "node:fs";
@@ -1088,6 +1091,11 @@ interface PublishReadyResult {
     readonly score: number | null;
     readonly summary: string;
   };
+  readonly six_step_plot?: {
+    readonly status: string;
+    readonly score: number | null;
+    readonly summary: string;
+  };
 }
 
 interface PublishReadyManualContinuityAcceptance {
@@ -2074,6 +2082,42 @@ export function applyTransitionQualityDecision(
   return { publishStatus, warnings: existingWarnings };
 }
 
+export function applySixStepPlotDecision(
+  publishStatus: string,
+  existingWarnings: ReadonlyArray<string> | undefined,
+  ssSummary: { status: string; score: number | null; summary: string } | undefined,
+): { publishStatus: string; warnings: ReadonlyArray<string> | undefined } {
+  if (!ssSummary || ssSummary.status === "PASS" || ssSummary.status === "SKIPPED") {
+    return { publishStatus, warnings: existingWarnings };
+  }
+
+  const hardBlocked = publishStatus === "BLOCKED_BY_RESOURCE"
+    || publishStatus === "BLOCKED_BY_CONTINUITY"
+    || publishStatus === "BLOCKED_BY_QUALITY"
+    || publishStatus === "NEED_REWRITE";
+
+  // Never override existing hard blocks
+  if (hardBlocked) {
+    return { publishStatus, warnings: existingWarnings };
+  }
+
+  const ssWarning = `six-step-plot: ${ssSummary.summary} (score: ${ssSummary.score ?? "n/a"})`;
+  const warnings = existingWarnings ? [...existingWarnings, ssWarning] : [ssWarning];
+
+  if (ssSummary.status === "WARN") {
+    return { publishStatus, warnings };
+  }
+
+  if (ssSummary.status === "FAIL_STRUCTURAL") {
+    if (publishStatus === "READY_TO_EXPORT" || publishStatus === "READY_WITH_WARNINGS") {
+      return { publishStatus: "MANUAL_REVIEW", warnings };
+    }
+    return { publishStatus, warnings };
+  }
+
+  return { publishStatus, warnings: existingWarnings };
+}
+
 function qualityWarnings(decision: PublishQualityDecision, score: number, passThreshold: number): ReadonlyArray<string> | undefined {
   return decision === "QUALITY_WARN_POLISH_OPTIONAL"
     ? [`quality_score ${score} is below ideal ${passThreshold}; polish is optional before export.`]
@@ -2136,6 +2180,29 @@ async function writePublishReadyReport(bookDir: string, report: PublishReadyResu
   // Apply transition-quality decision semantics (chain after antagonist-intelligence)
   const tqDecision = applyTransitionQualityDecision(aiDecision.publishStatus, aiDecision.warnings, tqSummary);
 
+  // Merge six-step-plot summary (all chapters)
+  let ssSummary = report.six_step_plot ?? await readSixStepPlotSummaryLocal(bookDir, report.chapter_index);
+
+  // If no existing six-step-plot report and not resource-blocked, generate one from chapter content
+  if (!ssSummary && report.publish_status !== "BLOCKED_BY_RESOURCE") {
+    try {
+      const resolved = await resolveContentForTransitionQuality(
+        bookDir,
+        report.chapter_index,
+        report.final_candidate_file || undefined,
+        report.source_file || undefined,
+      );
+      if (resolved) {
+        ssSummary = await generateSixStepPlotReport(bookDir, report.chapter_index, resolved.content);
+      }
+    } catch {
+      // If we can't find any chapter content, skip generation
+    }
+  }
+
+  // Apply six-step-plot decision semantics (chain after transition-quality)
+  const ssDecision = applySixStepPlotDecision(tqDecision.publishStatus, tqDecision.warnings, ssSummary);
+
   const finalReport = {
     ...report,
     story_effectiveness: seSummary,
@@ -2143,8 +2210,9 @@ async function writePublishReadyReport(bookDir: string, report: PublishReadyResu
     opening_hook: ohSummary,
     antagonist_intelligence: aiSummary,
     transition_quality: tqSummary,
-    publish_status: tqDecision.publishStatus as PublishReadyResult["publish_status"],
-    warnings: tqDecision.warnings,
+    six_step_plot: ssSummary,
+    publish_status: ssDecision.publishStatus as PublishReadyResult["publish_status"],
+    warnings: ssDecision.warnings,
     final_candidate_file: report.final_candidate_file
       ? `books/${report.book}/${report.final_candidate_file}`
       : "",
@@ -2192,7 +2260,9 @@ ${report.accepted_reason ? `- accepted_reason: ${report.accepted_reason}\n` : ""
 - antagonist_intelligence: ${report.antagonist_intelligence.status} (${report.antagonist_intelligence.score ?? "n/a"})
   ${report.antagonist_intelligence.summary}` : ""}${report.transition_quality ? `
 - transition_quality: ${report.transition_quality.status} (${report.transition_quality.score ?? "n/a"})
-  ${report.transition_quality.summary}` : ""}
+  ${report.transition_quality.summary}` : ""}${report.six_step_plot ? `
+- six_step_plot: ${report.six_step_plot.status} (${report.six_step_plot.score ?? "n/a"})
+  ${report.six_step_plot.summary}` : ""}
 
 ## Source Chain
 
@@ -3875,6 +3945,49 @@ async function readTransitionQualitySummaryLocal(
   chapter: number,
 ): Promise<{ status: string; score: number | null; summary: string } | undefined> {
   return readTransitionQualitySummary(bookDir, chapter);
+}
+
+async function readSixStepPlotSummaryLocal(
+  bookDir: string,
+  chapter: number,
+): Promise<{ status: string; score: number | null; summary: string } | undefined> {
+  return readSixStepPlotSummary(bookDir, chapter);
+}
+
+export async function generateSixStepPlotReport(
+  bookDir: string,
+  chapterIndex: number,
+  chapterContent: string,
+  chapterTitle?: string,
+): Promise<{ status: string; score: number | null; summary: string } | undefined> {
+  // Optionally read chapterIntent for intentFidelity; failure must not block generation
+  const prefix = String(chapterIndex).padStart(4, "0");
+  let chapterIntent: string | undefined;
+  try {
+    const intentPath = join(bookDir, "story", "runtime", "chapter-intents", `${prefix}.md`);
+    chapterIntent = await readFile(intentPath, "utf-8").catch(() => undefined);
+  } catch {
+    // chapter-intent not available; proceed without it
+  }
+
+  const reviewer = new SixStepPlotReviewerAgent(DUMMY_CTX);
+  const report = await reviewer.review({
+    chapterContent,
+    chapterIndex,
+    chapterTitle,
+    chapterIntent,
+  });
+  const reportDir = join(bookDir, "reviews", "six-step-plot");
+  await writeSixStepPlotReportFiles({
+    report,
+    jsonPath: join(reportDir, `${prefix}.six-step-plot.report.json`),
+    markdownPath: join(reportDir, `${prefix}.six-step-plot.report.md`),
+  });
+  return {
+    status: report.status,
+    score: report.score,
+    summary: report.summary,
+  };
 }
 
 export async function generateTransitionQualityReport(
