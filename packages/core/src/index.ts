@@ -149,6 +149,21 @@ export {
   type TransitionQualityReviewInput,
 } from "./agents/transition-quality.js";
 export {
+  SixStepPlotReviewerAgent,
+  SIX_STEP_PLOT_DIMENSIONS,
+  writeSixStepPlotReportFiles,
+  buildSkippedSixStepPlotReport,
+  renderSixStepPlotMarkdown,
+  readSixStepPlotSummary,
+  type SixStepPlotDimension,
+  type SixStepPlotStatus,
+  type SixStepPlotIssue,
+  type SixStepPlotMethodCompliance,
+  type SixStepPlotIntentFidelity,
+  type SixStepPlotReport,
+  type SixStepPlotReviewInput,
+} from "./agents/six-step-plot-reviewer.js";
+export {
   ResourceBlockingRewriterAgent,
   ResourceConsistencyReviserAgent,
   buildAuthoritativeResourceContext,
