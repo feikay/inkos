@@ -25,11 +25,17 @@ import {
   type Golden3ChapterReport,
   readOpeningHookSummary,
   readAntagonistIntelligenceSummary,
+  readTransitionQualitySummary,
+  TransitionQualityReviewerAgent,
+  writeTransitionQualityReportFiles,
+  type AgentContext,
 } from "@actalk/inkos-core";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createClient, findProjectRoot, loadConfig, resolveBookId, log, logError, loadReviewPresentation, GLOBAL_ENV_PATH } from "../utils.js";
+
+const DUMMY_CTX = {} as unknown as AgentContext;
 
 export const reviewCommand = new Command("review")
   .description("Review and approve chapters");
@@ -1077,6 +1083,11 @@ interface PublishReadyResult {
     readonly score: number | null;
     readonly summary: string;
   };
+  readonly transition_quality?: {
+    readonly status: string;
+    readonly score: number | null;
+    readonly summary: string;
+  };
 }
 
 interface PublishReadyManualContinuityAcceptance {
@@ -2027,6 +2038,42 @@ export function applyAntagonistIntelligenceDecision(
   return { publishStatus, warnings: existingWarnings };
 }
 
+export function applyTransitionQualityDecision(
+  publishStatus: string,
+  existingWarnings: ReadonlyArray<string> | undefined,
+  tqSummary: { status: string; score: number | null; summary: string } | undefined,
+): { publishStatus: string; warnings: ReadonlyArray<string> | undefined } {
+  if (!tqSummary || tqSummary.status === "PASS" || tqSummary.status === "SKIPPED") {
+    return { publishStatus, warnings: existingWarnings };
+  }
+
+  const hardBlocked = publishStatus === "BLOCKED_BY_RESOURCE"
+    || publishStatus === "BLOCKED_BY_CONTINUITY"
+    || publishStatus === "BLOCKED_BY_QUALITY"
+    || publishStatus === "NEED_REWRITE";
+
+  // Never override existing hard blocks
+  if (hardBlocked) {
+    return { publishStatus, warnings: existingWarnings };
+  }
+
+  const tqWarning = `transition-quality: ${tqSummary.summary} (score: ${tqSummary.score ?? "n/a"})`;
+  const warnings = existingWarnings ? [...existingWarnings, tqWarning] : [tqWarning];
+
+  if (tqSummary.status === "WARN") {
+    return { publishStatus, warnings };
+  }
+
+  if (tqSummary.status === "FAIL_STRUCTURAL") {
+    if (publishStatus === "READY_TO_EXPORT" || publishStatus === "READY_WITH_WARNINGS") {
+      return { publishStatus: "MANUAL_REVIEW", warnings };
+    }
+    return { publishStatus, warnings };
+  }
+
+  return { publishStatus, warnings: existingWarnings };
+}
+
 function qualityWarnings(decision: PublishQualityDecision, score: number, passThreshold: number): ReadonlyArray<string> | undefined {
   return decision === "QUALITY_WARN_POLISH_OPTIONAL"
     ? [`quality_score ${score} is below ideal ${passThreshold}; polish is optional before export.`]
@@ -2066,14 +2113,38 @@ async function writePublishReadyReport(bookDir: string, report: PublishReadyResu
   // Apply antagonist-intelligence decision semantics (chain after opening-hook)
   const aiDecision = applyAntagonistIntelligenceDecision(ohDecision.publishStatus, ohDecision.warnings, aiSummary);
 
+  // Merge transition-quality summary (all chapters)
+  let tqSummary = report.transition_quality ?? await readTransitionQualitySummaryLocal(bookDir, report.chapter_index);
+
+  // If no existing transition-quality report and not resource-blocked, generate one from chapter content
+  if (!tqSummary && report.publish_status !== "BLOCKED_BY_RESOURCE") {
+    try {
+      const resolved = await resolveContentForTransitionQuality(
+        bookDir,
+        report.chapter_index,
+        report.final_candidate_file || undefined,
+        report.source_file || undefined,
+      );
+      if (resolved) {
+        tqSummary = await generateTransitionQualityReport(bookDir, report.chapter_index, resolved.content);
+      }
+    } catch {
+      // If we can't find any chapter content, skip generation
+    }
+  }
+
+  // Apply transition-quality decision semantics (chain after antagonist-intelligence)
+  const tqDecision = applyTransitionQualityDecision(aiDecision.publishStatus, aiDecision.warnings, tqSummary);
+
   const finalReport = {
     ...report,
     story_effectiveness: seSummary,
     golden_3_chapter: gcSummary,
     opening_hook: ohSummary,
     antagonist_intelligence: aiSummary,
-    publish_status: aiDecision.publishStatus as PublishReadyResult["publish_status"],
-    warnings: aiDecision.warnings,
+    transition_quality: tqSummary,
+    publish_status: tqDecision.publishStatus as PublishReadyResult["publish_status"],
+    warnings: tqDecision.warnings,
     final_candidate_file: report.final_candidate_file
       ? `books/${report.book}/${report.final_candidate_file}`
       : "",
@@ -2089,7 +2160,7 @@ async function writePublishReadyReport(bookDir: string, report: PublishReadyResu
   return finalReport;
 }
 
-function renderPublishReadyMarkdown(report: PublishReadyResult): string {
+export function renderPublishReadyMarkdown(report: PublishReadyResult): string {
   const chain = report.source_chain.length ? report.source_chain.map((item) => `- ${item}`).join("\n") : "- 无";
   return `# Publish Ready Report
 
@@ -2119,7 +2190,9 @@ ${report.accepted_reason ? `- accepted_reason: ${report.accepted_reason}\n` : ""
 - opening_hook: ${report.opening_hook.status} (${report.opening_hook.score ?? "n/a"})
   ${report.opening_hook.summary}` : ""}${report.antagonist_intelligence ? `
 - antagonist_intelligence: ${report.antagonist_intelligence.status} (${report.antagonist_intelligence.score ?? "n/a"})
-  ${report.antagonist_intelligence.summary}` : ""}
+  ${report.antagonist_intelligence.summary}` : ""}${report.transition_quality ? `
+- transition_quality: ${report.transition_quality.status} (${report.transition_quality.score ?? "n/a"})
+  ${report.transition_quality.summary}` : ""}
 
 ## Source Chain
 
@@ -3795,6 +3868,74 @@ async function readAntagonistIntelligenceSummaryLocal(
   chapter: number,
 ): Promise<{ status: string; score: number | null; summary: string } | undefined> {
   return readAntagonistIntelligenceSummary(bookDir, chapter);
+}
+
+async function readTransitionQualitySummaryLocal(
+  bookDir: string,
+  chapter: number,
+): Promise<{ status: string; score: number | null; summary: string } | undefined> {
+  return readTransitionQualitySummary(bookDir, chapter);
+}
+
+export async function generateTransitionQualityReport(
+  bookDir: string,
+  chapterIndex: number,
+  chapterContent: string,
+  chapterTitle?: string,
+): Promise<{ status: string; score: number | null; summary: string } | undefined> {
+  const reviewer = new TransitionQualityReviewerAgent(DUMMY_CTX);
+  const report = await reviewer.review({
+    chapterContent,
+    chapterIndex,
+    chapterTitle,
+  });
+  const prefix = String(chapterIndex).padStart(4, "0");
+  const reportDir = join(bookDir, "reviews", "transition-quality");
+  await writeTransitionQualityReportFiles({
+    report,
+    jsonPath: join(reportDir, `${prefix}.transition-quality.report.json`),
+    markdownPath: join(reportDir, `${prefix}.transition-quality.report.md`),
+  });
+  return {
+    status: report.status,
+    score: report.score,
+    summary: report.summary,
+  };
+}
+
+export async function resolveContentForTransitionQuality(
+  bookDir: string,
+  chapterIndex: number,
+  finalCandidateFile: string | undefined,
+  sourceFile: string | undefined,
+): Promise<{ content: string; path: string } | null> {
+  // Priority 1: final_candidate_file
+  if (finalCandidateFile) {
+    const resolved = resolveUsedFilePath(bookDir, finalCandidateFile);
+    if (resolved) {
+      return { content: await readFile(resolved, "utf-8"), path: resolved };
+    }
+  }
+
+  // Priority 2: source_file
+  if (sourceFile) {
+    const resolved = resolveUsedFilePath(bookDir, sourceFile);
+    if (resolved) {
+      return { content: await readFile(resolved, "utf-8"), path: resolved };
+    }
+  }
+
+  // Priority 3: original chapter file
+  try {
+    const chapterFile = await findChapterFile(bookDir, chapterIndex);
+    if (chapterFile?.file) {
+      return { content: await readFile(chapterFile.file, "utf-8"), path: chapterFile.file };
+    }
+  } catch {
+    // Chapter not found; fall through to return null
+  }
+
+  return null;
 }
 
 async function readResourceConsistencyReportIfExists(

@@ -17,6 +17,10 @@ import {
   applyGolden3ChapterDecision,
   applyOpeningHookDecision,
   applyAntagonistIntelligenceDecision,
+  applyTransitionQualityDecision,
+  generateTransitionQualityReport,
+  renderPublishReadyMarkdown,
+  resolveContentForTransitionQuality,
 } from "../commands/review.js";
 
 function makeReport(overrides: Partial<ContinuityReport> = {}): ContinuityReport {
@@ -692,5 +696,420 @@ describe("applyAntagonistIntelligenceDecision", () => {
     const result = applyAntagonistIntelligenceDecision("READY_TO_EXPORT", undefined, undefined);
     expect(result.publishStatus).toBe("READY_TO_EXPORT");
     expect(result.warnings).toBeUndefined();
+  });
+});
+
+describe("applyTransitionQualityDecision", () => {
+  const tqPass = { status: "PASS", score: 88, summary: "转场质量审核通过（88/100），硬转场 0 种，方法证据 3/4 维。" };
+  const tqWarn = { status: "WARN", score: 65, summary: "转场质量审核警告（65/100），硬转场 3 种，方法证据 2/4 维。" };
+  const tqFail = { status: "FAIL_STRUCTURAL", score: 42, summary: "转场质量审核未通过（42/100），硬转场 5 种，方法证据 1/4 维。" };
+  const tqSkipped = { status: "SKIPPED", score: null, summary: "跳过：资源账本校验失败，跳过转场质量审核。" };
+
+  it("PASS: returns unchanged publish_status and warnings", () => {
+    const result = applyTransitionQualityDecision("READY_TO_EXPORT", undefined, tqPass);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeUndefined();
+  });
+
+  it("PASS: preserves existing warnings unchanged", () => {
+    const result = applyTransitionQualityDecision("READY_WITH_WARNINGS", ["quality warning"], tqPass);
+    expect(result.publishStatus).toBe("READY_WITH_WARNINGS");
+    expect(result.warnings).toEqual(["quality warning"]);
+  });
+
+  it("SKIPPED: returns unchanged publish_status and warnings", () => {
+    const result = applyTransitionQualityDecision("READY_TO_EXPORT", ["story warning"], tqSkipped);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toEqual(["story warning"]);
+  });
+
+  it("SKIPPED: does not alter READY_WITH_WARNINGS", () => {
+    const result = applyTransitionQualityDecision("READY_WITH_WARNINGS", ["quality warning"], tqSkipped);
+    expect(result.publishStatus).toBe("READY_WITH_WARNINGS");
+    expect(result.warnings).toEqual(["quality warning"]);
+  });
+
+  it("WARN: appends warning without changing publish_status", () => {
+    const result = applyTransitionQualityDecision("READY_TO_EXPORT", undefined, tqWarn);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings![0]).toContain("transition-quality");
+    expect(result.warnings![0]).toContain("65");
+  });
+
+  it("WARN: appends to existing warnings", () => {
+    const result = applyTransitionQualityDecision("READY_WITH_WARNINGS", ["quality warning"], tqWarn);
+    expect(result.publishStatus).toBe("READY_WITH_WARNINGS");
+    expect(result.warnings).toHaveLength(2);
+    expect(result.warnings![1]).toContain("transition-quality");
+  });
+
+  it("WARN: appends warnings for MANUAL_REVIEW without changing status", () => {
+    const result = applyTransitionQualityDecision("MANUAL_REVIEW", undefined, tqWarn);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings![0]).toContain("transition-quality");
+  });
+
+  it("FAIL_STRUCTURAL: turns READY_TO_EXPORT into MANUAL_REVIEW", () => {
+    const result = applyTransitionQualityDecision("READY_TO_EXPORT", undefined, tqFail);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings![0]).toContain("transition-quality");
+    expect(result.warnings![0]).toContain("42");
+  });
+
+  it("FAIL_STRUCTURAL: turns READY_WITH_WARNINGS into MANUAL_REVIEW", () => {
+    const result = applyTransitionQualityDecision("READY_WITH_WARNINGS", ["quality warning"], tqFail);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings).toHaveLength(2);
+  });
+
+  it("FAIL_STRUCTURAL: keeps MANUAL_REVIEW as MANUAL_REVIEW", () => {
+    const result = applyTransitionQualityDecision("MANUAL_REVIEW", ["continuity concern"], tqFail);
+    expect(result.publishStatus).toBe("MANUAL_REVIEW");
+    expect(result.warnings!.length).toBe(2);
+  });
+
+  it("does NOT override BLOCKED_BY_RESOURCE", () => {
+    for (const tq of [tqWarn, tqFail]) {
+      const result = applyTransitionQualityDecision("BLOCKED_BY_RESOURCE", ["resource blocking=true"], tq);
+      expect(result.publishStatus).toBe("BLOCKED_BY_RESOURCE");
+      expect(result.warnings).toEqual(["resource blocking=true"]);
+    }
+  });
+
+  it("does NOT override BLOCKED_BY_CONTINUITY", () => {
+    for (const tq of [tqWarn, tqFail]) {
+      const result = applyTransitionQualityDecision("BLOCKED_BY_CONTINUITY", undefined, tq);
+      expect(result.publishStatus).toBe("BLOCKED_BY_CONTINUITY");
+      expect(result.warnings).toBeUndefined();
+    }
+  });
+
+  it("does NOT override BLOCKED_BY_QUALITY", () => {
+    for (const tq of [tqWarn, tqFail]) {
+      const result = applyTransitionQualityDecision("BLOCKED_BY_QUALITY", ["quality < threshold"], tq);
+      expect(result.publishStatus).toBe("BLOCKED_BY_QUALITY");
+      expect(result.warnings).toEqual(["quality < threshold"]);
+    }
+  });
+
+  it("does NOT override NEED_REWRITE", () => {
+    for (const tq of [tqWarn, tqFail]) {
+      const result = applyTransitionQualityDecision("NEED_REWRITE", undefined, tq);
+      expect(result.publishStatus).toBe("NEED_REWRITE");
+    }
+  });
+
+  it("returns unchanged when tqSummary is undefined", () => {
+    const result = applyTransitionQualityDecision("READY_TO_EXPORT", undefined, undefined);
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeUndefined();
+  });
+
+  it("returns unchanged for unknown tqSummary status", () => {
+    const result = applyTransitionQualityDecision("READY_TO_EXPORT", undefined, { status: "UNKNOWN", score: null, summary: "" });
+    expect(result.publishStatus).toBe("READY_TO_EXPORT");
+    expect(result.warnings).toBeUndefined();
+  });
+});
+
+describe("generateTransitionQualityReport", () => {
+  it("writes transition-quality report files to disk and returns summary", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-tq-test-"));
+    const chapterContent = "夜幕降临。\n\n楚夜转身看向云岚，目光中带着一丝担忧。\n\n与此同时，远处传来了铁器的碰撞声。\n\n他深吸一口气，迈步向前。";
+
+    const summary = await generateTransitionQualityReport(tmp, 1, chapterContent);
+
+    expect(summary).toBeDefined();
+    expect(summary!.status).toBeDefined();
+    expect(typeof summary!.status).toBe("string");
+    expect(summary!.score !== undefined).toBe(true);
+    expect(typeof summary!.summary).toBe("string");
+
+    // Verify files were written
+    const { existsSync } = await import("node:fs");
+    const prefix = "0001";
+    const jsonPath = join(tmp, "reviews", "transition-quality", `${prefix}.transition-quality.report.json`);
+    const mdPath = join(tmp, "reviews", "transition-quality", `${prefix}.transition-quality.report.md`);
+    expect(existsSync(jsonPath)).toBe(true);
+    expect(existsSync(mdPath)).toBe(true);
+
+    // Verify json file content structure
+    const jsonRaw = await import("node:fs/promises").then((fs) => fs.readFile(jsonPath, "utf-8"));
+    const report = JSON.parse(jsonRaw);
+    expect(report.status).toBeDefined();
+    expect(report.score === null || typeof report.score === "number").toBe(true);
+    expect(typeof report.summary).toBe("string");
+    expect(report.dimensions).toBeDefined();
+    expect(report.hardTransitionCount !== undefined).toBe(true);
+
+    // Verify markdown includes transition_quality info
+    const mdRaw = await import("node:fs/promises").then((fs) => fs.readFile(mdPath, "utf-8"));
+    expect(mdRaw).toContain("Transition Quality");
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it("returns programmatic report (no LLM call, hard scan only)", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-tq-test-"));
+    const chapterContent = "Some content with 突然 transition phrase.";
+
+    const summary = await generateTransitionQualityReport(tmp, 1, chapterContent);
+    expect(summary).toBeDefined();
+    // Programmatic scan should always produce a valid status
+    expect(["PASS", "WARN", "FAIL_STRUCTURAL", "SKIPPED"]).toContain(summary!.status);
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it("report path matches readTransitionQualitySummary convention", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-tq-test-"));
+    const chapterContent = "第一章正文内容";
+
+    await generateTransitionQualityReport(tmp, 42, chapterContent);
+
+    // This is the 4-digit prefix convention readTransitionQualitySummary uses
+    const { existsSync } = await import("node:fs");
+    const expectedPath = join(tmp, "reviews", "transition-quality", "0042.transition-quality.report.json");
+    expect(existsSync(expectedPath)).toBe(true);
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it("respects chapterTitle parameter", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-tq-test-"));
+    const content = "Test content for title.";
+
+    const summary = await generateTransitionQualityReport(tmp, 1, content, "测试标题");
+    expect(summary).toBeDefined();
+
+    // Should not crash - title is optional
+    const summary2 = await generateTransitionQualityReport(tmp, 2, content);
+    expect(summary2).toBeDefined();
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+});
+
+describe("renderPublishReadyMarkdown transition_quality field", () => {
+  function makeBaseReport(overrides: Partial<Record<string, unknown>> = {}) {
+    return {
+      book: "test-book",
+      chapter_index: 1,
+      publish_status: "READY_TO_EXPORT",
+      final_candidate_file: "books/test-book/chapters-reviewed/0001_final.md",
+      source_chain: ["chapters/0001_test.md"],
+      continuity: { final_status: "PASS", score: 90 },
+      quality: { final_quality_status: "QUALITY_PASS", score: 88 },
+      quality_score: 88,
+      quality_pass_threshold: 85,
+      quality_accept_threshold: 80,
+      word_count: 2000,
+      min_chapter_words: 1000,
+      report_json_path: "/tmp/report.json",
+      report_markdown_path: "/tmp/report.md",
+      ...overrides,
+    } as Parameters<typeof renderPublishReadyMarkdown>[0];
+  }
+
+  it("includes transition_quality section when present", () => {
+    const report = makeBaseReport({
+      transition_quality: { status: "PASS", score: 85, summary: "转场自然流畅。" },
+    });
+    const md = renderPublishReadyMarkdown(report);
+    expect(md).toContain("transition_quality:");
+    expect(md).toContain("PASS");
+    expect(md).toContain("85");
+    expect(md).toContain("转场自然流畅。");
+  });
+
+  it("includes WARN transition_quality with warning text", () => {
+    const report = makeBaseReport({
+      transition_quality: { status: "WARN", score: 60, summary: "部分转场存在钩子断裂风险。" },
+    });
+    const md = renderPublishReadyMarkdown(report);
+    expect(md).toContain("transition_quality:");
+    expect(md).toContain("WARN");
+    expect(md).toContain("钩子断裂");
+  });
+
+  it("includes FAIL_STRUCTURAL transition_quality", () => {
+    const report = makeBaseReport({
+      transition_quality: { status: "FAIL_STRUCTURAL", score: 35, summary: "硬转场过多，缺乏叙事推进。" },
+    });
+    const md = renderPublishReadyMarkdown(report);
+    expect(md).toContain("transition_quality:");
+    expect(md).toContain("FAIL_STRUCTURAL");
+  });
+
+  it("does NOT include transition_quality section when absent", () => {
+    const report = makeBaseReport();
+    const md = renderPublishReadyMarkdown(report);
+    expect(md).not.toContain("transition_quality:");
+  });
+
+  it("includes transition_quality among other review layer fields", () => {
+    const report = makeBaseReport({
+      story_effectiveness: { status: "PASS", score: 90, summary: "情绪与冲突强度足够。" },
+      golden_3_chapter: { status: "PASS", score: 88, summary: "开篇节奏良好。" },
+      opening_hook: { status: "WARN", score: 55, summary: "开篇悬疑钩子较弱。" },
+      antagonist_intelligence: { status: "PASS", score: 92, summary: "反派博弈设计合格。" },
+      transition_quality: { status: "PASS", score: 85, summary: "转场自然流畅。" },
+    });
+    const md = renderPublishReadyMarkdown(report);
+    expect(md).toContain("story_effectiveness:");
+    expect(md).toContain("golden_3_chapter:");
+    expect(md).toContain("opening_hook:");
+    expect(md).toContain("antagonist_intelligence:");
+    expect(md).toContain("transition_quality:");
+  });
+
+  it("includes SKIPPED transition_quality", () => {
+    const report = makeBaseReport({
+      transition_quality: { status: "SKIPPED", score: null, summary: "跳过：资源账本校验失败。" },
+    });
+    const md = renderPublishReadyMarkdown(report);
+    expect(md).toContain("transition_quality:");
+    expect(md).toContain("SKIPPED");
+  });
+});
+
+describe("resolveContentForTransitionQuality", () => {
+  it("uses final_candidate_file content when it exists (priority 1)", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-tq-resolve-"));
+    // Create original chapter
+    const chaptersDir = join(tmp, "chapters");
+    await mkdir(chaptersDir, { recursive: true });
+    await writeFile(join(chaptersDir, "0001_test.md"), "原始章节内容 ORIGINAL", "utf-8");
+
+    // Create final candidate with different content
+    const reviewedDir = join(tmp, "chapters-reviewed");
+    await mkdir(reviewedDir, { recursive: true });
+    const finalPath = join(reviewedDir, "0001_final.md");
+    await writeFile(finalPath, "最终候选稿内容 FINAL", "utf-8");
+
+    const result = await resolveContentForTransitionQuality(
+      tmp, 1,
+      "chapters-reviewed/0001_final.md", // final_candidate_file
+      undefined,
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.content).toContain("最终候选稿内容 FINAL");
+    expect(result!.content).not.toContain("原始章节内容 ORIGINAL");
+    expect(result!.path).toBe(finalPath);
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it("falls back to source_file when final_candidate_file is unavailable (priority 2)", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-tq-resolve-"));
+    const chaptersDir = join(tmp, "chapters");
+    await mkdir(chaptersDir, { recursive: true });
+    await writeFile(join(chaptersDir, "0001_test.md"), "原始章节内容 ORIGINAL", "utf-8");
+
+    // Create a fixed candidate
+    const fixedDir = join(tmp, "chapters-fixed");
+    await mkdir(fixedDir, { recursive: true });
+    const sourcePath = join(fixedDir, "0001_fixed_v1.md");
+    await writeFile(sourcePath, "修复后的章节 SOURCE_FILE", "utf-8");
+
+    const result = await resolveContentForTransitionQuality(
+      tmp, 1,
+      "", // empty final_candidate_file
+      "chapters-fixed/0001_fixed_v1.md", // source_file
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.content).toContain("修复后的章节 SOURCE_FILE");
+    expect(result!.content).not.toContain("原始章节内容 ORIGINAL");
+    expect(result!.path).toBe(sourcePath);
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it("falls back to findChapterFile when final_candidate_file and source_file are both empty (priority 3)", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-tq-resolve-"));
+    const chaptersDir = join(tmp, "chapters");
+    await mkdir(chaptersDir, { recursive: true });
+    const origPath = join(chaptersDir, "0001_test.md");
+    await writeFile(origPath, "原始章节内容 ORIGINAL", "utf-8");
+
+    const result = await resolveContentForTransitionQuality(
+      tmp, 1,
+      "",   // empty final_candidate_file
+      undefined, // no source_file
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.content).toContain("原始章节内容 ORIGINAL");
+    expect(result!.path).toBe(origPath);
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it("returns null when no source is available", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-tq-resolve-"));
+    // No chapters directory at all
+
+    const result = await resolveContentForTransitionQuality(
+      tmp, 99,
+      "",    // empty final_candidate_file
+      undefined, // no source_file
+    );
+
+    expect(result).toBeNull();
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it("prefers final_candidate_file even when source_file is present", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-tq-resolve-"));
+    const chaptersDir = join(tmp, "chapters");
+    await mkdir(chaptersDir, { recursive: true });
+    await writeFile(join(chaptersDir, "0001_test.md"), "原始章节", "utf-8");
+
+    // Both final candidate and source exist with different content
+    const reviewedDir = join(tmp, "chapters-reviewed");
+    await mkdir(reviewedDir, { recursive: true });
+    await writeFile(join(reviewedDir, "0001_final.md"), "FINAL_CANDIDATE", "utf-8");
+
+    const fixedDir = join(tmp, "chapters-fixed");
+    await mkdir(fixedDir, { recursive: true });
+    await writeFile(join(fixedDir, "0001_v1.md"), "SOURCE_FILE", "utf-8");
+
+    const result = await resolveContentForTransitionQuality(
+      tmp, 1,
+      "chapters-reviewed/0001_final.md", // final_candidate_file
+      "chapters-fixed/0001_v1.md",        // source_file
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.content).toContain("FINAL_CANDIDATE");
+    expect(result!.content).not.toContain("SOURCE_FILE");
+    expect(result!.content).not.toContain("原始章节");
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it("handles undefined final_candidate_file (not just empty string)", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "inkos-tq-resolve-"));
+    const chaptersDir = join(tmp, "chapters");
+    await mkdir(chaptersDir, { recursive: true });
+    const sourcePath = join(chaptersDir, "0001_test.md");
+    await writeFile(sourcePath, "only source", "utf-8");
+
+    const result = await resolveContentForTransitionQuality(
+      tmp, 1,
+      undefined, // undefined final_candidate_file
+      "chapters/0001_test.md",
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.content).toContain("only source");
+
+    await rm(tmp, { recursive: true, force: true });
   });
 });

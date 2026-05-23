@@ -136,6 +136,19 @@ export {
   type AntagonistIntelligenceReviewInput,
 } from "./agents/antagonist-intelligence.js";
 export {
+  TransitionQualityReviewerAgent,
+  TRANSITION_QUALITY_DIMENSIONS,
+  writeTransitionQualityReportFiles,
+  buildSkippedTransitionQualityReport,
+  renderTransitionQualityMarkdown,
+  readTransitionQualitySummary,
+  type TransitionQualityDimension,
+  type TransitionQualityStatus,
+  type TransitionQualityIssue,
+  type TransitionQualityReport,
+  type TransitionQualityReviewInput,
+} from "./agents/transition-quality.js";
+export {
   ResourceBlockingRewriterAgent,
   ResourceConsistencyReviserAgent,
   buildAuthoritativeResourceContext,
