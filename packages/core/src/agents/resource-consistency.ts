@@ -501,8 +501,9 @@ export function parseResourceRules(bookRules = "", currentLedger = "", currentSt
     });
   }
 
-  const exchangeRates = parseExchangeRates(bookRules, aliases);
-  const skills = parseSkillRules(bookRules, aliases);
+  const partialRules: ResourceRules = { resources: Object.fromEntries(resources), aliases, exchangeRates: [], skills: [] };
+  const exchangeRates = parseExchangeRates(bookRules, aliases, partialRules);
+  const skills = parseSkillRules(bookRules, aliases, partialRules);
   for (const skill of skills) {
     addResource(skill.resource);
   }
@@ -1534,8 +1535,8 @@ function buildResourcePattern(resourceTypes: ReadonlyArray<string>): string {
     .join("|");
 }
 
-function parseExchangeRates(bookRules: string, aliases: Readonly<Record<string, string>>): ResourceExchangeRate[] {
-  return parseExchangeRatesFromText(bookRules, aliases, "book_rules", true);
+function parseExchangeRates(bookRules: string, aliases: Readonly<Record<string, string>>, rules?: ResourceRules): ResourceExchangeRate[] {
+  return parseExchangeRatesFromText(bookRules, aliases, "book_rules", true, rules);
 }
 
 function parseExchangeRatesFromText(
@@ -1543,12 +1544,14 @@ function parseExchangeRatesFromText(
   aliases: Readonly<Record<string, string>>,
   source: ResourceExchangeRate["source"] = "book_rules",
   includeDefault = false,
+  rules?: ResourceRules,
 ): ResourceExchangeRate[] {
   const rates: ResourceExchangeRate[] = [];
+  const effectiveRules = rules ?? { resources: {}, aliases, exchangeRates: [], skills: [] };
   const add = (fromRaw: string, toRaw: string, rate: number, rule: string) => {
-    const from = canonicalResourceName(fromRaw, { resources: {}, aliases, exchangeRates: [], skills: [] }) ?? normalizeResourceName(fromRaw);
-    const to = canonicalResourceName(toRaw, { resources: {}, aliases, exchangeRates: [], skills: [] }) ?? normalizeResourceName(toRaw);
-    if (!isAllowedResource(from) || !isAllowedResource(to) || !Number.isFinite(rate) || rate <= 0) return;
+    const from = canonicalResourceName(fromRaw, effectiveRules) ?? normalizeResourceName(fromRaw);
+    const to = canonicalResourceName(toRaw, effectiveRules) ?? normalizeResourceName(toRaw);
+    if (!isAllowedResource(from, effectiveRules) || !isAllowedResource(to, effectiveRules) || !Number.isFinite(rate) || rate <= 0) return;
     if (rates.some((candidate) => candidate.from === from && candidate.to === to)) return;
     rates.push({ from, to, rate, rule, source });
   };
@@ -1572,12 +1575,13 @@ function parseExchangeRatesFromText(
   return rates;
 }
 
-function parseSkillRules(bookRules: string, aliases: Readonly<Record<string, string>>): ResourceSkillRule[] {
+function parseSkillRules(bookRules: string, aliases: Readonly<Record<string, string>>, rules?: ResourceRules): ResourceSkillRule[] {
   const skills: ResourceSkillRule[] = [];
+  const effectiveRules = rules ?? { resources: {}, aliases, exchangeRates: [], skills: [] };
   const add = (skillRaw: string, resourceRaw: string, amount: number) => {
     const skill = normalizeSkillLabel(skillRaw.endsWith("技能") ? skillRaw : `${skillRaw}技能`);
-    const resource = canonicalResourceName(resourceRaw, { resources: {}, aliases, exchangeRates: [], skills: [] }) ?? normalizeResourceName(resourceRaw);
-    if (!skill || !isAllowedResource(resource) || !Number.isFinite(amount)) return;
+    const resource = canonicalResourceName(resourceRaw, effectiveRules) ?? normalizeResourceName(resourceRaw);
+    if (!skill || !isAllowedResource(resource, effectiveRules) || !Number.isFinite(amount)) return;
     if (skills.some((candidate) => candidate.skill === skill)) return;
     skills.push({ skill, resource, amount });
   };

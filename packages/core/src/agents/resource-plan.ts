@@ -1007,6 +1007,18 @@ export function validateTextAgainstChapterResourcePlanFinal(params: {
   const closureRequirement = getClosureRequirement(plan);
   const noBalanceChangePlan = isNoBalanceChangePlan(plan);
   const balanceMutationEvents = findBalanceMutationEvents(validation.events);
+
+  // Adaptive closing balance for system_bootstrap / resource_rule_reveal:
+  // When the chapter has real resource events with clean validation, compute
+  // expected closing balances from events instead of rigidly requiring
+  // closing = opening (which blocks legitimate bootstrap resource activity).
+  const isBootstrapOrReveal = plan.mode === "system_bootstrap" || plan.mode === "resource_rule_reveal";
+  const hasBootstrapActivity = isBootstrapOrReveal && balanceMutationEvents.length > 0;
+  const validationClean = !validation.issues.some(i => i.severity === "critical");
+  const effectiveClosingBalances: Record<string, number> = (hasBootstrapActivity && validationClean)
+    ? computeEventBasedClosingBalances(plan.openingBalances, validation.events)
+    : { ...expectedClosingBalances };
+
   const actualClosingBalances: Record<string, number> = {
     ...plan.openingBalances,
     ...validation.closingBalances,
@@ -1056,7 +1068,25 @@ export function validateTextAgainstChapterResourcePlanFinal(params: {
     : findMissingRequiredEvents(params.text, validation.events, plan);
   const violations: string[] = [...forbiddenHits, ...missingRequiredEvents];
 
-  for (const [resource, expected] of Object.entries(expectedClosingBalances)) {
+  // For bootstrap/reveal modes with real resource activity, adjust
+  // balance_claim expectations to match event-computed closing balances.
+  if (hasBootstrapActivity && validationClean) {
+    for (const event of plan.allowedEvents) {
+      if (event.kind === "balance_claim") {
+        const oldViolation = `缺少期末 ${event.resource}=${event.amount}`;
+        const idx = violations.indexOf(oldViolation);
+        if (idx >= 0) {
+          violations.splice(idx, 1);
+          const computedExpected = effectiveClosingBalances[event.resource] ?? 0;
+          if (!hasBalanceClaim(params.text, event.resource, computedExpected)) {
+            violations.push(`缺少期末 ${event.resource}=${computedExpected}`);
+          }
+        }
+      }
+    }
+  }
+
+  for (const [resource, expected] of Object.entries(effectiveClosingBalances)) {
     const actual = actualClosingBalances[resource] ?? plan.openingBalances[resource] ?? 0;
     if (actual !== expected) {
       violations.push(`closingBalances ${resource} expected ${expected}, actual ${actual}`);
@@ -1065,7 +1095,7 @@ export function validateTextAgainstChapterResourcePlanFinal(params: {
 
   for (const issue of validation.issues) {
     if (issue.code === "balance-mismatch") {
-      if (actualClosingBalances[issue.resource] === expectedClosingBalances[issue.resource]) {
+      if (actualClosingBalances[issue.resource] === effectiveClosingBalances[issue.resource]) {
         continue;
       }
       if (issue.actual !== undefined && issue.expected !== undefined) {
@@ -1104,7 +1134,7 @@ export function validateTextAgainstChapterResourcePlanFinal(params: {
     violations: [...new Set(violations)],
     missingRequiredEvents: [...new Set(missingRequiredEvents)],
     forbiddenHits: [...new Set(forbiddenHits)],
-    expectedClosingBalances,
+    expectedClosingBalances: effectiveClosingBalances,
     actualClosingBalances,
     closureRequirement,
     closureSource: noBalanceChangePlan && balanceMutationEvents.length === 0 ? "inferred_no_change" : closureRequirement === "explicit_event_chain_required" ? "event_chain" : "explicit_balance",
@@ -1112,6 +1142,21 @@ export function validateTextAgainstChapterResourcePlanFinal(params: {
     balanceMutationEvents,
     forbiddenMutationHits: forbiddenHits,
   };
+}
+
+function computeEventBasedClosingBalances(
+  openingBalances: Readonly<Record<string, number>>,
+  events: ReadonlyArray<ResourceEvent>,
+): Record<string, number> {
+  const balances: Record<string, number> = { ...openingBalances };
+  for (const event of events) {
+    if (event.kind === "gain") {
+      balances[event.resource] = (balances[event.resource] ?? 0) + (event.amount ?? 0);
+    } else if (event.kind === "consume") {
+      balances[event.resource] = (balances[event.resource] ?? 0) - (event.amount ?? 0);
+    }
+  }
+  return balances;
 }
 
 export function isNoBalanceChangePlan(plan: ChapterResourcePlan): boolean {

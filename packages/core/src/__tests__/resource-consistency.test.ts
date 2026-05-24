@@ -771,4 +771,64 @@ describe("system_bootstrap and resource_rule_reveal modes", () => {
     expect(claimedResources).not.toContain("民望值");
     expect(claimedResources).not.toContain("联邦币");
   });
+
+  // FIX-052-B-2: custom resource exchange rate and skill parsing (R2)
+  it("should parse exchange rates for custom (non-whitelist) resources", () => {
+    const bookRules = [
+      "resourceTypes:",
+      "  - 震惊值",
+      "  - 爱慕值",
+      "exchangeRates:",
+      "  - from: 震惊值",
+      "    to: 爱慕值",
+      "    rate: 5",
+    ].join("\n");
+
+    const rules = parseResourceRules(bookRules);
+    expect(rules.resources["震惊值"]).toBeDefined();
+    expect(rules.resources["爱慕值"]).toBeDefined();
+    // Exchange rate between custom resources must survive parsing
+    expect(rules.exchangeRates.length).toBe(1);
+    expect(rules.exchangeRates[0]?.from).toBe("震惊值");
+    expect(rules.exchangeRates[0]?.to).toBe("爱慕值");
+    expect(rules.exchangeRates[0]?.rate).toBe(5);
+  });
+
+  it("should parse skill costs referencing custom resources", () => {
+    const bookRules = [
+      "resourceTypes:",
+      "  - 震惊值",
+      "  - 技能",
+      "skills:",
+      "  探查技能:",
+      "    resource: 震惊值",
+      "    amount: 30",
+    ].join("\n");
+
+    const rules = parseResourceRules(bookRules);
+    expect(rules.resources["震惊值"]).toBeDefined();
+    expect(rules.skills.length).toBe(1);
+    expect(rules.skills[0]?.skill).toBe("探查技能");
+    expect(rules.skills[0]?.resource).toBe("震惊值");
+    expect(rules.skills[0]?.amount).toBe(30);
+  });
+
+  it("should parse exchange rates under numericalSystemOverrides with custom resources", () => {
+    const bookRules = [
+      "numericalSystemOverrides:",
+      "  resourceTypes: [震惊值, 爱慕值, 绝望值]",
+      "exchangeRates:",
+      "  - from: 震惊值",
+      "    to: 爱慕值",
+      "    rate: 10",
+    ].join("\n");
+
+    const rules = parseResourceRules(bookRules);
+    expect(rules.resources["震惊值"]).toBeDefined();
+    expect(rules.resources["爱慕值"]).toBeDefined();
+    expect(rules.resources["绝望值"]).toBeDefined();
+    expect(rules.exchangeRates.length).toBe(1);
+    expect(rules.exchangeRates[0]?.from).toBe("震惊值");
+    expect(rules.exchangeRates[0]?.to).toBe("爱慕值");
+  });
 });

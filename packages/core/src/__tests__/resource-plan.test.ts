@@ -440,4 +440,228 @@ describe("validateTextAgainstChapterResourcePlanFinal", () => {
     expect(result.violations).toContain("缺少 民望值-10: 兑换某项允许资源");
     expect(result.violations).toContain("缺少期末 民望值=90");
   });
+
+  // ---- FIX-052-B-2: system_bootstrap / resource_rule_reveal adaptive closing balance ----
+
+  const bootstrapPlan: ChapterResourcePlan = {
+    chapter: 1,
+    mode: "system_bootstrap",
+    source: "resource-engine",
+    openingBalances: { "震惊值": 0, "爱慕值": 0 },
+    expectedClosingBalances: { "震惊值": 0, "爱慕值": 0 },
+    allowedEvents: [
+      { order: 1, kind: "balance_claim", resource: "震惊值", amount: 0, reason: "系统首次激活：声明初始资源余额", requiredInText: true },
+      { order: 2, kind: "balance_claim", resource: "爱慕值", amount: 0, reason: "系统首次激活：声明初始资源余额", requiredInText: true },
+    ],
+    forbiddenEvents: ["exchange", "cash_out", "balance_transfer", "earn_resource_before_closure"],
+    unlockedSkills: [],
+    resourceRules: {
+      resources: {
+        "震惊值": { name: "震惊值", type: "integer", initial: 0, min: 0, allowNegative: false, aliases: [] },
+        "爱慕值": { name: "爱慕值", type: "integer", initial: 0, min: 0, allowNegative: false, aliases: [] },
+      },
+      skills: [],
+      exchangeRates: [],
+      aliases: {},
+    },
+    narrativeGuidance: ["本章处于系统/能力首次激活阶段。"],
+    closureRequirement: "explicit_balance_required",
+  };
+
+  it("T5: system_bootstrap with gain events adapts closing balance from events", () => {
+    const text = `
+系统激活！恭喜宿主绑定情绪值系统。
+林默在街上救了人，获得了100点震惊值。
+【系统面板：震惊值：100，爱慕值：0】
+`;
+    const result = validateTextAgainstChapterResourcePlanFinal({
+      text,
+      plan: bootstrapPlan,
+    });
+
+    // Should pass: gain event extracted, closing balance computed as 0+100=100
+    expect(result.passed).toBe(true);
+    expect(result.violations).toEqual([]);
+    // Expected closing should reflect the event-based computation
+    expect(result.expectedClosingBalances["震惊值"]).toBe(100);
+    expect(result.expectedClosingBalances["爱慕值"]).toBe(0);
+  });
+
+  it("T6: system_bootstrap with consume events adapts closing balance from events", () => {
+    const text = `
+系统激活！林默消耗了10点震惊值兑换了情报。
+【当前震惊值：-10，当前爱慕值：0】
+`;
+    // Need a plan with allowNegative for this test
+    const negPlan: ChapterResourcePlan = {
+      ...bootstrapPlan,
+      resourceRules: {
+        resources: {
+          "震惊值": { name: "震惊值", type: "integer", initial: 0, min: -100, allowNegative: true, aliases: [] },
+          "爱慕值": { name: "爱慕值", type: "integer", initial: 0, min: 0, allowNegative: false, aliases: [] },
+        },
+        skills: [],
+        exchangeRates: [],
+        aliases: {},
+      },
+    };
+    const result = validateTextAgainstChapterResourcePlanFinal({
+      text,
+      plan: negPlan,
+    });
+
+    // Consume event extracted, closing balance = 0 + (-10) = -10, matches text
+    expect(result.passed).toBe(true);
+    expect(result.expectedClosingBalances["震惊值"]).toBe(-10);
+  });
+
+  it("T7: system_bootstrap with no events keeps opening balance = closing (regression)", () => {
+    const text = "系统激活了。林默看着面板，上面显示着各种数值。但他还没有任何操作。";
+
+    const result = validateTextAgainstChapterResourcePlanFinal({
+      text,
+      plan: bootstrapPlan,
+    });
+
+    // Without events, should still require balance claims matching opening balances
+    expect(result.passed).toBe(false);
+    expect(result.violations).toContain("缺少期末 震惊值=0");
+    expect(result.violations).toContain("缺少期末 爱慕值=0");
+  });
+
+  it("T8: system_bootstrap with gain+consume computes net closing balance", () => {
+    const text = `
+系统激活！林默获得了200点震惊值。
+随后他消耗了50点震惊值解锁了探查技能。
+【当前震惊值：150，爱慕值：0】
+`;
+    const result = validateTextAgainstChapterResourcePlanFinal({
+      text,
+      plan: bootstrapPlan,
+    });
+
+    expect(result.passed).toBe(true);
+    // net: 0 + 200 (gain) - 50 (consume) = 150
+    expect(result.expectedClosingBalances["震惊值"]).toBe(150);
+  });
+
+  // ---- resource_rule_reveal adaptive closing balance ----
+
+  const revealPlan: ChapterResourcePlan = {
+    chapter: 2,
+    mode: "resource_rule_reveal",
+    source: "resource-engine",
+    openingBalances: { "震惊值": 100, "爱慕值": 50 },
+    expectedClosingBalances: { "震惊值": 100, "爱慕值": 50 },
+    allowedEvents: [
+      { order: 1, kind: "discover", resource: "震惊值", reason: "揭示资源运作规则", requiredInText: true },
+    ],
+    forbiddenEvents: ["exchange", "cash_out", "earn_resource_before_closure", "gain", "consume"],
+    unlockedSkills: [],
+    resourceRules: bootstrapPlan.resourceRules,
+    narrativeGuidance: ["本章处于资源规则揭示阶段。"],
+    closureRequirement: "explicit_balance_required",
+  };
+
+  it("T9: resource_rule_reveal with no resource changes keeps opening = closing", () => {
+    const text = "系统揭示了震惊值的运作规则：当周围人对宿主产生震惊情绪时，宿主可获得震惊值。当前震惊值仍是100点。";
+
+    const result = validateTextAgainstChapterResourcePlanFinal({
+      text,
+      plan: revealPlan,
+    });
+
+    // No balance_claim events in the plan; discover event found, balances match opening
+    expect(result.passed).toBe(true);
+    expect(result.expectedClosingBalances["震惊值"]).toBe(100);
+    expect(result.expectedClosingBalances["爱慕值"]).toBe(50);
+  });
+
+  it("T10: resource_rule_reveal with only discover event passes when balances match", () => {
+    const text = `
+系统揭示了震惊值的兑换规则：1点震惊值可兑换10联邦币。
+林默了解了规则，但没有进行任何兑换。
+【当前震惊值：100，爱慕值：50】
+`;
+    const result = validateTextAgainstChapterResourcePlanFinal({
+      text,
+      plan: revealPlan,
+    });
+
+    // discover event found, no gain/consume, balance matches opening
+    expect(result.passed).toBe(true);
+    expect(result.expectedClosingBalances["震惊值"]).toBe(100);
+    expect(result.expectedClosingBalances["爱慕值"]).toBe(50);
+  });
+
+  // ---- no_resource_change WARN semantics (R4) ----
+
+  const noChangePlan: ChapterResourcePlan = {
+    chapter: 5,
+    mode: "no_resource_change",
+    source: "resource-engine",
+    openingBalances: { "民望值": 100, "联邦币": 200 },
+    expectedClosingBalances: { "民望值": 100, "联邦币": 200 },
+    allowedEvents: [],
+    forbiddenEvents: [],
+    unlockedSkills: [],
+    resourceRules: basePlan.resourceRules,
+    narrativeGuidance: [],
+  };
+
+  it("T11: no_resource_change with no mutations infers no_change closed", () => {
+    const text = "林默在家研究了一整天外公的遗物，没有进行任何资源操作。";
+
+    const result = validateTextAgainstChapterResourcePlanFinal({
+      text,
+      plan: noChangePlan,
+    });
+
+    expect(result.passed).toBe(true);
+    expect(result.noChangeInferred).toBe(true);
+    expect(result.closureSource).toBe("inferred_no_change");
+  });
+
+  it("T12: no_resource_change with balance mutations sets explicit_balance source", () => {
+    const text = "林默获得了10点民望值，但他有些疑惑。";
+
+    const result = validateTextAgainstChapterResourcePlanFinal({
+      text,
+      plan: noChangePlan,
+    });
+
+    // Still passes (no_resource_change mode is lenient), but signals via closureSource
+    expect(result.passed).toBe(true);
+    expect(result.closureSource).toBe("explicit_balance");
+    expect(result.noChangeInferred).toBe(false);
+    expect(result.balanceMutationEvents?.length ?? 0).toBeGreaterThan(0);
+  });
+
+  // ---- Regression: real balance errors still hard block ----
+
+  it("T13: normal mode with real balance error still hard blocks", () => {
+    const normalPlan: ChapterResourcePlan = {
+      ...explorePlan,
+      mode: "normal",
+      openingBalances: { "民望值": 100, "联邦币": 200 },
+      expectedClosingBalances: { "民望值": 100, "联邦币": 200 },
+      allowedEvents: [
+        { order: 1, kind: "balance_claim", resource: "民望值", amount: 100, reason: "期末民望", requiredInText: true },
+      ],
+      unlockedSkills: [],
+      closureRequirement: "explicit_balance_required",
+    };
+
+    const text = `
+林默无缘无故获得了1000点联邦币。
+【当前民望值：100，联邦币：1200】
+`;
+    const result = validateTextAgainstChapterResourcePlanFinal({
+      text,
+      plan: normalPlan,
+    });
+
+    expect(result.passed).toBe(false);
+    expect(result.violations.some(v => v.includes("closingBalances 联邦币"))).toBe(true);
+  });
 });
