@@ -5592,7 +5592,7 @@ describe("WriterAgent", () => {
       expect((chatSpy.mock.calls[0]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("只允许本章兑现一层");
       expect((chatSpy.mock.calls[0]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("payoff > cost > endingType");
       expect((chatSpy.mock.calls[0]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("If payoff is not realized, the chapter is invalid regardless of cost or ending type.");
-      expect((chatSpy.mock.calls[0]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("禁止为了满足 cost、calm_end、unresolved_end 或任何 endingType 而跳过 payoff。");
+      expect((chatSpy.mock.calls[0]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("禁止无代价成功");
       expect((chatSpy.mock.calls[0]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("Every payoff must include: sensory detail, cost paid, visible change in situation.");
       expect((chatSpy.mock.calls[0]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("Every payoff must include vivid sensory detail showing the exact moment of change.");
       expect((chatSpy.mock.calls[0]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("Every payoff must include a clear moment of change (a single, sharp turning instant).");
@@ -5606,24 +5606,29 @@ describe("WriterAgent", () => {
       expect((chatSpy.mock.calls[0]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("moment -> result -> cost");
       expect((chatSpy.mock.calls[0]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("气血/精血/资源消耗");
       expect((chatSpy.mock.calls[0]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("他的右臂随之彻底失去知觉");
-      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[0]?.content ?? "").toContain("PAYOFF REALIZATION MODE");
-      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[0]?.content ?? "").toContain("硬优先级：payoff > cost > endingType。");
-      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[0]?.content ?? "").toContain("如果 payoff 没有兑现");
-      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[0]?.content ?? "").toContain("MOMENT 必须是单独一句");
-      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[0]?.content ?? "").toContain("正确 MOMENT 示例：石门猛地裂开。");
-      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[0]?.content ?? "").toContain("代价必须落在 moment/result 之后");
-      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[0]?.content ?? "").toContain("身体损伤加重、气血/精血/资源消耗");
-      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("必须在 Act3 插入或替换一个具体的 payoff scene");
-      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("优先级锁死：payoff > cost > endingType。");
-      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("禁止为了满足 cost、calm_end、unresolved_end 或任何 endingType 而跳过 payoff。");
-      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("感知层必须具体并绑定变化瞬间");
-      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("MOMENT（单一清晰的瞬间爆发点）");
-      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("MOMENT 必须单独成句");
-      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("禁止 MOMENT 写成“逐渐打开 / 开始打开 / 正在打开 / 缓缓开启 / 似乎打开 / 似乎裂开”。");
-      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("MOMENT 后必须有收束阶段，稳定局势。");
-      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("代价必须落在 moment/result 之后");
-      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("后遗症/状态恶化");
-      expect((chatSpy.mock.calls[1]?.[0] as Array<{ content: string }>)[1]?.content ?? "").toContain("不能只补一句；要重写 payoff 段为完整冲击段");
+      // Find the payoff rewrite call by looking for PAYOFF REALIZATION MODE in system prompt
+      const payoffRewriteCall = chatSpy.mock.calls.find(
+        (call) => ((call[0] as Array<{ content: string }>)[0]?.content ?? "").includes("PAYOFF REALIZATION MODE"),
+      );
+      expect(payoffRewriteCall).toBeTruthy();
+      const payoffRewriteMsgs = payoffRewriteCall![0] as Array<{ content: string }>;
+      expect(payoffRewriteMsgs[0]?.content ?? "").toContain("优先级：payoff > cost > endingType");
+      expect(payoffRewriteMsgs[0]?.content ?? "").toContain("payoff 缺失则本章无效");
+      expect(payoffRewriteMsgs[0]?.content ?? "").toContain("MOMENT：必须单独一句");
+      expect(payoffRewriteMsgs[0]?.content ?? "").toContain("禁止渐变表达");
+      expect(payoffRewriteMsgs[0]?.content ?? "").toContain("COST：具体代价落在 result 之后");
+      expect(payoffRewriteMsgs[0]?.content ?? "").toContain("身体损伤");
+      expect(payoffRewriteMsgs[1]?.content ?? "").toContain("在 Act3 插入或替换一个具体的 payoff scene");
+      expect(payoffRewriteMsgs[1]?.content ?? "").toContain("优先级：payoff > cost > endingType。");
+      expect(payoffRewriteMsgs[1]?.content ?? "").toContain("禁止无痛成功");
+      expect(payoffRewriteMsgs[1]?.content ?? "").toContain("变化瞬间至少有一处具体感官细节");
+      expect(payoffRewriteMsgs[1]?.content ?? "").toContain("MOMENT：单独一句");
+      expect(payoffRewriteMsgs[1]?.content ?? "").toContain("禁止渐变");
+      expect(payoffRewriteMsgs[1]?.content ?? "").toContain("逐渐/开始/正在/缓缓/似乎");
+      expect(payoffRewriteMsgs[1]?.content ?? "").toContain("最小可行 payoff");
+      expect(payoffRewriteMsgs[1]?.content ?? "").toContain("代价：具体代价落在 result 之后");
+      expect(payoffRewriteMsgs[1]?.content ?? "").toContain("重写 payoff 段为完整冲击段");
+      expect(payoffRewriteMsgs[1]?.content ?? "").toContain("不要只补一句话");
       expect(warnings.some((message) => message.includes("PAYOFF MODE"))).toBe(true);
     } finally {
       settleSpy.mockRestore();

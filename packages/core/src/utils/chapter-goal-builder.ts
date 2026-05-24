@@ -178,17 +178,32 @@ export function buildChapterGoal(input: BuildChapterGoalInput): ChapterGoal {
   };
 }
 
-function buildPayoffDirective(promisedPayoff: string): PayoffDirective {
+function buildPayoffDirective(promisedPayoff: string, wordBudget?: number): PayoffDirective {
   const payoffType = inferPayoffType(promisedPayoff);
   const payoffDepth = inferPayoffDepth(promisedPayoff, payoffType);
   const payoffScope = payoffDepth === "layered" ? "arc" : "chapter";
-  return {
+  const directive: PayoffDirective = {
     promisedPayoff,
     payoffType,
     payoffDepth,
     payoffScope,
     mandatoryByFinalAct: payoffScope === "chapter",
   };
+
+  // Apply word-budget compaction for standard ~1000-word chapters
+  const budget = wordBudget ?? 1000;
+  if (budget <= 1500) {
+    const language = /[一-鿿]/.test(promisedPayoff) ? "zh" as const : "en" as const;
+    const compacted = compactPayoffForWordBudget(promisedPayoff, language, budget);
+    if (compacted.payoff !== promisedPayoff) {
+      directive.promisedPayoff = compacted.payoff;
+      directive.payoffDepth = compacted.depth;
+      directive.payoffScope = compacted.scope;
+      directive.mandatoryByFinalAct = compacted.scope === "chapter";
+    }
+  }
+
+  return directive;
 }
 
 function inferPayoffDepth(payoff: string, payoffType: PayoffType): PayoffDirective["payoffDepth"] {
@@ -196,6 +211,75 @@ function inferPayoffDepth(payoff: string, payoffType: PayoffType): PayoffDirecti
     return "deep";
   }
   return "layered";
+}
+
+/**
+ * Compact an over-ambitious payoff promise to fit within a typical chapter word budget.
+ * Chapters target ~1000 Chinese characters (728-1272 range).
+ * Arc-level / situational payoffs are downgraded to atomic, concrete, achievable sub-elements.
+ */
+function compactPayoffForWordBudget(
+  payoff: string,
+  language: "zh" | "en",
+  wordBudget?: number,
+): { payoff: string; depth: PayoffDirective["payoffDepth"]; scope: PayoffDirective["payoffScope"] } {
+  const budget = wordBudget ?? 1000;
+  const payoffType = inferPayoffType(payoff);
+
+  // Chapters with sufficient word budget can support layered/arc payoffs
+  if (budget > 1500) {
+    return { payoff, depth: inferPayoffDepth(payoff, payoffType), scope: payoffType === "reversal" ? "arc" : "chapter" };
+  }
+
+  // For standard ~1000-char chapters, detect and compact over-ambitious payoffs
+  if (language === "zh") {
+    // Situational reversal: "局势发生反转", "战局逆转", "翻盘" → atomic tactical advantage
+    if (payoffType === "reversal" && /反转|逆转|翻盘|局势|局面|战局|态势|扭转乾坤|反败为胜|逆袭/u.test(payoff)) {
+      const compacted = /逃|脱身|脱离|甩开|拉开距离|突围|冲出/u.test(payoff)
+        ? "获得一次暂时脱身或战术喘息"
+        : "拿到一个局部战术优势或喘息窗口";
+      return { payoff: compacted, depth: inferPayoffDepth(payoff, payoffType), scope: "chapter" };
+    }
+
+    // Deep reveal: "查明真相", "完整揭示" → atomic clue discovery
+    if (payoffType === "reveal" && /真相|全部揭开|完整揭示|彻底查明|水落石出/u.test(payoff)) {
+      return {
+        payoff: payoff.replace(/真相|全部揭开|完整揭示|彻底查明|水落石出/gu, "可追踪的新线索").replace(/被当场揭开/gu, "露出可追踪的痕迹"),
+        depth: inferPayoffDepth(payoff, payoffType),
+        scope: "chapter",
+      };
+    }
+
+    // Major breakthrough: "突破境界", "觉醒能力", "掌握新力量" → incremental progress
+    if (payoffType === "breakthrough" && /突破|晋升|觉醒|晋阶|打通|领悟/u.test(payoff)) {
+      return {
+        payoff: payoff.replace(/突破(境界|瓶颈)?/gu, "取得突破性进展").replace(/觉醒/gu, "触动").replace(/晋阶/gu, "积累"),
+        depth: inferPayoffDepth(payoff, payoffType),
+        scope: "chapter",
+      };
+    }
+
+    // Relationship payoff: "建立信任", "结盟" → atomic trust gesture
+    if (payoffType === "relationship" && /结盟|联手|信任|归心|效忠|托付终身/u.test(payoff)) {
+      return { payoff: "获得一个可信的合作信号或试探性让步", depth: inferPayoffDepth(payoff, payoffType), scope: "chapter" };
+    }
+  } else {
+    if (payoffType === "reversal" && /reversal|turn the tide|flip the situation|reverse the battle/i.test(payoff)) {
+      return { payoff: "Secure a tactical advantage or breathing room.", depth: inferPayoffDepth(payoff, payoffType), scope: "chapter" };
+    }
+    if (payoffType === "reveal" && /key clue|full truth|complete reveal|uncover everything/i.test(payoff)) {
+      return { payoff: "Discover one trackable new lead.", depth: inferPayoffDepth(payoff, payoffType), scope: "chapter" };
+    }
+    if (payoffType === "breakthrough" && /breakthrough|awaken|ascend|master/i.test(payoff)) {
+      return { payoff: "Make incremental progress toward a breakthrough.", depth: inferPayoffDepth(payoff, payoffType), scope: "chapter" };
+    }
+    if (payoffType === "relationship" && /alliance|trust|swear loyalty|bond/i.test(payoff)) {
+      return { payoff: "Obtain a credible signal of cooperation.", depth: inferPayoffDepth(payoff, payoffType), scope: "chapter" };
+    }
+  }
+
+  const depth = inferPayoffDepth(payoff, payoffType);
+  return { payoff, depth, scope: depth === "layered" ? "arc" : "chapter" };
 }
 
 function inferPayoffType(payoff: string): PayoffType {

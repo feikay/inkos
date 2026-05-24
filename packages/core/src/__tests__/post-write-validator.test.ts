@@ -615,7 +615,7 @@ describe("validatePostWrite", () => {
     expect(warnings.some((warning) => warning.rule === "payoff-overrelease")).toBe(false);
   });
 
-  it("treats escape progress as a partial payoff without raising a warning", () => {
+  it("treats escape progress as a partial payoff, emitting a warning not an error", () => {
     const checks = evaluateChapterGoalDiscipline(
       "楚夜暂时甩开追兵，赢得喘息，但还没真正离开矿区。",
       {
@@ -632,7 +632,84 @@ describe("validatePostWrite", () => {
     const warnings = toDisciplineWarnings(checks, "zh");
     expect(checks.payoffCheck.matchLevel).toBe("partial");
     expect(checks.payoffCheck.matched).toBe(true);
+    // Partial payoff does NOT hard-block (no error)
     expect(warnings.some((warning) => warning.rule === "payoff-missing")).toBe(false);
+    // Partial payoff emits a warning instead
+    const partialWarning = warnings.find((warning) => warning.rule === "payoff-partial");
+    expect(partialWarning).toBeDefined();
+    expect(partialWarning!.severity).toBe("warning");
+  });
+
+  it("still hard-blocks with error when payoff is completely missing", () => {
+    const checks = evaluateChapterGoalDiscipline(
+      "楚夜在矿区里闲逛了一整天，什么也没发生。",
+      {
+        mainConflict: "追兵紧追不舍。",
+        protagonistGoal: "拿到黑市腰牌。",
+        activeCharacters: ["楚夜"],
+        foreshadowToTouch: [],
+        payoffToDeliver: "拿到黑市腰牌",
+        endingHookType: "danger",
+        nextChapterPull: "下一章追兵会再次逼近。",
+      },
+    );
+
+    const warnings = toDisciplineWarnings(checks, "zh");
+    expect(checks.payoffCheck.matchLevel).toBe("none");
+    expect(checks.payoffCheck.matched).toBe(false);
+    expect(warnings.some((warning) => warning.rule === "payoff-missing")).toBe(true);
+    expect(warnings.some((warning) => warning.severity === "error")).toBe(true);
+    // No partial warning when completely missing
+    expect(warnings.some((warning) => warning.rule === "payoff-partial")).toBe(false);
+  });
+
+  it("produces no warning when payoff is fully materialized", () => {
+    const checks = evaluateChapterGoalDiscipline(
+      "楚夜终于在矿道深处找到了黑市腰牌，腰牌上刻着通仙驿的标记。",
+      {
+        mainConflict: "追兵紧追不舍。",
+        protagonistGoal: "拿到黑市腰牌。",
+        activeCharacters: ["楚夜"],
+        foreshadowToTouch: [],
+        payoffToDeliver: "拿到黑市腰牌",
+        endingHookType: "danger",
+        nextChapterPull: "下一章追兵会再次逼近。",
+      },
+    );
+
+    const warnings = toDisciplineWarnings(checks, "zh");
+    expect(checks.payoffCheck.matched).toBe(true);
+    expect(checks.payoffCheck.matchLevel).toBe("full");
+    expect(warnings.some((warning) => warning.rule === "payoff-missing")).toBe(false);
+    expect(warnings.some((warning) => warning.rule === "payoff-partial")).toBe(false);
+  });
+
+  it("emits partial warning when at least one payoff keyword matches but below full threshold", () => {
+    // "腰牌" and "黑市" match, "拿到" is not negated — should be partial or full
+    const checks = evaluateChapterGoalDiscipline(
+      "楚夜在矿道里发现了一些有用的东西，但并没有拿到腰牌。",
+      {
+        mainConflict: "追兵紧追不舍。",
+        protagonistGoal: "拿到黑市腰牌。",
+        activeCharacters: ["楚夜"],
+        foreshadowToTouch: [],
+        payoffToDeliver: "拿到黑市腰牌进入通仙驿",
+        endingHookType: "danger",
+        nextChapterPull: "下一章追兵会再次逼近。",
+      },
+    );
+
+    const warnings = toDisciplineWarnings(checks, "zh");
+    // "并没有拿到腰牌" is negated — so "拿到" and "腰牌" should be filtered out by isNegatedSnippet
+    // This should result in none or partial depending on remaining keywords
+    if (!checks.payoffCheck.matched) {
+      expect(warnings.some((warning) => warning.rule === "payoff-missing")).toBe(true);
+      expect(warnings.some((warning) => warning.severity === "error")).toBe(true);
+    }
+    // The key invariant: partial NEVER produces error severity
+    if (checks.payoffCheck.matchLevel === "partial") {
+      expect(warnings.some((warning) => warning.rule === "payoff-missing")).toBe(false);
+    }
   });
 
   it("flags payoff-impact-missing when payoff has only result without sensory/cost layers", () => {

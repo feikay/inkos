@@ -1447,17 +1447,30 @@ function findPayoffEvidence(
     if (rawIndex < 0) return false;
     return !isNegatedSnippet(snippetAround(content, rawIndex, keyword.length));
   });
-  const threshold = keywords.length >= 3 ? 2 : 1;
-  if (matched.length < threshold) {
-    return findPartialEscapeProgressEvidence(content, expectedPayoff);
+
+  // Full-match threshold: majority of available keywords (at least 2 when 3+ exist)
+  const fullThreshold = keywords.length >= 3 ? 2 : 1;
+  if (matched.length >= fullThreshold) {
+    const lead = matched[0]!;
+    const rawIndex = content.indexOf(lead);
+    return {
+      evidence: rawIndex >= 0 ? snippetAround(content, rawIndex, lead.length) : matched.join(" / "),
+      matchLevel: "full",
+    };
   }
 
-  const lead = matched[0]!;
-  const rawIndex = content.indexOf(lead);
-  return {
-    evidence: rawIndex >= 0 ? snippetAround(content, rawIndex, lead.length) : matched.join(" / "),
-    matchLevel: "full",
-  };
+  // Partial: 2+ keyword hits (but below full threshold). Single-keyword hits
+  // are too weak — e.g. subject-noun mentions without action/result words.
+  if (matched.length >= 2) {
+    const lead = matched[0]!;
+    const rawIndex = content.indexOf(lead);
+    return {
+      evidence: rawIndex >= 0 ? snippetAround(content, rawIndex, lead.length) : matched.join(" / "),
+      matchLevel: "partial",
+    };
+  }
+
+  return findPartialEscapeProgressEvidence(content, expectedPayoff);
 }
 
 function findMaterializedPayoffEvidence(
@@ -2059,6 +2072,17 @@ export function toDisciplineWarnings(
       suggestion: language === "en"
         ? "Force a payoff scene now. At minimum, deliver a partial realization in this chapter."
         : "必须立刻补一个 payoff 场景，本章至少要出现部分兑现。",
+    });
+  } else if (checks.payoffCheck.matchLevel === "partial") {
+    warnings.push({
+      rule: "payoff-partial",
+      severity: "warning",
+      description: language === "en"
+        ? `Only partial payoff evidence found for: ${checks.payoffCheck.expectedPayoff}.`
+        : `本章仅检测到部分 payoff 兑现证据：${checks.payoffCheck.expectedPayoff}。`,
+      suggestion: language === "en"
+        ? "Partial payoff is acceptable but should be strengthened in the next chapter."
+        : "部分兑现可作为当前章节的阶段性推进，下一章应补强剩余 payoff。",
     });
   }
 

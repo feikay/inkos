@@ -3453,13 +3453,13 @@ ${lengthRequirementBlock}
     let currentCreative = params.creative;
     let checks = evaluateChapterGoalDiscipline(currentCreative.content, chapterGoal);
     let impactCheck = evaluatePayoffImpact(currentCreative.content, chapterGoal);
-    if (checks.payoffCheck.matched && (!impactCheck || impactCheck.matched)) {
+    if (checks.payoffCheck.matchLevel === "full" && (!impactCheck || impactCheck.matched)) {
       return currentCreative;
     }
 
     for (
       let attempt = 1;
-      attempt <= 2 && (!checks.payoffCheck.matched || (impactCheck ? !impactCheck.matched : false));
+      attempt <= 2 && (checks.payoffCheck.matchLevel !== "full" || (impactCheck ? !impactCheck.matched : false));
       attempt += 1
     ) {
       const forceMomentAnchor = false;
@@ -3522,128 +3522,86 @@ ${lengthRequirementBlock}
   ): string {
     const payoffDepth = payoffDirective.payoffDepth ?? "layered";
     if (language === "en") {
-      return [
-        "PAYOFF REALIZATION MODE",
-        "You are performing a controlled rewrite to materialize a missing promised payoff.",
+      const rules = [
+        "PAYOFF REALIZATION MODE -- controlled rewrite to materialize a missing payoff.",
         `Promised payoff: ${payoffDirective.promisedPayoff}`,
-        `Payoff type: ${payoffDirective.payoffType}`,
-        `Payoff depth: ${payoffDepth}`,
-        "Hard priority: payoff > cost > endingType.",
-        "Hard rule: if payoff is not realized, the chapter is invalid regardless of cost or ending type.",
-        "Hard execution order: 1) moment/event happens, 2) result becomes visible, 3) cost lands.",
-        "Hard rule: do not skip the payoff to satisfy cost, calm_end, unresolved_end, or any other endingType.",
-        "Hard rule: Act 3 must contain the concrete payoff event, not a vague hint.",
-        "Hard rule: every payoff beat must include sensory detail, cost paid, and a visible situation change.",
-        "Hard rule: sensory detail must be vivid and tied to the exact moment of change.",
-        "Hard rule: every payoff beat must contain one clear turning instant (MOMENT).",
-        "Hard rule: MOMENT must be one standalone sentence where the event happens all at once.",
-        "Hard rule: gradual or uncertain MOMENT wording is invalid: 'gradually opened', 'began to open', 'seemed to open'.",
-        "Good MOMENT example: 'The stone door split open with a crack.'",
-        "Hard rule: after the MOMENT, include a stabilization phase.",
-        "Hard rule: every payoff beat must include a clear cost that hurts the protagonist.",
-        "Hard rule: cost must land after the moment/result: moment -> result -> cost.",
-        "Hard rule: cost must be concrete: worsened bodily injury, qi-blood/blood essence/resource consumption, time cost that prevents action, or lingering side effect / worsened state.",
-        "Hard rule: no-cost success is invalid. Example: 'The door opened. His right arm went completely numb.'",
-        "Hard rule: MOMENT cannot be the chapter's final sentence.",
+        `Payoff type: ${payoffDirective.payoffType} | depth: ${payoffDepth}`,
+        "",
+        "CORE RULES (non-negotiable):",
+        "1. PRIORITY: payoff > cost > endingType. If payoff is missing, the chapter fails.",
+        "2. STRUCTURE: buildup -> trigger -> MOMENT (standalone sentence) -> result -> cost.",
+        "3. MOMENT: one standalone sentence where the event happens all at once. No gradual wording (began to, seemed to, gradually).",
+        "4. COST: concrete harm landing after result. No painless success. Body injury, resource drain, time loss, or worsened state.",
+        "5. SENSORY: at least one vivid sensory detail (visual/touch/sound/physiological) at the moment of change.",
+        "6. ACT 3: the payoff event must appear in Act 3, not as a vague hint.",
+        "7. MOMENT must not be the final sentence of the chapter.",
+        "",
+        "TYPE-SPECIFIC:",
         payoffDirective.payoffType === "resource"
-          ? "Hard rule: for resource payoff, the acquisition must become a sharp event with a clear trigger and impact."
+          ? "- Resource: sharp acquisition event with trigger + impact. No flat \"he obtained it\" lines."
           : undefined,
         payoffDirective.payoffType === "reveal"
-          ? "Hard rule: for reveal payoff, you MUST write one standalone cognitive moment sentence where understanding completes clearly."
+          ? "- Reveal: one standalone cognitive-moment sentence where understanding completes. No \"he seemed to realize\" / \"he vaguely felt\"."
           : undefined,
-        payoffDirective.payoffType === "reveal"
-          ? "Hard rule: invalid reveal wording includes 'he seemed to realize', 'he vaguely discovered', 'he felt that'."
-          : undefined,
-        payoffDirective.payoffType === "reveal"
-          ? "Hard rule: if rewrites already failed twice, force the sentence: 'In that instant, he understood the contract.'"
-          : undefined,
-        payoffDirective.payoffType === "resource"
-          ? "Hard rule: resource payoff structure is trigger -> MOMENT -> cost -> stabilization."
-          : undefined,
-        payoffDirective.payoffType === "resource"
-          ? "Hard rule: do not use flat lines like 'he obtained it' or 'the information appeared in his mind'."
-          : undefined,
-        "Hard rule: abstract-only lines like 'power increased' / 'suppression disappeared' are invalid without concrete sensory rendering.",
-        "No painless success is allowed.",
-        forceMomentAnchor
-          ? "FORCED MOMENT ANCHOR MODE: payoff rewrites already failed at least twice. You MUST insert a standard standalone MOMENT sentence immediately after the trigger, even if the fit is imperfect."
-          : undefined,
-        forceMomentAnchor
-          ? "Forced anchor examples must match payoff type: event -> 'The door was forced open.' / resource-cognition -> 'The full contract flooded into his mind.' / state-change -> 'His true name began to break apart.'"
-          : undefined,
-        forceMomentAnchor
-          ? "After the forced MOMENT anchor, you MUST immediately supply result and cost."
-          : undefined,
-        "Insert or replace a scene so the promised object produces new information, a new resource, a breakthrough, a relationship shift, or a reversal now.",
-        "Do not patch with one extra sentence. Rewrite the payoff paragraph as a full impact beat.",
         payoffDirective.payoffType === "reveal" && payoffDepth === "layered"
-          ? "For layered reveal, materialize only one layer in this chapter and leave at least one deeper unknown unresolved."
+          ? "- Layered reveal: materialize ONE layer only. Leave a deeper unknown unresolved."
           : undefined,
+        "",
+        "MINIMUM VIABLE PAYOFF:",
+        "If you cannot fit a complete payoff scene within the chapter, deliver the minimum viable version:",
+        "- At least ONE concrete sentence showing tangible progress toward the promised payoff.",
+        "- That sentence must include a cost or trade-off.",
+        "- A partial, costly step forward is valid. A vague hint is not.",
+        "",
+        forceMomentAnchor
+          ? "FORCED MOMENT ANCHOR: previous rewrites failed. Insert a standalone MOMENT sentence immediately after the trigger, even if the transition is imperfect. Then add result + cost."
+          : undefined,
+        "",
+        "Insert or replace a scene in Act 3. Do not patch with one sentence -- rewrite the payoff paragraph as a complete impact beat.",
         "Keep chapter facts and continuity intact.",
       ].filter(Boolean).join("\n");
+      return rules;
     }
 
-    return [
-      "PAYOFF REALIZATION MODE",
-      "你正在执行一次受控重写，用来兑现缺失的 promised payoff。",
+    const rules = [
+      "PAYOFF REALIZATION MODE -- \u53d7\u63a7\u91cd\u5199\uff0c\u5151\u73b0\u7f3a\u5931\u7684 payoff\u3002",
       `Promised payoff: ${payoffDirective.promisedPayoff}`,
-      `Payoff type: ${payoffDirective.payoffType}`,
-      `Payoff depth: ${payoffDepth}`,
-      "硬优先级：payoff > cost > endingType。",
-      "硬规则：如果 payoff 没有兑现，无论 cost 或 endingType 是否满足，本章都无效。",
-      "硬执行顺序：buildup（过程）-> trigger（触发）-> MOMENT（单独一句）-> result（结果）-> cost（代价）。",
-      "硬锁：trigger 必须先于 MOMENT，MOMENT 必须先于 result/cost。",
-      "硬规则：禁止为了满足 cost、calm_end、unresolved_end 或任何 endingType 而跳过 payoff。",
-      "硬规则：Act3 必须出现具体 payoff 事件，而不是模糊暗示。",
-      "硬规则：每个 payoff 段必须同时具备感知细节、代价、可见局势变化三层。",
-      "硬规则：感知层必须具体且可感（视觉/触觉/听觉/生理至少一类），并绑定变化瞬间。",
-      "硬规则：每个 payoff 段必须有一个明确 MOMENT（瞬间断点/爆发点）。",
-      "硬规则：MOMENT 必须是单独一句，事件在这一句里明确发生。",
-      "硬规则：禁止渐变或不确定 MOMENT 表达，例如“逐渐打开 / 开始打开 / 正在打开 / 缓缓开启 / 似乎打开 / 似乎裂开”。",
-      "正确 MOMENT 示例：门，被强行打开。",
-      "正确 MOMENT 示例：石门猛地裂开。",
-      "硬规则：MOMENT 之后必须写收束段，让局势稳定。",
-      "硬规则：每个 payoff 段必须有明确代价，并且这个代价要真正伤到主角。",
-      "硬规则：代价必须落在 moment/result 之后，结构为 moment -> result -> cost。",
-      "硬规则：代价必须具体，至少属于身体损伤加重、气血/精血/资源消耗、时间代价（无法行动）、后遗症/状态恶化之一。",
-      "硬规则：禁止无代价成功。错误：门开了。正确：门开了。他的右臂随之彻底失去知觉。",
-      "硬规则：MOMENT 不得作为章节最后一句。",
+      `Payoff type: ${payoffDirective.payoffType} | depth: ${payoffDepth}`,
+      "",
+      "\u6838\u5fc3\u89c4\u5219\uff08\u4e0d\u53ef\u59a5\u534f\uff09\uff1a",
+      "1. \u4f18\u5148\u7ea7\uff1apayoff > cost > endingType\u3002payoff \u7f3a\u5931\u5219\u672c\u7ae0\u65e0\u6548\u3002",
+      "2. \u7ed3\u6784\uff1abuildup\uff08\u94fa\u57ab\uff09-> trigger\uff08\u89e6\u53d1\uff09-> MOMENT\uff08\u5355\u72ec\u4e00\u53e5\uff09-> result\uff08\u7ed3\u679c\uff09-> cost\uff08\u4ee3\u4ef7\uff09\u3002",
+      "3. MOMENT\uff1a\u5fc5\u987b\u5355\u72ec\u4e00\u53e5\uff0c\u4e8b\u4ef6\u77ac\u95f4\u53d1\u751f\u3002\u7981\u6b62\u6e10\u53d8\u8868\u8fbe\uff08\u9010\u6e10/\u5f00\u59cb/\u6b63\u5728/\u7f13\u7f13/\u4f3c\u4e4e\uff09\u3002",
+      "4. COST\uff1a\u5177\u4f53\u4ee3\u4ef7\u843d\u5728 result \u4e4b\u540e\uff0c\u771f\u6b63\u4f24\u5230\u4e3b\u89d2\u3002\u8eab\u4f53\u635f\u4f24\u3001\u8d44\u6e90\u6d88\u8017\u3001\u65f6\u95f4\u4ee3\u4ef7\u6216\u72b6\u6001\u6076\u5316\u3002\u7981\u6b62\u65e0\u75db\u6210\u529f\u3002",
+      "5. \u611f\u77e5\uff1a\u53d8\u5316\u77ac\u95f4\u81f3\u5c11\u6709\u4e00\u5904\u5177\u4f53\u611f\u5b98\u7ec6\u8282\uff08\u89c6\u89c9/\u89e6\u89c9/\u542c\u89c9/\u751f\u7406\uff09\u3002",
+      "6. Act3\uff1apayoff \u4e8b\u4ef6\u5fc5\u987b\u51fa\u73b0\u5728\u7b2c\u4e09\u5e55\uff0c\u4e0d\u80fd\u53ea\u662f\u6a21\u7cca\u6697\u793a\u3002",
+      "7. MOMENT \u4e0d\u80fd\u662f\u7ae0\u8282\u6700\u540e\u4e00\u53e5\u3002",
+      "",
+      "\u6309\u7c7b\u578b\u7ea6\u675f\uff1a",
       payoffDirective.payoffType === "resource"
-        ? "硬规则：资源型 payoff 必须写成带触发与冲击的获取事件，而不是平滑状态变化。"
+        ? "- \u8d44\u6e90\u578b\uff1a\u5199\u6210\u5e26\u89e6\u53d1\u4e0e\u51b2\u51fb\u7684\u83b7\u53d6\u4e8b\u4ef6\u3002\u7981\u6b62\u5e73\u94fa\u201c\u4ed6\u83b7\u5f97\u4e86\u2026\u2026\u201d\u3002"
         : undefined,
       payoffDirective.payoffType === "reveal"
-        ? "硬规则：reveal 型 payoff 必须写出认知断点句：单独一句，且认知在这一句里明确完成。"
+        ? "- \u63ed\u793a\u578b\uff1a\u5199\u51fa\u5355\u72ec\u4e00\u53e5\u8ba4\u77e5\u65ad\u70b9\u2014\u2014\u8ba4\u77e5\u5728\u8fd9\u4e00\u53e5\u91cc\u660e\u786e\u5b8c\u6210\u3002\u7981\u6b62\u201c\u4ed6\u4f3c\u4e4e\u610f\u8bc6\u5230/\u9690\u7ea6\u53d1\u73b0/\u611f\u89c9\u5230\u201d\u3002"
         : undefined,
-      payoffDirective.payoffType === "reveal"
-        ? "硬规则：禁止 reveal 写成“他似乎意识到 / 他隐约发现 / 他感觉到”。"
-        : undefined,
-      payoffDirective.payoffType === "reveal"
-        ? "硬规则：如果 rewrite 已失败至少 2 次，直接强制句：那一刻，他看懂了这份契约。"
-        : undefined,
-      payoffDirective.payoffType === "resource"
-        ? "硬规则：资源型 payoff 结构固定为 trigger -> MOMENT -> cost -> stabilization。"
-        : undefined,
-      payoffDirective.payoffType === "resource"
-        ? "硬规则：禁止直接写“他获得了……”或“信息出现在脑海”。"
-        : undefined,
-      "硬规则：只写“力量增强/压制消失”等抽象结果视为不合格，必须落到具体感知。",
-      "禁止“无痛成功”。",
-      forceMomentAnchor
-        ? "FORCED MOMENT ANCHOR MODE：payoff rewrite 已连续失败至少 2 次。即使上下文衔接不够完美，也必须在 trigger 之后插入一个标准 MOMENT 单句。"
-        : undefined,
-      forceMomentAnchor
-        ? "标准 MOMENT 句必须匹配 payoffType：event -> 门，被强行打开。/ resource-cognition -> 契约的全部内容，涌入他的意识。/ state-change -> 他的真名，开始崩解。"
-        : undefined,
-      forceMomentAnchor
-        ? "强制锚点落下后，必须立刻补 result 与 cost，宁可略突兀，也不能没有爆点。"
-        : undefined,
-      "必须插入或替换一个具体 scene，让承诺对象现在就产出新信息、新资源、新突破、关系变化或反转结果。",
-      "不要补一句话了事；要把 payoff 段重写成完整冲击段。",
       payoffDirective.payoffType === "reveal" && payoffDepth === "layered"
-        ? "对于 layered reveal：本章只能兑现一层，必须保留至少一个更深未知，禁止一章解释完所有层。"
+        ? "- \u5206\u5c42\u63ed\u793a\uff1a\u672c\u7ae0\u53ea\u5151\u73b0\u4e00\u5c42\uff0c\u4fdd\u7559\u81f3\u5c11\u4e00\u4e2a\u66f4\u6df1\u672a\u77e5\u3002"
         : undefined,
-      "保留章节事实和连续性。",
+      "",
+      "\u6700\u5c0f\u53ef\u884c payoff\uff08\u515c\u5e95\u6307\u4ee4\uff09\uff1a",
+      "\u5982\u679c\u65e0\u6cd5\u5728\u7ae0\u8282\u4e2d\u5b8c\u6210\u5b8c\u6574 payoff \u573a\u666f\uff0c\u4e5f\u5fc5\u987b\u7ed9\u51fa\u6700\u5c0f\u53ef\u884c\u7248\u672c\uff1a",
+      "- \u81f3\u5c11\u4e00\u53e5\u5177\u4f53\u63cf\u5199\uff0c\u5c55\u793a\u5411\u627f\u8bfa payoff \u7684\u5b9e\u8d28\u6027\u63a8\u8fdb\u3002",
+      "- \u8be5\u53e5\u5fc5\u987b\u5305\u542b\u4ee3\u4ef7\u6216\u4ea4\u6362\u3002",
+      "- \u6709\u4ee3\u4ef7\u7684\u90e8\u5206\u63a8\u8fdb = \u6709\u6548\u3002\u6a21\u7cca\u6697\u793a = \u65e0\u6548\u3002",
+      "",
+      forceMomentAnchor
+        ? "FORCED MOMENT ANCHOR\uff1a\u6b64\u524d rewrite \u5df2\u5931\u8d25\u3002\u5728 trigger \u4e4b\u540e\u63d2\u5165\u6807\u51c6 MOMENT \u5355\u53e5\uff0c\u5373\u4f7f\u8854\u63a5\u7565\u7a81\u5162\u4e5f\u5fc5\u987b\u63d2\u5165\uff0c\u7136\u540e\u7acb\u523b\u8865 result \u548c cost\u3002"
+        : undefined,
+      "",
+      "\u5728 Act3 \u63d2\u5165\u6216\u66ff\u6362\u4e00\u4e2a scene\u3002\u4e0d\u8981\u8865\u4e00\u53e5\u8bdd\u4e86\u4e8b\u2014\u2014\u628a payoff \u6bb5\u91cd\u5199\u6210\u5b8c\u6574\u7684\u51b2\u51fb\u6bb5\u3002",
+      "\u4fdd\u7559\u7ae0\u8282\u4e8b\u5b9e\u548c\u8fde\u7eed\u6027\u3002",
     ].filter(Boolean).join("\n");
+    return rules;
   }
 
   private buildPayoffRewritePrompt(params: {
@@ -3660,62 +3618,35 @@ ${lengthRequirementBlock}
     if (params.language === "en") {
       return [
         `Chapter ${params.chapterNumber} failed payoff materialization.`,
-        "- Do not merely strengthen the hint.",
-        "- Insert or replace a concrete payoff scene in Act 3.",
-        "- Priority is locked: payoff > cost > endingType.",
-        "- If payoff is not realized, the chapter is invalid regardless of cost or ending type.",
-        "- Execution order is locked: buildup -> trigger -> MOMENT (standalone sentence) -> result -> cost.",
-        "- Hard lock: trigger must appear before MOMENT; MOMENT must appear before result/cost.",
-        "- Do not skip the payoff to satisfy cost, calm_end, unresolved_end, or any other endingType.",
-        "- Every payoff must include: sensory detail, cost paid, visible change in situation.",
-        "- Sensory detail must be vivid and tied to the exact moment of change.",
-        "- Every payoff must include a clear MOMENT (single sharp turning instant).",
-        "- MOMENT must be one standalone sentence where the event clearly happens.",
-        "- Invalid MOMENT wording: gradually opened / began to open / seemed to open.",
-        "- Banned gradual Chinese expressions in MOMENT: 开始打开 / 正在打开 / 缓缓开启 / 似乎裂开.",
-        "- Good MOMENT example: The stone door split open with a crack.",
-        "- After MOMENT, you MUST include a stabilization phase.",
-        "- Every payoff MUST include a clear cost that hurts the protagonist.",
-        "- Cost must land after moment/result: moment -> result -> cost.",
-        "- Cost must be concrete: worsened bodily injury, qi-blood/blood essence/resource consumption, time cost that prevents action, or lingering side effect / worsened state.",
-        "- No-cost success is invalid. Example: The door opened. His right arm went completely numb.",
+        `Promised payoff: ${params.payoffDirective.promisedPayoff} | type: ${params.payoffDirective.payoffType} | depth: ${payoffDepth}`,
+        "",
+        "Insert or replace a concrete payoff scene in Act 3. Do not merely strengthen the hint.",
+        "Priority: payoff > cost > endingType.",
+        "Structure: buildup -> trigger -> MOMENT (standalone sentence) -> result -> cost.",
+        "MOMENT: one standalone sentence. No gradual wording. Good example: The stone door split open with a crack.",
+        "Cost: concrete harm landing after result. No painless success.",
+        "Sensory: at least one vivid sensory detail at the moment of change.",
+        "",
         params.payoffDirective.payoffType === "resource"
-          ? "- For resource payoff, you MUST turn the acquisition into a sharp event with a clear trigger and impact."
+          ? "Resource payoff: sharp acquisition event with trigger + impact. No flat \"he obtained it\" lines."
           : undefined,
         params.payoffDirective.payoffType === "reveal"
-          ? "- For reveal payoff, you MUST include one standalone cognitive moment sentence where understanding is clearly completed."
+          ? "Reveal payoff: one standalone cognitive-moment sentence. No \"he seemed to realize\" / \"he vaguely felt\"."
           : undefined,
-        params.payoffDirective.payoffType === "reveal"
-          ? "- Invalid reveal wording: he seemed to realize / he vaguely discovered / he felt that."
-          : undefined,
-        params.payoffDirective.payoffType === "resource"
-          ? "- Resource payoff structure is mandatory: trigger -> MOMENT -> cost -> stabilization."
-          : undefined,
-        params.payoffDirective.payoffType === "resource"
-          ? "- Flat lines like 'he obtained it' or 'the information appeared in his mind' are invalid."
-          : undefined,
-        "- Abstract-only outcomes like 'power increased' or 'suppression disappeared' are invalid without concrete sensory rendering.",
-        "- Painless success is invalid.",
-        params.forceMomentAnchor
-          ? "- Forced Moment Anchor is active: insert one standard standalone MOMENT sentence immediately after the trigger."
-          : undefined,
-        params.forceMomentAnchor
-          ? "- Forced anchor examples must match payoff type: event -> 'The door was forced open.' / resource-cognition -> 'The full contract flooded into his mind.' / state-change -> 'His true name began to break apart.'"
-          : undefined,
-        params.forceMomentAnchor
-          ? "- Even if the transition feels slightly abrupt, do not omit the MOMENT. Add result and cost right after it."
-          : undefined,
-        `- The promised payoff is: ${params.payoffDirective.promisedPayoff}`,
-        `- The payoff depth is: ${payoffDepth}`,
-        "- The scene must show real new information / resource / breakthrough / relationship shift / reversal.",
-        "- The payoff paragraph structure must be: buildup -> MOMENT -> post-moment resolution.",
-        "- MOMENT cannot be the final sentence of the chapter.",
-        "- Do not patch one sentence. Rewrite the payoff paragraph into a full impact beat.",
         params.payoffDirective.payoffType === "reveal" && payoffDepth === "layered"
-          ? "- Reveal only one layer this chapter and leave at least one deeper unknown unresolved."
+          ? "Reveal only one layer this chapter, leave a deeper unknown unresolved."
           : undefined,
-        "- Output PRE_WRITE_CHECK, CHAPTER_TITLE, and CHAPTER_CONTENT only.",
-        params.titleCandidates.length > 0 ? `- Prefer one of these titles if useful: ${params.titleCandidates.map((candidate) => candidate.title).join(" | ")}` : undefined,
+        "",
+        "MINIMUM VIABLE PAYOFF: if a full scene will not fit, deliver at least ONE concrete sentence showing tangible progress toward the payoff, with a cost attached. A partial costly step = valid. A vague hint = invalid.",
+        "",
+        params.forceMomentAnchor
+          ? "FORCED MOMENT ANCHOR: insert one standalone MOMENT sentence after trigger, then result + cost, even if the transition is imperfect."
+          : undefined,
+        "",
+        "Rewrite the payoff paragraph as a full impact beat. Do not patch one sentence.",
+        "MOMENT must not be the final sentence.",
+        "Output PRE_WRITE_CHECK, CHAPTER_TITLE, CHAPTER_CONTENT only.",
+        params.titleCandidates.length > 0 ? `Title candidates: ${params.titleCandidates.map((c) => c.title).join(" | ")}` : undefined,
         "",
         "=== ORIGINAL_PRE_WRITE_CHECK ===",
         params.preWriteCheck || "- ok",
@@ -3730,65 +3661,35 @@ ${lengthRequirementBlock}
 
     return [
       `第${params.chapterNumber}章没有真正兑现 promised payoff。`,
-      "- 不要只加强暗示。",
-      "- 必须在 Act3 插入或替换一个具体的 payoff scene。",
-      "- 优先级锁死：payoff > cost > endingType。",
-      "- 如果 payoff 没有兑现，无论 cost 或 endingType 是否满足，本章都无效。",
-      "- 执行顺序锁死：buildup（过程）-> trigger（触发）-> MOMENT（单独一句）-> result（结果）-> cost（代价）。",
-      "- 硬锁：trigger 必须先于 MOMENT，MOMENT 必须先于 result/cost。",
-      "- 禁止为了满足 cost、calm_end、unresolved_end 或任何 endingType 而跳过 payoff。",
-      "- Every payoff must include: sensory detail, cost paid, visible change in situation.",
-      "- 感知层必须具体并绑定变化瞬间（视觉/触觉/听觉/生理至少一类）。",
-      "- 必须有明确 MOMENT（单一清晰的瞬间爆发点）。",
-      "- MOMENT 必须单独成句，并且事件必须在这一句里明确发生。",
-      "- 禁止 MOMENT 写成“逐渐打开 / 开始打开 / 正在打开 / 缓缓开启 / 似乎打开 / 似乎裂开”。",
-      "- 正确 MOMENT 示例：门，被强行打开。",
-      "- 正确 MOMENT 示例：石门猛地裂开。",
-      "- MOMENT 后必须有收束阶段，稳定局势。",
-      "- Every payoff MUST include a clear cost that hurts the protagonist.",
-      "- 代价必须落在 moment/result 之后：moment -> result -> cost。",
-      "- 代价必须具体：身体损伤加重、气血/精血/资源消耗、时间代价（无法行动）、后遗症/状态恶化，至少一种。",
-      "- 禁止无代价成功。错误：门开了。正确：门开了。他的右臂随之彻底失去知觉。",
+      `Promised payoff: ${params.payoffDirective.promisedPayoff} | type: ${params.payoffDirective.payoffType} | depth: ${payoffDepth}`,
+      "",
+      "在 Act3 插入或替换一个具体的 payoff scene，不要只加强暗示。",
+      "优先级：payoff > cost > endingType。",
+      "结构：buildup（铺垫）-> trigger（触发）-> MOMENT（单独一句）-> result（结果）-> cost（代价）。",
+      "MOMENT：单独一句，瞬间发生。禁止渐变（逐渐/开始/正在/缓缓/似乎）。示例：石门猛地裂开。",
+      "代价：具体代价落在 result 之后。禁止无痛成功。",
+      "感知：变化瞬间至少有一处具体感官细节。",
+      "",
       params.payoffDirective.payoffType === "resource"
-        ? "- 资源型 payoff 必须写成带触发与冲击的获取事件，而不是平滑结果。"
+        ? "资源型：带触发与冲击的获取事件。禁止平铺\u201c他获得了\u2026\u2026\u201d。"
         : undefined,
       params.payoffDirective.payoffType === "reveal"
-        ? "- reveal 型 payoff 必须包含一个单独成句的认知断点句，且认知必须在这一句里明确完成。"
+        ? "揭示型：单独一句认知断点。禁止\u201c他似乎意识到/隐约发现/感觉到\u201d。"
         : undefined,
-      params.payoffDirective.payoffType === "reveal"
-        ? "- 禁止 reveal 写成“他似乎意识到 / 他隐约发现 / 他感觉到”。"
-        : undefined,
-      params.payoffDirective.payoffType === "resource"
-        ? "- 资源型 payoff 结构固定为 trigger -> MOMENT -> cost -> stabilization。"
-        : undefined,
-      params.payoffDirective.payoffType === "resource"
-        ? "- 禁止直接写“他获得了……”或“信息出现在脑海”。"
-        : undefined,
-      "- 禁止抽象结果空转（如“力量增强”“压制消失”）；必须写出可感的变化细节。",
-      "- Painless success is invalid.",
-      params.forceMomentAnchor
-        ? "- Forced Moment Anchor 已激活：必须在 trigger 之后插入一个标准 MOMENT 单句。"
-        : undefined,
-      params.forceMomentAnchor && params.payoffDirective.payoffType === "reveal"
-        ? "- reveal fallback 强制句：那一刻，他看懂了这份契约。"
-        : undefined,
-      params.forceMomentAnchor
-        ? "- 标准 MOMENT 句必须匹配 payoffType：event -> 门，被强行打开。/ resource-cognition -> 契约的全部内容，涌入他的意识。/ state-change -> 他的真名，开始崩解。"
-        : undefined,
-      params.forceMomentAnchor
-        ? "- 即使衔接略突兀，也不能省略 MOMENT；MOMENT 后立刻补 result 与 cost。"
-        : undefined,
-      `- promisedPayoff: ${params.payoffDirective.promisedPayoff}`,
-      `- payoffDepth: ${payoffDepth}`,
-      "- 该 scene 必须让承诺对象真的产出新信息 / 新资源 / 新突破 / 关系变化 / 反转之一。",
-      "- payoff 段结构必须是 buildup（铺垫）-> MOMENT（爆点）-> post-moment resolution（收束）。",
-      "- MOMENT 不得作为章节最后一句。",
-      "- 不能只补一句；要重写 payoff 段为完整冲击段（感知层+瞬间爆发点+爆点后收束+代价层+结果层）。",
       params.payoffDirective.payoffType === "reveal" && payoffDepth === "layered"
-        ? "- layered reveal 只允许本章兑现一层，并且必须保留至少一个更深未知。"
+        ? "分层揭示：本章只兑现一层，保留至少一个更深未知。"
         : undefined,
-      "- 只输出 PRE_WRITE_CHECK、CHAPTER_TITLE、CHAPTER_CONTENT 三个区块。",
-      params.titleCandidates.length > 0 ? `- 可优先参考这些标题：${params.titleCandidates.map((candidate) => candidate.title).join(" | ")}` : undefined,
+      "",
+      "最小可行 payoff（兜底）：如果完整场景塞不进本章，至少写一句具体描写展示向 payoff 的实质性推进，并带代价。有代价的部分推进 = 有效；模糊暗示 = 无效。",
+      "",
+      params.forceMomentAnchor
+        ? "FORCED MOMENT ANCHOR：在 trigger 之后插入标准 MOMENT 单句，然后立刻补 result 与 cost。"
+        : undefined,
+      "",
+      "重写 payoff 段为完整冲击段，不要只补一句话。",
+      "MOMENT 不能是章节最后一句。",
+      "只输出 PRE_WRITE_CHECK、CHAPTER_TITLE、CHAPTER_CONTENT。",
+      params.titleCandidates.length > 0 ? `标题参考：${params.titleCandidates.map((c) => c.title).join(" | ")}` : undefined,
       "",
       "=== ORIGINAL_PRE_WRITE_CHECK ===",
       params.preWriteCheck || "- ok",
