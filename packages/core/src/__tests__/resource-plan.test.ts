@@ -793,4 +793,92 @@ initialResources:
     expect(result.passed).toBe(false);
     expect(result.violations.some(v => v.includes("closingBalances 联邦币"))).toBe(true);
   });
+
+  // ---- FIX-052-C: exchange-implied consume adaptive closing balance ----
+
+  it("T19: gain + exchange-consume same chapter computes correct closing balance (0)", () => {
+    const bookRules = [
+      "resourceTypes:",
+      "  - 震惊值",
+      "  - 爱慕值",
+      "initialResources:",
+      "  震惊值: 0",
+      "  爱慕值: 0",
+    ].join("\n");
+
+    const bootstrapPlan = buildChapterResourcePlan({
+      chapter: 1,
+      bookRules,
+      particleLedger: "| 震惊值 | 0 |\n| 爱慕值 | 0 |\n",
+      currentState: "震惊值=0。系统刚激活。",
+      chapterGoal: "系统首次激活",
+    });
+
+    // Text: gain 999 震惊值, then exchange-consume all 999
+    const text = "【检测到高强度情绪波动，震惊值+999】\n林默把999点震惊值全换了初级体能增强。";
+
+    const result = validateTextAgainstChapterResourcePlanFinal({
+      text,
+      plan: bootstrapPlan,
+    });
+
+    // Closing balance should be 0 (0 + 999 gain - 999 consume)
+    // Not 999 (which would happen if consume was missed)
+    const violation999 = result.violations.filter(v => v.includes("震惊值=999"));
+    expect(violation999).toHaveLength(0);
+  });
+
+  it("T20: system_bootstrap with exchange-consume passes when text declares correct closing", () => {
+    const bookRules = [
+      "resourceTypes:",
+      "  - 震惊值",
+      "initialResources:",
+      "  震惊值: 0",
+    ].join("\n");
+
+    const bootstrapPlan = buildChapterResourcePlan({
+      chapter: 1,
+      bookRules,
+      particleLedger: "| 震惊值 | 0 |\n",
+      currentState: "震惊值=0。系统刚激活。",
+      chapterGoal: "系统首次激活",
+    });
+
+    // Text: gain + consume, THEN explicitly declares closing balance
+    const text = "震惊值+500。\n用500点震惊值兑换了技能。\n【当前震惊值：0】";
+
+    const result = validateTextAgainstChapterResourcePlanFinal({
+      text,
+      plan: bootstrapPlan,
+    });
+
+    // Should pass — closing balance is declared as 0
+    expect(result.passed).toBe(true);
+  });
+
+  it("T21: real balance error still hard blocks (not relaxed by new exchange-consume patterns)", () => {
+    // Use explicit plan like T13 to guarantee strict closure requirement
+    const strictPlan: ChapterResourcePlan = {
+      ...explorePlan,
+      mode: "normal",
+      openingBalances: { "民望值": 100, "联邦币": 200 },
+      expectedClosingBalances: { "民望值": 100, "联邦币": 200 },
+      allowedEvents: [
+        { order: 1, kind: "balance_claim", resource: "民望值", amount: 100, reason: "期末民望", requiredInText: true },
+      ],
+      unlockedSkills: [],
+      closureRequirement: "explicit_balance_required",
+    };
+
+    // Text uses exchange-implied consume BUT declares wrong closing balance
+    const text = "林默用50点民望值兑换了技能。\n【当前民望值：200】";
+
+    const result = validateTextAgainstChapterResourcePlanFinal({
+      text,
+      plan: strictPlan,
+    });
+
+    // Closing 200 ≠ computed 50 (100-50) → must fail despite new consume patterns
+    expect(result.passed).toBe(false);
+  });
 });

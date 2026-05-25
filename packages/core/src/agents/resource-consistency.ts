@@ -570,6 +570,21 @@ export function extractResourceEvents(
     resource: normalizeResourceName(match[1] ?? ""),
   }), events);
 
+  // Generic exchange-implied consume: "用/把/将 N点RESOURCE (全)换了/换成/兑换成/换取 TARGET"
+  // e.g. "把999点震惊值全换了初级体能增强", "用30点震惊值兑换Y", "消耗10点震惊值换成Y"
+  collectRegexEvents(chapterText, new RegExp(`(?:用|把|将|消耗了?|扣除了?|花费了?)\\s*(${NUMBER_SOURCE})\\s*(?:点|枚|个|块)?\\s*(${resourcePattern})\\s*(?:全|全部|都|全都)?\\s*(?:换了|换成|兑换成|兑换了|换取|换成了|换取了)`, "giu"), (match) => ({
+    kind: "consume",
+    amount: parseFlexibleNumber(match[1] ?? ""),
+    resource: normalizeResourceName(match[2] ?? ""),
+  }), events);
+
+  // "N点RESOURCE被兑换/换成X"
+  collectRegexEvents(chapterText, new RegExp(`(${NUMBER_SOURCE})\\s*(?:点|枚|个|块)?\\s*(${resourcePattern})\\s*被\\s*(?:兑换了?|换成|换了)`, "giu"), (match) => ({
+    kind: "consume",
+    amount: parseFlexibleNumber(match[1] ?? ""),
+    resource: normalizeResourceName(match[2] ?? ""),
+  }), events);
+
   collectRegexEvents(chapterText, new RegExp(`(?:消耗了?|扣除了?|花费了?|支付了?)?\\s*(${NUMBER_SOURCE})\\s*(?:点)?\\s*(民望值|民望)\\s*(?:兑换了?|换成|换取)\\s*(${NUMBER_SOURCE})\\s*(?:元)?\\s*(联邦币|现金)`, "giu"), (match) => ({
     kind: "consume",
     amount: parseFlexibleNumber(match[1] ?? ""),

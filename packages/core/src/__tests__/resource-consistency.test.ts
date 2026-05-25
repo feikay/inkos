@@ -832,3 +832,98 @@ describe("system_bootstrap and resource_rule_reveal modes", () => {
     expect(rules.exchangeRates[0]?.to).toBe("爱慕值");
   });
 });
+
+// ---- FIX-052-C: Chinese exchange-implied consume extraction ----
+
+describe("extractResourceEvents — exchange-implied consume", () => {
+  const emotionRules = [
+    "resourceTypes:",
+    "  - 震惊值",
+    "  - 爱慕值",
+    "  - 绝望值",
+    "  - 愤怒值",
+    "  - 喜悦值",
+    "initialResources:",
+    "  震惊值: 0",
+    "  爱慕值: 0",
+    "  绝望值: 0",
+    "  愤怒值: 0",
+    "  喜悦值: 0",
+  ].join("\n");
+
+  it("T19: 把N点X全换了Y extracts consume X N", () => {
+    const events = extractResourceEvents(
+      "把999点震惊值全换了初级体能增强。",
+      emotionRules,
+      "",
+    );
+    const consumes = events.filter((e) => e.kind === "consume" && e.resource === "震惊值");
+    expect(consumes.length).toBeGreaterThan(0);
+    expect(consumes[0]?.amount).toBe(999);
+  });
+
+  it("T20: 用N点X兑换Y extracts consume X N", () => {
+    const events = extractResourceEvents(
+      "林默用30点震惊值兑换了基础格斗技能。",
+      emotionRules,
+      "",
+    );
+    const consumes = events.filter((e) => e.kind === "consume" && e.resource === "震惊值");
+    expect(consumes.length).toBeGreaterThan(0);
+    expect(consumes[0]?.amount).toBe(30);
+  });
+
+  it("T21: 消耗N点X换成Y extracts consume X N", () => {
+    const events = extractResourceEvents(
+      "消耗10点绝望值换成了精神抗性。",
+      emotionRules,
+      "",
+    );
+    const consumes = events.filter((e) => e.kind === "consume" && e.resource === "绝望值");
+    expect(consumes.length).toBeGreaterThan(0);
+    expect(consumes[0]?.amount).toBe(10);
+  });
+
+  it("T22: 用N点X换取Y extracts consume X N", () => {
+    const events = extractResourceEvents(
+      "用100点爱慕值换取一次读心机会。",
+      emotionRules,
+      "",
+    );
+    const consumes = events.filter((e) => e.kind === "consume" && e.resource === "爱慕值");
+    expect(consumes.length).toBeGreaterThan(0);
+    expect(consumes[0]?.amount).toBe(100);
+  });
+
+  it("T23: N点X被兑换成Y extracts consume X N", () => {
+    const events = extractResourceEvents(
+      "50点愤怒值被兑换成了力量增幅。",
+      emotionRules,
+      "",
+    );
+    const consumes = events.filter((e) => e.kind === "consume" && e.resource === "愤怒值");
+    expect(consumes.length).toBeGreaterThan(0);
+    expect(consumes[0]?.amount).toBe(50);
+  });
+
+  it("T24: non-resource numbers (房租, 现金) are NOT falsely extracted as resource consume", () => {
+    const events = extractResourceEvents(
+      "林默交了800元房租，兜里还剩23块钱，他又花了15元买了个馒头。",
+      emotionRules,
+      "",
+    );
+    // No emotion resources in this text — should have no consume events
+    const consumes = events.filter((e) => e.kind === "consume");
+    expect(consumes).toHaveLength(0);
+  });
+
+  it("T25: time/chapter numbers are NOT falsely extracted as resource consume", () => {
+    const events = extractResourceEvents(
+      "第3章，林默用了30秒思考，把第2章学到的技能回顾了一遍。",
+      emotionRules,
+      "",
+    );
+    const consumes = events.filter((e) => e.kind === "consume");
+    expect(consumes).toHaveLength(0);
+  });
+});
