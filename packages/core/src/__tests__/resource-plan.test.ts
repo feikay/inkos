@@ -637,6 +637,135 @@ describe("validateTextAgainstChapterResourcePlanFinal", () => {
     expect(result.balanceMutationEvents?.length ?? 0).toBeGreaterThan(0);
   });
 
+  // ---- FIX-052-B-FOLLOWUP-2: system_bootstrap activation detection ----
+
+  const emotionSystemBookRules = `
+resourceTypes:
+  - 震惊值
+  - 爱慕值
+  - 绝望值
+  - 愤怒值
+  - 喜悦值
+
+initialResources:
+  震惊值: 0
+  爱慕值: 0
+  绝望值: 0
+  愤怒值: 0
+  喜悦值: 0
+`;
+
+  const initialLedger = `
+| 资源 | 余额 |
+|------|------|
+| 震惊值 | 0 |
+| 爱慕值 | 0 |
+| 绝望值 | 0 |
+| 愤怒值 | 0 |
+| 喜悦值 | 0 |
+`;
+
+  const activatedLedger = `
+| 资源 | 余额 | 最近更新章节 |
+|------|------|------------|
+| 震惊值 | 999 | 1 |
+| 爱慕值 | 0 | - |
+| 绝望值 | 0 | - |
+| 愤怒值 | 0 | - |
+| 喜悦值 | 0 | - |
+`;
+
+  it("T14: first activation with initial-only ledger generates system_bootstrap", () => {
+    const plan = buildChapterResourcePlan({
+      chapter: 1,
+      bookRules: emotionSystemBookRules,
+      particleLedger: initialLedger,
+      currentState: "林默刚刚绑定了情绪值系统，一切都还是初始状态。",
+      chapterGoal: "系统首次激活",
+    });
+
+    // All ledger values match initial → still system_bootstrap
+    expect(plan.mode).toBe("system_bootstrap");
+  });
+
+  it("T15: already-activated system (non-initial ledger) does not generate system_bootstrap", () => {
+    const plan = buildChapterResourcePlan({
+      chapter: 2,
+      bookRules: emotionSystemBookRules,
+      particleLedger: activatedLedger,
+      currentState: "震惊值=999。林默正在研究系统面板的功能。",
+      chapterGoal: "了解系统的各项功能",
+    });
+
+    // 震惊值=999 differs from initial 0 → system already activated, not bootstrap
+    expect(plan.mode).not.toBe("system_bootstrap");
+  });
+
+  it("T16: non-zero initial value does not cause false already-activated detection", () => {
+    const nonZeroInitRules = `
+resourceTypes:
+  - 震惊值
+  - 爱慕值
+
+initialResources:
+  震惊值: 100
+  爱慕值: 50
+`;
+    const matchingLedger = `
+| 资源 | 余额 |
+|------|------|
+| 震惊值 | 100 |
+| 爱慕值 | 50 |
+`;
+
+    const plan = buildChapterResourcePlan({
+      chapter: 1,
+      bookRules: nonZeroInitRules,
+      particleLedger: matchingLedger,
+      currentState: "系统刚激活，初始震惊值100，爱慕值50。",
+      chapterGoal: "系统激活",
+    });
+
+    // Ledger values (100, 50) equal initial values → not "activated", still bootstrap
+    expect(plan.mode).toBe("system_bootstrap");
+  });
+
+  it("T17: book without resource types does not trigger system_bootstrap", () => {
+    const plan = buildChapterResourcePlan({
+      chapter: 1,
+      bookRules: "这是一个普通的都市小说，主角开始了新的一天。",
+      particleLedger: "",
+      currentState: "主角起床，开始了新的一天。",
+      chapterGoal: "日常铺垫",
+    });
+
+    // No resources defined → no resource plan mode should be no_resource_change
+    expect(plan.mode).not.toBe("system_bootstrap");
+    expect(plan.mode).toBe("no_resource_change");
+  });
+
+  it("T18: system_bootstrap plan structure is correct for genuine first activation", () => {
+    const plan = buildChapterResourcePlan({
+      chapter: 1,
+      bookRules: emotionSystemBookRules,
+      particleLedger: initialLedger,
+      currentState: "林默刚刚绑定了情绪值系统。",
+      chapterGoal: "系统首次激活",
+    });
+
+    // system_bootstrap with proper structure
+    expect(plan.mode).toBe("system_bootstrap");
+    expect(plan.closureRequirement).toBe("explicit_balance_required");
+    expect(plan.allowedEvents.length).toBeGreaterThan(0);
+    // Should have balance_claim events for each resource in context
+    const balanceClaims = plan.allowedEvents.filter(e => e.kind === "balance_claim");
+    expect(balanceClaims.length).toBeGreaterThan(0);
+    // Each balance_claim should require text declaration
+    for (const claim of balanceClaims) {
+      expect(claim.requiredInText).toBe(true);
+    }
+  });
+
   // ---- Regression: real balance errors still hard block ----
 
   it("T13: normal mode with real balance error still hard blocks", () => {

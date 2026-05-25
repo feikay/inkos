@@ -450,7 +450,47 @@ function detectSystemBootstrapStage(params: {
   const hasFirstResourceReveal = /(?:获得|激活|解锁|开启).{0,8}(?:系统|面板|能力|技能).{0,16}(?:首次|第一次|初始)/u.test(allText);
   const isEarlyChapter = params.chapter <= 3;
   const hasResources = Object.keys(params.resourceRules.resources).length > 0;
-  return (hasSystemIntro || hasFirstResourceReveal) && isEarlyChapter && hasResources;
+  if (!(hasSystemIntro || hasFirstResourceReveal) || !isEarlyChapter || !hasResources) {
+    return false;
+  }
+
+  // Already-activated guard: if the ledger or current state already contains
+  // resource balances that differ from their initial values, the system was
+  // activated in a previous chapter. This is not a true first bootstrap, so
+  // fall back to resource_rule_reveal / normal instead of generating
+  // first-activation balance_claim events.
+  if (hasNonInitialBalances(params.resourceRules, params.particleLedger, params.currentState)) {
+    return false;
+  }
+
+  return true;
+}
+
+function hasNonInitialBalances(
+  resourceRules: ResourceRules,
+  particleLedger: string,
+  currentState: string,
+): boolean {
+  const text = [particleLedger, currentState].filter(Boolean).join("\n");
+  if (!text.trim()) return false;
+
+  for (const [resource, rule] of Object.entries(resourceRules.resources)) {
+    const escaped = resource.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const patterns = [
+      new RegExp(`${escaped}\\s*[=＝:：为]\\s*(-?\\d+)`, "u"),
+      new RegExp(`当前${escaped}\\s*(-?\\d+)`, "u"),
+      new RegExp(`\\|\\s*${escaped}\\s*\\|\\s*(-?\\d+)\\s*\\|`, "u"),
+    ];
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (!match) continue;
+      const value = Number.parseInt(match[1] ?? "", 10);
+      if (Number.isFinite(value) && value !== rule.initial) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function detectResourceRuleRevealStage(params: {
