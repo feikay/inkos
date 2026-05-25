@@ -864,7 +864,7 @@ export function renderResourcePlanForPrompt(plan: ChapterResourcePlan, target: "
     if (event.kind === "unlock") return `- 解锁 ${event.skill ?? event.resource}：${event.reason}`;
     if (event.kind === "use_skill") return `- 使用已解锁技能 ${event.skill ?? event.resource}：${event.reason}`;
     if (event.kind === "discover") return `- 探索/发现 ${event.resource}：${event.reason}`;
-    if (event.kind === "balance_claim") return `- 期末确认 ${event.resource}=${event.amount}`;
+    if (event.kind === "balance_claim") return `- 在正文中明确写出期末余额声明：当前${event.resource}：${event.amount}`;
     if (event.kind === "spend") return `- ${event.resource}-${event.amount}：${event.reason}`;
     return `- ${event.resource}+${event.amount}：${event.reason}`;
   });
@@ -898,6 +898,19 @@ export function renderResourcePlanForPrompt(plan: ChapterResourcePlan, target: "
   const hardLine = target === "writer"
     ? "【资源计划是硬约束，不是建议】"
     : "【本章资源计划，必须遵守】";
+  const hasRequiredBalanceClaim = plan.allowedEvents.some(
+    (event) => event.kind === "balance_claim" && event.requiredInText
+  );
+  const balanceClaimGuidance = target === "writer" && hasRequiredBalanceClaim
+    ? [
+        "【期末余额声明要求】",
+        "- 必须在正文末尾写出所有带「在正文中明确写出期末余额声明」标记的资源余额。",
+        "- 格式：在正文中自然写出「当前资源名：数值」，多个资源可用顿号或逗号分隔。",
+        "- 示例格式（资源名仅为示意）：「【当前灵力值：100，气血值：50】」",
+        "- 数值必须与 Resource Plan 的期末余额一致。",
+        "- 如果期末余额为 0，也必须写出「当前资源名：0」。",
+      ]
+    : [];
   const writerPayoff = target === "writer"
     ? plan.mode === "explore_conversion_path"
       ? [
@@ -921,6 +934,7 @@ export function renderResourcePlanForPrompt(plan: ChapterResourcePlan, target: "
     "本章允许：",
     ...allowed,
     `本章结尾：${closing}${plan.unlockedSkills.length ? `，已解锁${plan.unlockedSkills.join("、")}` : ""}`,
+    ...balanceClaimGuidance,
     "本章禁止：",
     "- 任何现金兑换",
     "- 任何联邦币到账",
@@ -1298,11 +1312,25 @@ export function applyResourcePlanExpectedBalances(
 }
 
 function scanTextAgainstResourcePlan(text: string, plan: ChapterResourcePlan, target: "chapter_intent" | "writer"): ResourcePlanTextScanResult {
-  if (!text.trim() || (plan.mode !== "defer_exchange" && plan.mode !== "explore_conversion_path")) {
+  if (!text.trim()) {
     return { ok: true, violations: [] };
   }
   const violations = findResourcePlanViolations(text, plan);
-  // no-change plans do not require an explicit closing panel; preScan only blocks mutation language.
+
+  // system_bootstrap / resource_rule_reveal: check required balance_claim events.
+  // These modes require explicit closing balance declarations in the text;
+  // missing declarations must be caught at pre-scan time so the writer can rewrite.
+  if (plan.mode === "system_bootstrap" || plan.mode === "resource_rule_reveal") {
+    for (const event of plan.allowedEvents) {
+      if (event.kind === "balance_claim" && event.requiredInText) {
+        if (!hasBalanceClaim(text, event.resource, event.amount ?? Number.NaN)) {
+          violations.push(`缺少期末声明：请在正文中写出"当前${event.resource}：${event.amount}"`);
+        }
+      }
+    }
+  }
+
+  // defer_exchange: hardcoded pre-scan checks for the required event chain.
   if (target === "writer" && plan.mode === "defer_exchange") {
     if (!/(民望值?\s*[+＋]\s*10|获得\s*10\s*(?:点)?民望)/u.test(text)) {
       violations.push("正文缺少民望+10");

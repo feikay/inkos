@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   buildChapterResourcePlan,
   validateTextAgainstChapterResourcePlanFinal,
+  renderResourcePlanForPrompt,
+  preScanTextAgainstResourcePlan,
   type ChapterResourcePlan,
 } from "../agents/resource-plan.js";
 
@@ -880,5 +882,214 @@ initialResources:
 
     // Closing 200 ≠ computed 50 (100-50) → must fail despite new consume patterns
     expect(result.passed).toBe(false);
+  });
+
+  // ---- FIX-052-D-2: pre-scan balance_claim detection for system_bootstrap / resource_rule_reveal ----
+
+  describe("preScanTextAgainstResourcePlan — balance_claim detection", () => {
+    const sbPlan: ChapterResourcePlan = {
+      chapter: 1,
+      mode: "system_bootstrap",
+      source: "resource-engine",
+      openingBalances: { "灵力值": 0, "气血值": 0 },
+      expectedClosingBalances: { "灵力值": 0, "气血值": 0 },
+      allowedEvents: [
+        { order: 1, kind: "balance_claim", resource: "灵力值", amount: 0, reason: "系统首次激活", requiredInText: true },
+        { order: 2, kind: "balance_claim", resource: "气血值", amount: 0, reason: "系统首次激活", requiredInText: true },
+      ],
+      forbiddenEvents: ["exchange", "cash_out"],
+      unlockedSkills: [],
+      resourceRules: {
+        resources: {
+          "灵力值": { name: "灵力值", type: "integer", initial: 0, min: 0, allowNegative: false, aliases: [] },
+          "气血值": { name: "气血值", type: "integer", initial: 0, min: 0, allowNegative: false, aliases: [] },
+        },
+        skills: [],
+        exchangeRates: [],
+        aliases: {},
+      },
+      narrativeGuidance: ["系统首次激活。"],
+      closureRequirement: "explicit_balance_required",
+    };
+
+    const rrrPlan: ChapterResourcePlan = {
+      chapter: 2,
+      mode: "resource_rule_reveal",
+      source: "resource-engine",
+      openingBalances: { "灵力值": 100, "气血值": 50 },
+      expectedClosingBalances: { "灵力值": 100, "气血值": 50 },
+      allowedEvents: [
+        { order: 1, kind: "discover", resource: "灵力值", reason: "揭示规则", requiredInText: true },
+        { order: 2, kind: "balance_claim", resource: "灵力值", amount: 100, reason: "期末声明", requiredInText: true },
+        { order: 3, kind: "balance_claim", resource: "气血值", amount: 50, reason: "期末声明", requiredInText: true },
+      ],
+      forbiddenEvents: ["exchange", "gain", "consume"],
+      unlockedSkills: [],
+      resourceRules: sbPlan.resourceRules,
+      narrativeGuidance: ["揭示资源运作规则。"],
+      closureRequirement: "explicit_balance_required",
+    };
+
+    it("T22: system_bootstrap preScan catches missing balance_claim", () => {
+      const text = "系统激活！宿主获得了灵力。但没有写期末余额。";
+      const result = preScanTextAgainstResourcePlan(text, sbPlan);
+      expect(result.ok).toBe(false);
+      expect(result.violations).toContain('缺少期末声明：请在正文中写出"当前灵力值：0"');
+      expect(result.violations).toContain('缺少期末声明：请在正文中写出"当前气血值：0"');
+    });
+
+    it("T23: system_bootstrap preScan passes when balance declarations present", () => {
+      const text = "系统激活！【当前灵力值：0，气血值：0】";
+      const result = preScanTextAgainstResourcePlan(text, sbPlan);
+      expect(result.ok).toBe(true);
+      expect(result.violations).toEqual([]);
+    });
+
+    it("T24: system_bootstrap preScan passes with alternative balance format (X=0)", () => {
+      const text = "灵力值=0，气血值=0。系统激活完成。";
+      const result = preScanTextAgainstResourcePlan(text, sbPlan);
+      expect(result.ok).toBe(true);
+      expect(result.violations).toEqual([]);
+    });
+
+    it("T25: resource_rule_reveal preScan catches missing balance_claim", () => {
+      const text = "系统揭示了灵力值的运作规则。但没有写期末余额声明。";
+      const result = preScanTextAgainstResourcePlan(text, rrrPlan);
+      expect(result.ok).toBe(false);
+      expect(result.violations).toContain('缺少期末声明：请在正文中写出"当前灵力值：100"');
+      expect(result.violations).toContain('缺少期末声明：请在正文中写出"当前气血值：50"');
+    });
+
+    it("T26: resource_rule_reveal preScan passes when balance declarations present", () => {
+      const text = "揭示了规则。当前灵力值：100，当前气血值：50。";
+      const result = preScanTextAgainstResourcePlan(text, rrrPlan);
+      expect(result.ok).toBe(true);
+      expect(result.violations).toEqual([]);
+    });
+
+    it("T27: preScan does not affect no_resource_change mode", () => {
+      const noChangePlan: ChapterResourcePlan = {
+        chapter: 5,
+        mode: "no_resource_change",
+        source: "resource-engine",
+        openingBalances: { "灵力值": 50, "气血值": 50 },
+        expectedClosingBalances: { "灵力值": 50, "气血值": 50 },
+        allowedEvents: [],
+        forbiddenEvents: [],
+        unlockedSkills: [],
+        resourceRules: sbPlan.resourceRules,
+        narrativeGuidance: [],
+      };
+      const text = "林默在家休息了一天。";
+      const result = preScanTextAgainstResourcePlan(text, noChangePlan);
+      expect(result.ok).toBe(true);
+      expect(result.violations).toEqual([]);
+    });
+
+    it("T28: system_bootstrap preScan only requires balance_claim events with requiredInText", () => {
+      const planWithOptionalClaim: ChapterResourcePlan = {
+        ...sbPlan,
+        allowedEvents: [
+          { order: 1, kind: "balance_claim", resource: "灵力值", amount: 0, reason: "必须声明", requiredInText: true },
+          { order: 2, kind: "balance_claim", resource: "气血值", amount: 0, reason: "可选声明", requiredInText: false },
+        ],
+      };
+      const text = "系统激活！当前灵力值：0。"; // 灵力值 declared, 气血值 not declared
+      const result = preScanTextAgainstResourcePlan(text, planWithOptionalClaim);
+      // 气血值 is optional (requiredInText: false), so should not cause violation
+      expect(result.ok).toBe(true);
+      expect(result.violations).toEqual([]);
+    });
+  });
+
+  // ---- FIX-052-D-2: renderResourcePlanForPrompt balance_claim clarity ----
+
+  describe("renderResourcePlanForPrompt — balance_claim clarity", () => {
+    const planWithClaims: ChapterResourcePlan = {
+      chapter: 1,
+      mode: "system_bootstrap",
+      source: "resource-engine",
+      openingBalances: { "灵力值": 0, "气血值": 0 },
+      expectedClosingBalances: { "灵力值": 0, "气血值": 0 },
+      allowedEvents: [
+        { order: 1, kind: "balance_claim", resource: "灵力值", amount: 0, reason: "系统首次激活", requiredInText: true },
+        { order: 2, kind: "balance_claim", resource: "气血值", amount: 0, reason: "系统首次激活", requiredInText: true },
+      ],
+      forbiddenEvents: [],
+      unlockedSkills: [],
+      resourceRules: {
+        resources: {
+          "灵力值": { name: "灵力值", type: "integer", initial: 0, min: 0, allowNegative: false, aliases: [] },
+          "气血值": { name: "气血值", type: "integer", initial: 0, min: 0, allowNegative: false, aliases: [] },
+        },
+        skills: [],
+        exchangeRates: [],
+        aliases: {},
+      },
+      narrativeGuidance: ["本章处于系统首次激活阶段。"],
+      closureRequirement: "explicit_balance_required",
+    };
+
+    it("T29: writer prompt uses explicit writing instruction instead of ambiguous 期末确认", () => {
+      const output = renderResourcePlanForPrompt(planWithClaims, "writer");
+      expect(output).toContain("在正文中明确写出期末余额声明");
+      expect(output).not.toContain("期末确认 灵力值=0");
+    });
+
+    it("T30: writer prompt includes balance claim format guidance", () => {
+      const output = renderResourcePlanForPrompt(planWithClaims, "writer");
+      expect(output).toContain("【期末余额声明要求】");
+      expect(output).toContain("必须在正文末尾写出");
+      expect(output).toContain("当前资源名：数值");
+      expect(output).toContain("如果期末余额为 0，也必须写出");
+    });
+
+    it("T31: chapter_intent prompt also uses explicit writing instruction", () => {
+      const output = renderResourcePlanForPrompt(planWithClaims, "chapter_intent");
+      expect(output).toContain("在正文中明确写出期末余额声明");
+      expect(output).not.toContain("期末确认 灵力值=0");
+    });
+
+    it("T32: chapter_intent prompt does not include writer-only format guidance", () => {
+      const output = renderResourcePlanForPrompt(planWithClaims, "chapter_intent");
+      expect(output).not.toContain("【期末余额声明要求】");
+    });
+
+    it("T33: no_resource_change prompt does not include balance claim guidance", () => {
+      const noChangePlan: ChapterResourcePlan = {
+        ...planWithClaims,
+        mode: "no_resource_change",
+        allowedEvents: [],
+        closureRequirement: "inferred_no_change_allowed",
+      };
+      const output = renderResourcePlanForPrompt(noChangePlan, "writer");
+      expect(output).not.toContain("【期末余额声明要求】");
+      expect(output).not.toContain("在正文中明确写出期末余额声明");
+    });
+
+    it("T34: real balance error still hard blocks in final validation", () => {
+      // Verify that the pre-scan enhancement does not relax final validation.
+      // A wrong closing declaration must still fail.
+      const strictPlan: ChapterResourcePlan = {
+        chapter: 2,
+        mode: "normal",
+        source: "resource-engine",
+        openingBalances: { "灵力值": 100, "气血值": 50 },
+        expectedClosingBalances: { "灵力值": 100, "气血值": 50 },
+        allowedEvents: [
+          { order: 1, kind: "balance_claim", resource: "灵力值", amount: 100, reason: "期末声明", requiredInText: true },
+        ],
+        forbiddenEvents: [],
+        unlockedSkills: [],
+        resourceRules: planWithClaims.resourceRules,
+        narrativeGuidance: [],
+        closureRequirement: "explicit_balance_required",
+      };
+      // Text claims closing=200 but actual should be 100
+      const text = "林默写灵力值=200。";
+      const result = validateTextAgainstChapterResourcePlanFinal({ text, plan: strictPlan });
+      expect(result.passed).toBe(false);
+      expect(result.violations.some(v => v.includes("closingBalances") || v.includes("balance claim mismatch"))).toBe(true);
+    });
   });
 });
