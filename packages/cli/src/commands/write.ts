@@ -141,6 +141,20 @@ writeCommand
           })) {
             log(line);
           }
+          const hasCritical = result.auditResult.issues.some((issue) => issue.severity === "critical");
+          const hasWarning = result.auditResult.issues.some((issue) => issue.severity === "warning");
+          const needsDiagnosis = result.status !== "ready-for-review" || hasCritical;
+          if (needsDiagnosis) {
+            log("  next:");
+            log(`  node packages/cli/dist/index.js review diagnose --book ${bookId} --chapter ${result.chapterNumber}`);
+          } else if (hasWarning) {
+            log("  next:");
+            log(`  node packages/cli/dist/index.js review publish-ready --book ${bookId} --chapter ${result.chapterNumber}`);
+            log(`  可选诊断：node packages/cli/dist/index.js review diagnose --book ${bookId} --chapter ${result.chapterNumber}`);
+          } else {
+            log("  next:");
+            log(`  node packages/cli/dist/index.js review publish-ready --book ${bookId} --chapter ${result.chapterNumber}`);
+          }
           log("");
         }
 

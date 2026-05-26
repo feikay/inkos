@@ -39,6 +39,7 @@ const FINAL_STATUS = {
   numeric: "STOPPED_BY_NUMERIC",
   sixPart: "STOPPED_BY_SIX_PART",
   drop: "STOPPED_BY_DROP",
+  approve: "STOPPED_BY_APPROVE",
   export: "STOPPED_BY_EXPORT",
   firstChapterQuality: "STOPPED_BY_FIRST_CHAPTER_QUALITY",
   writeLock: "STOPPED_BY_WRITE_LOCK",
@@ -60,6 +61,8 @@ Options:
   --resume-last
   --resume <reportPath>
   --no-export
+  --approve / --no-approve
+  --export-preflight / --no-export-preflight
   --stop-on-fail / --no-stop-on-fail
   --use-reviewed / --no-use-reviewed
   --max-polish <n>
@@ -165,6 +168,19 @@ function parsePublishQualityScore(publishReport, publishStep) {
   if (Number.isFinite(direct)) return direct;
   const match = stepText(publishStep).match(/score:\s*(\d{1,3})/iu);
   return match ? Number(match[1]) : null;
+}
+
+function parseExportPreflight(step, chapter) {
+  const text = stepText(step);
+  const matches = [...text.matchAll(/第\s*(\d+)\s*章：6段检查\s+(\d+)\/6/gu)];
+  const weakSixPart = matches
+    .map((match) => ({ chapter: Number(match[1]), score: Number(match[2]) }))
+    .filter((item) => item.chapter === chapter && Number.isFinite(item.score) && item.score < 4);
+
+  return {
+    weakSixPart,
+    hasWeakSixPart: weakSixPart.length > 0,
+  };
 }
 
 function hasFirstChapterBlockingSignals(chapterRun) {
@@ -712,6 +728,12 @@ function renderMarkdown(report) {
     lines.push("");
     lines.push(`- finalStatus: ${chapter.finalStatus}`);
     lines.push(`- publish-ready final: ${chapter.publishReadyFinalStatus || "UNKNOWN"}`);
+    if (chapter.exportPreflight) {
+      const weak = chapter.exportPreflight.weakSixPart || [];
+      lines.push(`- export-preflight: ${chapter.exportPreflight.status}`);
+      if (weak.length) lines.push(`- export-preflight weakSixPart: ${weak.map((item) => `${item.score}/6`).join(", ")}`);
+    }
+    lines.push(`- approved: ${chapter.approved ? "true" : "false"}`);
     lines.push(`- numeric: A=${chapter.numeric?.A ?? "n/a"} B=${chapter.numeric?.B ?? "n/a"} C=${chapter.numeric?.C ?? "n/a"}`);
     lines.push(`- continuity-auto: ${chapter.didContinuityAuto ? "true" : "false"}`);
     if (chapter.continuityOverride) lines.push(`- continuityOverride: ${chapter.continuityOverride}`);
@@ -835,6 +857,8 @@ function parseOptions() {
     resumeLast,
     resumePath,
     noExport: hasFlag("no-export"),
+    approve: boolOpt("approve", true),
+    exportPreflight: boolOpt("export-preflight", true),
     stopOnFail: boolOpt("stop-on-fail", DEFAULTS.stopOnFail),
     useReviewed: boolOpt("use-reviewed", DEFAULTS.useReviewed),
     maxPolish: intOpt("max-polish", DEFAULTS.maxPolish),
@@ -876,6 +900,8 @@ function makeChapterRun(chapter) {
       reportFile: "",
       result: "SKIPPED",
     },
+    exportPreflight: null,
+    approved: false,
     exported: false,
     finalStatus: "UNKNOWN_ERROR",
   };
@@ -939,6 +965,8 @@ async function main() {
       from: opts.from,
       to: opts.to,
       noExport: opts.noExport,
+      approve: opts.approve,
+      exportPreflight: opts.exportPreflight,
       stopOnFail: opts.stopOnFail,
       useReviewed: opts.useReviewed,
       maxPolish: opts.maxPolish,
@@ -1422,6 +1450,57 @@ async function main() {
       }
     } else {
       chapterRun.finalStatus = FINAL_STATUS.ready;
+    }
+
+    if (!hardStop && chapterRun.finalStatus === FINAL_STATUS.ready && opts.exportPreflight) {
+      const preflightArgs = [
+        path.join("scripts", "fanqie", "export-fanqie.mjs"),
+        bookName,
+        "--from",
+        String(chapter),
+        "--to",
+        String(chapter),
+        "--dry-run",
+      ];
+      if (opts.useReviewed) preflightArgs.push("--use-reviewed");
+
+      const preflightStep = await runStep(chapterRun, "export-fanqie-preflight", "node", preflightArgs, {
+        cwd: root,
+        dryRun: opts.dryRun,
+      });
+      const preflight = opts.dryRun
+        ? { weakSixPart: [], hasWeakSixPart: false }
+        : parseExportPreflight(preflightStep, chapter);
+      chapterRun.exportPreflight = {
+        status: preflightStep.exitCode === 0 && !preflight.hasWeakSixPart ? "PASS" : "WARN",
+        weakSixPart: preflight.weakSixPart,
+      };
+
+      if (preflightStep.exitCode !== 0) {
+        chapterRun.finalStatus = FINAL_STATUS.export;
+        report.stopReason = `export-fanqie preflight failed for chapter ${chapterPrefix(chapter)}.`;
+        hardStop = true;
+      } else if (preflight.hasWeakSixPart) {
+        chapterRun.finalStatus = FINAL_STATUS.sixPart;
+        report.stopReason = `export-fanqie preflight found weak 6-part score for chapter ${chapterPrefix(chapter)}: ${preflight.weakSixPart.map((item) => `${item.score}/6`).join(", ")}. Run repair-fanqie before approving/exporting.`;
+        hardStop = true;
+      }
+    }
+
+    if (!hardStop && chapterRun.finalStatus === FINAL_STATUS.ready && opts.approve) {
+      const approveStep = await runStep(chapterRun, "review-approve", "node", [
+        cli,
+        "review",
+        "approve",
+        bookName,
+        String(chapter),
+      ], { cwd: root, dryRun: opts.dryRun });
+      chapterRun.approved = approveStep.exitCode === 0;
+      if (approveStep.exitCode !== 0) {
+        chapterRun.finalStatus = FINAL_STATUS.approve;
+        report.stopReason = `review approve failed for chapter ${chapterPrefix(chapter)}.`;
+        hardStop = true;
+      }
     }
 
     report.chapters.push(chapterRun);

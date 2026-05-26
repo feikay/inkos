@@ -46,6 +46,7 @@ if (!fs.existsSync(bookDir)) {
 
 const bookConfig = readJsonIfExists(path.join(bookDir, "book.json")) || {};
 const publishTitle = publishTitleArg || bookConfig.title || bookName;
+const chapterIndex = readJsonIfExists(path.join(bookDir, "chapters", "index.json")) || [];
 
 if (!dryRun) fs.mkdirSync(chapterOutDir, { recursive: true });
 if (reset && fs.existsSync(markerFile)) fs.rmSync(markerFile);
@@ -1344,6 +1345,22 @@ const weak = exported.filter((x) => !x.check.pass);
 if (weak.length) {
   console.log("\n以下章节建议发布前人工看一眼：");
   for (const x of weak) console.log(`- 第${x.no}章：6段检查 ${x.check.score}/6`);
+  console.log("\ndiagnose:");
+  for (const x of weak) {
+    console.log(`node packages/cli/dist/index.js review diagnose --book ${bookName} --chapter ${x.no}`);
+  }
+} else if (exported.length && dryRun) {
+  console.log("\nnext:");
+  const unapproved = exported.filter((x) => {
+    const entry = Array.isArray(chapterIndex) ? chapterIndex.find((chapter) => chapter?.number === x.no) : null;
+    return entry?.status !== "approved";
+  });
+  if (unapproved.length) {
+    for (const x of unapproved) {
+      console.log(`node packages/cli/dist/index.js review approve ${bookName} ${x.no}`);
+    }
+  }
+  console.log(`node scripts/fanqie/export-fanqie.mjs ${bookName} --from ${from} --to ${to} ${useReviewed ? "--use-reviewed" : ""}`.trim());
 }
 
 if (dryRun) console.log("\n当前为 dry-run，没有写入文件。");

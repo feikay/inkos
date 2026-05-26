@@ -220,7 +220,8 @@ function computeIntentFidelity(chapterIntent?: string): SixStepPlotIntentFidelit
   const fieldsMissing: string[] = [];
 
   for (const field of fieldsList) {
-    if (chapterIntent.includes(field)) {
+    const aliases = CHAPTER_INTENT_FIELD_ALIASES[field] ?? [field];
+    if (aliases.some((alias) => chapterIntent.includes(alias))) {
       fieldsPresent.push(field);
     } else {
       fieldsMissing.push(field);
@@ -233,6 +234,87 @@ function computeIntentFidelity(chapterIntent?: string): SixStepPlotIntentFidelit
     fieldsPresent,
     fieldsMissing,
   };
+}
+
+const CHAPTER_INTENT_FIELD_ALIASES: Record<string, string[]> = {
+  openingEmotion: ["openingEmotion", "开场情绪", "本章情绪事件"],
+  specificConflictImage: ["specificConflictImage", "具体画面", "具体冲突画面"],
+  protagonistGoal: ["protagonistGoal", "本章主角目标", "表层目标"],
+  goalStakes: ["goalStakes", "如果主角失败", "失败，会失去什么", "深层目标"],
+  mainObstacle: ["mainObstacle", "本章阻碍困境", "阻碍来源", "具体阻碍"],
+  dilemmaPressure: ["dilemmaPressure", "阻碍强度", "致命级", "压力"],
+  possibleSolution: ["possibleSolution", "本章解决方法", "凭什么还有戏", "使用的能力"],
+  solutionCost: ["solutionCost", "是否需要付出代价", "付出代价"],
+  climaxAction: ["climaxAction", "本章行动高潮", "高潮场景"],
+  turningPoint: ["turningPoint", "冲突升级方式", "爽点/反转"],
+  chapterPayoff: ["chapterPayoff", "本章结局反馈", "主角获得", "阶段性收益"],
+  nextHook: ["nextHook", "下一章钩子", "结尾画面", "未解决问题"],
+};
+
+const INTENT_SECTION_ALIASES: Record<SixStepPlotDimension, string[]> = {
+  emotion_event: ["本章情绪事件", "情绪事件", "openingEmotion", "specificConflictImage"],
+  desire_goal: ["本章主角目标", "主角目标", "表层目标", "protagonistGoal", "goalStakes"],
+  obstacle_dilemma: ["本章阻碍困境", "阻碍困境", "阻碍来源", "具体阻碍", "mainObstacle", "dilemmaPressure"],
+  solution_possibility: ["本章解决方法", "解决方法", "possibleSolution", "solutionCost"],
+  action_resolution: ["本章行动高潮", "行动高潮", "高潮场景", "climaxAction", "turningPoint"],
+  ending_feedback: ["本章结局反馈", "结局反馈", "下一章钩子", "chapterPayoff", "nextHook"],
+};
+
+function intentOverlapScore(content: string, chapterIntent: string | undefined, dimension: SixStepPlotDimension): number {
+  const section = extractIntentSection(chapterIntent, INTENT_SECTION_ALIASES[dimension]);
+  if (!section) return 0;
+  const keywords = extractIntentKeywords(section);
+  if (!keywords.length) return 0;
+  const matched = keywords.filter((keyword) => content.includes(keyword)).length;
+  return Math.min(60, matched * 10);
+}
+
+function extractIntentSection(chapterIntent: string | undefined, aliases: readonly string[]): string {
+  if (!chapterIntent?.trim()) return "";
+  const lines = chapterIntent.split(/\r?\n/);
+  const collected: string[] = [];
+  let inSection = false;
+  for (const line of lines) {
+    const heading = line.match(/^\s*#{1,6}\s*(.+?)\s*$/)?.[1]?.trim();
+    if (heading) {
+      const matches = aliases.some((alias) => heading.includes(alias));
+      if (inSection && !matches) break;
+      inSection = matches;
+      continue;
+    }
+    if (inSection) collected.push(line);
+  }
+  return collected.join("\n");
+}
+
+function extractIntentKeywords(section: string): string[] {
+  const stopWords = new Set([
+    "本章", "主角", "读者", "应该", "产生", "是否", "不得", "禁止", "没有", "相关", "要求",
+    "目标", "阻碍", "解决", "方法", "具体", "情绪", "场景", "关系", "变化", "阶段",
+    "一个", "本次", "当前", "必须", "需要", "可以", "不能", "不会", "不是", "以及",
+  ]);
+  const rawTokens = section
+    .replace(/[「」『』【】《》“”"'`*_#>\-[\]（）()]/g, " ")
+    .split(/[，。、；：？！\s/\\|]+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2 && token.length <= 12)
+    .filter((token) => !/^\d+$/.test(token))
+    .filter((token) => !stopWords.has(token));
+  const keywords: string[] = [];
+  for (const token of rawTokens) {
+    keywords.push(token);
+    if (/[\u4e00-\u9fff]/u.test(token) && token.length >= 4) {
+      for (let size = 4; size >= 2; size -= 1) {
+        for (let index = 0; index <= token.length - size; index += 1) {
+          const part = token.slice(index, index + size);
+          if (!stopWords.has(part)) keywords.push(part);
+        }
+      }
+    }
+  }
+  return [...new Set(keywords)]
+    .filter((keyword) => !stopWords.has(keyword))
+    .slice(0, 240);
 }
 
 // ---- review implementation ----
@@ -307,11 +389,13 @@ export class SixStepPlotReviewerAgent extends BaseAgent {
       const stepId = DIM_TO_STEP_ID[dim];
       const step = SIX_STEP_PLOT_METHOD.steps.find((s) => s.id === stepId);
       const checklistPassed = step ? countChecklistPassed(content, stepId, step.reviewChecklist) : 0;
+      const intentScore = intentOverlapScore(content, input.chapterIntent, dim);
 
-      // Score: signal detection (0-60) + checklist (0-40)
+      // Score: method signal detection (0-60) + checklist (0-40), with
+      // chapter_intent overlap as a generic floor for project-specific phrasing.
       const signalScore = Math.min(60, matchCount * 8);
       const checklistScore = step ? checklistPassed * 20 : 0; // each of 2 items = 20 pts
-      dimensions[dim] = Math.min(100, signalScore + checklistScore);
+      dimensions[dim] = Math.min(100, Math.max(signalScore, intentScore) + checklistScore);
     }
 
     // Per-dimension conclusions
@@ -405,7 +489,7 @@ export class SixStepPlotReviewerAgent extends BaseAgent {
     let status: SixStepPlotStatus;
     if (score >= 80 && !hasCritical) {
       status = "PASS";
-    } else if (score >= 60 || (!hasCritical && hasWarning)) {
+    } else if (score >= 60 || (!hasCritical && (score >= 55 || hasWarning))) {
       status = "WARN";
     } else {
       status = "FAIL_STRUCTURAL";

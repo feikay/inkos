@@ -4,9 +4,6 @@ description: 番茄小说平台签约过审经验调研技能。当用户询问�
 agent_created: true
 ---
 
-<!-- Generated mirror. Edit `skills/fanqie-novel-research/SKILL.md` instead. -->
-
-
 # Fanqie Novel Research - 番茄小说平台签约调研技能
 
 ## Overview
@@ -32,17 +29,19 @@ agent_created: true
 
 ```
 # 必搜 - 签约失败/成功原因
-"番茄小说签约审核 失败 原因 经验 作者 2024 2025"
+"番茄小说签约审核 失败 原因 经验 作者 2025 2026"
 "番茄小说签约 成功 技巧 字数 类型 社区讨论"
 "番茄小说签约被拒 常见原因 开篇 前三章 毒点 社区反馈"
 
-# 补充 - 审核机制/题材
+# 补充 - 审核机制/题材/收益
 "番茄小说 签约审核 标准 文笔 剧情 人设 套路 经验"
 "番茄小说 编辑审核 看重什么"
+""番茄小说" "全勤奖" "2026" 日更 4000 6000 800 稿费"
+"番茄小说 2026 新规 AI内容 审核标准 变化"
 
-# 新动态 - 平台变化
-"番茄小说 签约 题材推荐 都市 玄幻 穿越 系统 经验分享 2025 2026"
-"番茄小说 审核 规则 变化 AI 2025"
+# 新动态 - 短剧IP/生态
+"番茄小说 签约 短篇 短剧改编 2026 新趋势"
+"番茄小说 2026年签约 审核标准 毒点 红线和禁区 最新"
 ```
 
 ### Step 2: 关键页面内容抓取
@@ -51,12 +50,14 @@ agent_created: true
 
 优先抓取目标：
 1. smzdm.com - 社区经验整理类文章
-2. php.cn / 百度文库 - 规则详解类文章
-3. fanqienovel.com 官方文档 - 官方规则
-4. CSDN / 简书 - 经验分享类文章
-5. github.com - 平台规则整理（如有）
+2. php.cn / jinshouji / 百度文库 - 规则详解类文章
+3. fanqienovel.com 官方文档 - 官方规则、福利政策、活动公告
+4. gzdangaopeixun / maliangwriter - 新人收入与实操指南
+5. cenr.com.cn / 凤凰财经 - 平台生态与短剧IP产业报道
+6. CSDN / 简书 - 经验分享类文章
+7. github.com - 平台规则整理（如有）
 
-> ⚠️ 注意：知乎、贴吧多数页面需要登录，WebFetch 会返回欢迎页，跳过或直接使用搜索摘要中的信息。
+> ⚠️ 注意：知乎、贴吧、头条多数页面需登录或有反爬机制，WebFetch 会失败，跳过或直接使用搜索摘要中的信息。
 
 ### Step 3: 信息提取与整理
 
@@ -84,10 +85,13 @@ agent_created: true
    - 高风险题材（纯灵异、校园暴力、慢热武侠）
    - 2026年五大热门题材
 
-5. **平台动态**
-   - 2025年新规（AI声明、签约门槛提高）
-   - 短篇签约通道
-   - 推荐机制变化
+5. **平台动态与收益**
+   - 2025-2026年新规（AI声明/封禁、签约门槛提高）
+   - 2026年全勤改制（取消阅读量挂钩、纯码字全勤、基础稿费+80%）
+   - 2026年发布限制（日/月新建作品数与字数上限）
+   - 短篇签约通道与「千字万金」计划
+   - **短剧IP改编生态**：20亿加码计划、最高单书300万、百万IP护航
+   - 新人真实收入区间与增收建议
 
 ### Step 4: 报告生成
 
@@ -120,27 +124,63 @@ agent_created: true
 - 成功经验
 - 避坑指南
 
-### 六、平台动态
-- 最新规则变化
-- 注意事项
+### 六、2026年五大热门题材
+- 成功率评级
+- 各题材特点
 
-### 七、核心结论
+### 七、成功经验
+- 黄金三章结构
+- 签约后运营避坑
+- 首秀策略
+
+### 八、平台推荐机制
+
+### 九、2026年收益与全勤规则
+- 全勤奖金体系（普通600元/进阶800元）
+- 硬门槛（10万字/听读500元）
+- 新人真实收入
+- 其他福利计划
+
+### 十、AI治理与发布新规
+- 发布限制（日/月）
+- AI内容封禁政策
+
+### 十一、短剧IP改编与新趋势
+- 20亿计划
+- 专项奖励
+- 已有成果
+
+### 十二、核心结论
 - 一句话总结
 - 针对性建议
 ```
 
-### Step 5: 记忆与更新
+### Step 5: 知识库更新与同步
 
-1. 将今日调研核心发现追加到 `~/.workbuddy/skills/fanqie-novel-research/references/knowledge_base.md`
-2. 如发现已有知识库过时，更新 `references/knowledge_base.md` 中的对应章节
-3. 完成后标记任务为完成
+1. 将今日调研核心发现更新到 `~/.workbuddy/skills/fanqie-novel-research/references/knowledge_base.md`（整体覆写）
+2. 如发现已有知识库过时，更新对应章节
+3. **同步到 InkOS 项目**（每次更新 knowledge_base.md 后必须执行）：
+   ```bash
+   # 同步 knowledge_base.md
+   cp ~/.workbuddy/skills/fanqie-novel-research/references/knowledge_base.md \
+      ~/Documents/mycode/node-workspace/inkos/skills/fanqie-novel-research/references/knowledge_base.md
+   cp ~/.workbuddy/skills/fanqie-novel-research/references/knowledge_base.md \
+      ~/Documents/mycode/node-workspace/inkos/.skills/fanqie-novel-research/references/knowledge_base.md
+   # 同步 SKILL.md（如 SKILL.md 也有变更）
+   cp ~/.workbuddy/skills/fanqie-novel-research/SKILL.md \
+      ~/Documents/mycode/node-workspace/inkos/skills/fanqie-novel-research/SKILL.md
+   cp ~/.workbuddy/skills/fanqie-novel-research/SKILL.md \
+      ~/Documents/mycode/node-workspace/inkos/.skills/fanqie-novel-research/SKILL.md
+   ```
+4. 完成后标记任务为完成
 
 ## Important Notes
 
-- 知乎/贴吧需要登录的页面 WebFetch 会失败，直接使用搜索摘要中的信息
+- 知乎/贴吧/头条多数页面需登录或有反爬机制，WebFetch 会失败，直接使用搜索摘要中的信息
 - 社区经验来源于非官方渠道，仅供参考
 - 番茄平台规则经常变化，优先搜集最新（2025-2026年）信息
 - 如用户特别关注某个题材，搜索时加入该题材关键词
+- 新增关注方向：全勤改制、AI封禁、短剧IP化、20亿生态计划
 
 ## Resources
 

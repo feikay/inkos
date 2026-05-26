@@ -4,6 +4,7 @@ import {
   chapterNumberPrefix,
   chatCompletion,
   createLLMClient,
+  countChapterLength,
   formatLengthCount,
   isApiKeyOptionalForEndpoint,
   LLMConfigSchema,
@@ -33,7 +34,7 @@ import {
   writeSixStepPlotReportFiles,
   type AgentContext,
 } from "@actalk/inkos-core";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, type Dirent } from "node:fs";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createClient, findProjectRoot, loadConfig, resolveBookId, log, logError, loadReviewPresentation, GLOBAL_ENV_PATH } from "../utils.js";
@@ -771,6 +772,22 @@ reviewCommand
           log(result.publish_status);
           if (result.final_candidate_file) log(`final file: ${result.final_candidate_file}`);
           log(`report: ${result.report_json_path}`);
+          log("");
+          if (isExportablePublishStatus(result.publish_status)) {
+            const chapterStatus = await readChapterIndexStatus(book.dir, chapter);
+            log("next:");
+            log(`node scripts/fanqie/export-fanqie.mjs ${book.id} --from ${chapter} --to ${chapter} --use-reviewed --dry-run`);
+            if (chapterStatus !== "approved") {
+              log(`如果 dry-run 通过：node packages/cli/dist/index.js review approve ${book.id} ${chapter}`);
+            }
+            log(`正式导出：node scripts/fanqie/export-fanqie.mjs ${book.id} --from ${chapter} --to ${chapter} --use-reviewed`);
+            if (result.publish_status === "READY_WITH_WARNINGS") {
+              log(`可选诊断：node packages/cli/dist/index.js review diagnose --book ${book.id} --chapter ${chapter}`);
+            }
+          } else {
+            log("diagnose:");
+            log(`node packages/cli/dist/index.js review diagnose --book ${book.id} --chapter ${chapter}`);
+          }
         }
 
         if (isBatchMode && !isExportablePublishStatus(result.publish_status)) {
@@ -1367,7 +1384,12 @@ async function runPublishReadyChapter(params: {
             report_markdown_path: "",
           });
         }
-        if (params.maxQualityFixAttempts > 0 && isQualityAutoFixEligibleFromReports(blocked, finalQualityReport, params.qualityFixThreshold)) {
+        if (params.maxQualityFixAttempts > 0 && isQualityAutoFixEligibleFromReports(
+          blocked,
+          finalQualityReport,
+          params.qualityFixThreshold,
+          params.qualityAcceptThreshold,
+        )) {
           if (!params.json) {
             log(`quality after polish: ${finalQualityScore}`);
             log("status: near pass, running quality-auto-fix");
@@ -1445,7 +1467,8 @@ async function runPublishReadyChapter(params: {
     if (continuity.sourceFile === qualityCandidate) {
       const finalFile = await writeReviewedFinalChapter(params.bookDir, params.chapter, continuity.sourceFile);
       sourceChain.add(relative(params.bookDir, finalFile));
-      const qualityScore = quality.report.quality_score;
+      const finalQualityReport = await readQualityReportIfExists(params.bookDir, params.chapter, "final-quality-report");
+      const qualityScore = Number(finalQualityReport?.final_quality_score ?? finalQualityReport?.quality_score ?? quality.report.quality_score);
       const qualityDecision = decidePublishQuality(qualityScore, params.qualityPassThreshold, params.qualityAcceptThreshold);
       qualityStatus = qualityFinalStatusFromDecision(qualityDecision);
       const readyToExport = isReadyToExport(continuityReport, qualityDecision, finalFile, params.minChapterWords, Boolean(manualContinuityAcceptance));
@@ -1620,6 +1643,10 @@ async function runContinuityPublishPass(
   currentOverridePath: string | undefined,
   sourceChain: Set<string>,
 ): Promise<{ readonly final: ContinuityCommandResult; readonly report: ContinuityReport }> {
+  if (params.chapter <= 1) {
+    return createOpeningChapterContinuityPass(params, currentOverridePath, sourceChain);
+  }
+
   let attempt = 0;
   let currentOverride = currentOverridePath;
   let current: ContinuityCommandResult | undefined;
@@ -1698,6 +1725,84 @@ async function runContinuityPublishPass(
     current.chapterTitle,
   );
   return { final: { ...current, report }, report };
+}
+
+async function createOpeningChapterContinuityPass(
+  params: {
+    readonly bookDir: string;
+    readonly chapter: number;
+    readonly maxFixAttempts: number;
+    readonly minChapterWords: number;
+  },
+  currentOverridePath: string | undefined,
+  sourceChain: Set<string>,
+): Promise<{ readonly final: ContinuityCommandResult; readonly report: ContinuityReport }> {
+  const original = await findChapterFile(params.bookDir, params.chapter);
+  const sourceFile = currentOverridePath ?? original.file;
+  const body = await readFile(sourceFile, "utf-8");
+  const wordCount = countChapterLength(body, "zh_chars");
+  const tooShort = wordCount < params.minChapterWords;
+  const reportDir = join(params.bookDir, "reviews", "continuity");
+  const prefix = chapterNumberPrefix(params.chapter);
+  const reportJsonPath = join(reportDir, `${prefix}.final-report.json`);
+  const reportMarkdownPath = join(reportDir, `${prefix}.final-report.md`);
+  const report: ContinuityReport = {
+    score: 100,
+    level: "优秀",
+    status: "PASS",
+    summary: tooShort
+      ? "第一章没有上一章可供连续性比对；作为开篇章节基准通过连续性门禁。正文长度低于发布要求，仍需在 publish-ready 最终门禁处理。"
+      : "第一章没有上一章可供连续性比对；作为开篇章节基准通过 publish-ready 连续性门禁。",
+    strengths: tooShort ? [] : ["开篇章节无需承接上一章，作为后续连续性基准。"],
+    issues: tooShort
+      ? [{
+          type: "章节字数不足",
+          severity: "高",
+          detail: `正文有效字数 ${wordCount}，低于最低要求 ${params.minChapterWords}，需扩写到至少 ${params.minChapterWords} 字。`,
+        }]
+      : [],
+    opening_check: { result: "SKIPPED", reason: "opening chapter has no previous chapter" },
+    repeated_info_check: { severity: "低", repeated_paragraphs: [], detail: "第一章基准报告不执行跨章重复信息检查。" },
+    current_goal: "开篇章节基准",
+    goal_clear: "YES",
+    foreshadowing_continuity: { 已承接元素: [], 被忽略元素: [] },
+    crisis_progress: "建立",
+    fix_suggestions: tooShort ? [`扩写正文到至少 ${params.minChapterWords} 字。`] : [],
+    rewrite_mode: tooShort ? "light_fix" : "none",
+    rewrite_prompt: tooShort ? `扩写第一章正文到至少 ${params.minChapterWords} 字，保留现有开篇设定、人物关系和情节方向。` : "",
+    manual_fix_prompt: tooShort ? `第一章正文有效字数 ${wordCount}，低于最低要求 ${params.minChapterWords}。请扩写后重新运行 publish-ready。` : "",
+    used_file: relative(params.bookDir, sourceFile),
+    decision_source: "opening_chapter_baseline",
+    body_source: bodySourceFromPath(sourceFile),
+    stale_reports_ignored: [],
+    word_count: wordCount,
+    min_chapter_words: params.minChapterWords,
+    length_status: tooShort ? "TOO_SHORT" : "PASS",
+    publish_readiness: tooShort ? "BLOCKED" : "PASS",
+    publish_blockers: tooShort
+      ? [{ type: "TOO_SHORT", detail: `正文有效字数 ${wordCount}，低于最低要求 ${params.minChapterWords}` }]
+      : [],
+    fix_attempt: 0,
+    max_fix_attempts: params.maxFixAttempts,
+    final_status: "PASS",
+  };
+  await writeContinuityReportFiles(report, reportJsonPath, reportMarkdownPath, params.chapter, original.title);
+  sourceChain.add(relative(params.bookDir, sourceFile));
+  return {
+    final: {
+      chapter: params.chapter,
+      chapterTitle: original.title,
+      sourceFile,
+      prevSourceFile: "",
+      bodySource: bodySourceFromPath(sourceFile),
+      fromExistingPass: false,
+      reportedWarnings: [],
+      report,
+      reportJsonPath,
+      reportMarkdownPath,
+    },
+    report,
+  };
 }
 
 function extractFinalChapterBody(raw: string): string {
@@ -2285,7 +2390,13 @@ async function runQualityAutoFixChapter(params: {
   readonly maxFixAttempts: number;
   readonly json: boolean;
 }): Promise<QualityAutoFixResult> {
-  const context = await resolveQualityAutoFixContext(params.bookDir, params.chapter, params.minChapterWords, params.qualityFixThreshold);
+  const context = await resolveQualityAutoFixContext(
+    params.bookDir,
+    params.chapter,
+    params.minChapterWords,
+    params.qualityFixThreshold,
+    params.qualityAcceptThreshold,
+  );
   if (!context.eligible) {
       const result = await writeQualityFixReport(params.bookDir, {
       book: params.bookId,
@@ -2442,7 +2553,13 @@ async function runQualityAutoFixChapter(params: {
   });
 }
 
-async function resolveQualityAutoFixContext(bookDir: string, chapter: number, minChapterWords: number, qualityFixThreshold: number): Promise<{
+async function resolveQualityAutoFixContext(
+  bookDir: string,
+  chapter: number,
+  minChapterWords: number,
+  qualityFixThreshold: number,
+  qualityAcceptThreshold: number,
+): Promise<{
   readonly eligible: boolean;
   readonly reason: string;
   readonly publishStatus: PublishReadyStatus;
@@ -2479,7 +2596,7 @@ async function resolveQualityAutoFixContext(bookDir: string, chapter: number, mi
   if (qualityScore < qualityFixThreshold) {
     return { eligible: false, reason: `quality_score ${qualityScore} < ${qualityFixThreshold}`, publishStatus: "NEED_REWRITE", inputFile, qualityScore, publishReport, qualityReport, sourceChain };
   }
-  if (qualityScore >= 80) {
+  if (qualityScore >= qualityAcceptThreshold) {
     return { eligible: false, reason: `quality_score ${qualityScore} already passes`, publishStatus: qualityScore >= 85 ? "READY_TO_EXPORT" : "READY_WITH_WARNINGS", inputFile, qualityScore, publishReport, qualityReport, sourceChain };
   }
   if (publishStatus && publishStatus !== "BLOCKED_BY_QUALITY" && publishStatus !== "QUALITY_MANUAL_REVIEW") {
@@ -2506,9 +2623,10 @@ function isQualityAutoFixEligibleFromReports(
   publishReport: Partial<PublishReadyResult>,
   qualityReport: Partial<FanqieQualityReport> | null,
   qualityFixThreshold: number,
+  qualityAcceptThreshold: number,
 ): boolean {
   const score = Number(qualityReport?.final_quality_score ?? qualityReport?.quality_score ?? publishReport.quality?.score ?? 0);
-  return publishReport.publish_status === "BLOCKED_BY_QUALITY" && score >= qualityFixThreshold && score < 85;
+  return publishReport.publish_status === "BLOCKED_BY_QUALITY" && score >= qualityFixThreshold && score < qualityAcceptThreshold;
 }
 
 async function writeQualityFixedChapter(params: {
@@ -4193,6 +4311,596 @@ function getQualityFixAttemptFromFilename(file: string): number | null {
   return Number.isInteger(attempt) && attempt > 0 ? attempt : null;
 }
 
+type DiagnoseSeverity = "blocker" | "warning" | "info";
+type DiagnoseKind = "write" | "state" | "resource" | "continuity" | "quality" | "plot" | "export" | "approval" | "unknown";
+
+interface DiagnoseRepairPlan {
+  readonly id: string;
+  readonly severity: DiagnoseSeverity;
+  readonly kind: DiagnoseKind;
+  readonly title: string;
+  readonly evidence: ReadonlyArray<string>;
+  readonly inspectFiles: ReadonlyArray<string>;
+  readonly editFiles: ReadonlyArray<string>;
+  readonly search: ReadonlyArray<string>;
+  readonly change: ReadonlyArray<string>;
+  readonly nextCommands: ReadonlyArray<string>;
+}
+
+interface DiagnoseChapterResult {
+  readonly book: string;
+  readonly chapter: string;
+  readonly chapterStatus: string | null;
+  readonly publishStatus: string | null;
+  readonly finalCandidateFile: string | null;
+  readonly reports: Record<string, string>;
+  readonly plans: ReadonlyArray<DiagnoseRepairPlan>;
+}
+
+async function diagnoseChapterRepair(params: {
+  readonly root: string;
+  readonly bookId: string;
+  readonly bookDir: string;
+  readonly chapter: number;
+}): Promise<DiagnoseChapterResult> {
+  const prefix = chapterNumberPrefix(params.chapter);
+  const chapterStatus = await readChapterIndexStatus(params.bookDir, params.chapter);
+  const publishReport = await readPublishReadyReportIfExists(params.bookDir, params.chapter);
+  const continuityReport = await readContinuityReportIfExists(params.bookDir, params.chapter, "final-report");
+  const qualityReport = await readQualityReportIfExists(params.bookDir, params.chapter, "final-quality-report")
+    ?? await readQualityReportIfExists(params.bookDir, params.chapter, "quality-report");
+  const resourceReport = await readResourceConsistencyReportIfExists(params.bookDir, params.chapter);
+  const exportReportPath = join(params.root, "publish", params.bookId, "fanqie", "report.md");
+  const exportReportText = await readTextIfExists(exportReportPath);
+  const chapterEntry = await readChapterIndexEntry(params.bookDir, params.chapter);
+  const auditIssues = extractAuditIssues(chapterEntry);
+  const finalCandidateFile = resolveDiagnoseFinalCandidate(params.bookDir, publishReport?.final_candidate_file, params.chapter);
+  const originalChapterFile = findOriginalChapterFileSync(params.bookDir, params.chapter);
+  const plans: DiagnoseRepairPlan[] = [];
+
+  const baseReports = {
+    chapter_index: relative(params.root, join(params.bookDir, "chapters", "index.json")),
+    publish_ready: relative(params.root, join(params.bookDir, "reviews", "publish-ready", `${prefix}.publish-report.json`)),
+    continuity: relative(params.root, join(params.bookDir, "reviews", "continuity", `${prefix}.final-report.json`)),
+    fanqie_quality: relative(params.root, join(params.bookDir, "reviews", "fanqie-quality", `${prefix}.final-quality-report.json`)),
+    resource_consistency: relative(params.root, join(params.bookDir, "reviews", "resource-consistency", `${prefix}.report.json`)),
+    export_report: relative(params.root, exportReportPath),
+  };
+
+  if (!chapterEntry && !originalChapterFile) {
+    plans.push({
+      id: "chapter-missing",
+      severity: "blocker",
+      kind: "write",
+      title: "没有找到该章节正文或章节索引记录；这章还不能 publish-ready。",
+      evidence: [
+        "chapters/index.json 中没有该章节记录",
+        `chapters/ 下没有 ${prefix} 开头的正文文件`,
+        resourceReport ? "发现孤立的 resource report；它可能来自失败或旧运行，不能代表章节已存在" : "",
+      ].filter(Boolean),
+      inspectFiles: existingFiles(params.root, [
+        baseReports.chapter_index,
+        baseReports.resource_consistency,
+      ]),
+      editFiles: [],
+      search: [],
+      change: [
+        "如果你要继续写这一章，先执行 write next 生成正文和 index 记录。",
+        "如果你确认这章已经写过，检查正文文件是否放在 chapters/ 下，且文件名是否以对应章节号开头。",
+        "不要直接对不存在的章节跑 publish-ready。",
+      ],
+      nextCommands: [
+        `node packages/cli/dist/index.js write next ${params.bookId}`,
+      ],
+    });
+  }
+
+  if (chapterStatus === "state-degraded") {
+    plans.push(makeStateRepairPlan(params, auditIssues));
+  }
+
+  if (chapterStatus === "blocked-resource-plan" || isResourceBlocked(resourceReport, auditIssues) || publishReport?.publish_status === "BLOCKED_BY_RESOURCE") {
+    plans.push(makeResourceRepairPlan(params, resourceReport, auditIssues, finalCandidateFile));
+  }
+
+  const continuityStatus = publishReport?.continuity?.final_status ?? continuityReport?.final_status ?? continuityReport?.status;
+  if (publishReport?.publish_status === "BLOCKED_BY_CONTINUITY" || continuityStatus && continuityStatus !== "PASS") {
+    plans.push(makeContinuityRepairPlan(params, continuityReport, publishReport));
+  }
+
+  const qualityStatus = publishReport?.quality?.final_quality_status ?? qualityReport?.final_quality_status ?? qualityReport?.status;
+  if (
+    publishReport?.publish_status === "BLOCKED_BY_QUALITY"
+    || publishReport?.publish_status === "QUALITY_MANUAL_REVIEW"
+    || qualityStatus === "QUALITY_MANUAL_REVIEW"
+    || publishReport?.publish_status === "NEED_REWRITE"
+  ) {
+    plans.push(makeQualityRepairPlan(params, publishReport, qualityReport, finalCandidateFile));
+  }
+
+  const plotPlan = makePlotRepairPlanIfNeeded(params, publishReport, exportReportText, finalCandidateFile);
+  if (plotPlan) plans.push(plotPlan);
+
+  const exportPlan = makeExportRepairPlanIfNeeded(params, exportReportText, finalCandidateFile);
+  if (exportPlan) plans.push(exportPlan);
+
+  if (!plans.some((plan) => plan.severity === "blocker") && isExportablePublishStatus(String(publishReport?.publish_status ?? ""))) {
+    plans.push({
+      id: "ready",
+      severity: publishReport?.publish_status === "READY_WITH_WARNINGS" ? "warning" : "info",
+      kind: "approval",
+      title: chapterStatus === "approved"
+        ? "章节已 approved；正式导出前做一次 export dry-run。"
+        : publishReport?.publish_status === "READY_WITH_WARNINGS"
+          ? "章节已可导出，但仍有 warning；approve 前建议做一次 export dry-run。"
+          : "章节已可导出；approve 前建议做一次 export dry-run。",
+      evidence: [
+        `publish_status=${publishReport?.publish_status}`,
+        finalCandidateFile ? `final_candidate=${relative(params.root, finalCandidateFile)}` : "final_candidate=n/a",
+      ],
+      inspectFiles: existingFiles(params.root, [baseReports.publish_ready, baseReports.export_report]),
+      editFiles: finalCandidateFile ? [relative(params.root, finalCandidateFile)] : [],
+      search: [],
+      change: chapterStatus === "approved"
+        ? [
+            "这章已经 approved，不需要重复 approve。",
+            "如果 dry-run 出现 6段检查低于 4/6 或非正文标记残留，先按对应诊断项修。",
+          ]
+        : [
+            "如果 dry-run 没有阻断项，可以 approve。",
+            "如果 dry-run 出现 6段检查低于 4/6 或非正文标记残留，先按对应诊断项修。",
+          ],
+      nextCommands: chapterStatus === "approved"
+        ? [
+            `node scripts/fanqie/export-fanqie.mjs ${params.bookId} --from ${params.chapter} --to ${params.chapter} --use-reviewed --dry-run`,
+          ]
+        : [
+            `node scripts/fanqie/export-fanqie.mjs ${params.bookId} --from ${params.chapter} --to ${params.chapter} --use-reviewed --dry-run`,
+            `node packages/cli/dist/index.js review approve ${params.bookId} ${params.chapter}`,
+          ],
+    });
+  }
+
+  if (!plans.length) {
+    plans.push({
+      id: "unknown",
+      severity: "info",
+      kind: "unknown",
+      title: "没有找到明确阻断项；请查看报告摘要决定是否继续。",
+      evidence: [
+        `chapter_status=${chapterStatus ?? "unknown"}`,
+        `publish_status=${publishReport?.publish_status ?? "missing"}`,
+      ],
+      inspectFiles: existingFiles(params.root, Object.values(baseReports)),
+      editFiles: [],
+      search: [],
+      change: ["先阅读 inspect files 中最新报告；如果已人工修正文，执行 write sync；如果只是状态文件漂移，执行 write repair-state。"],
+      nextCommands: [
+        `node packages/cli/dist/index.js review publish-ready --book ${params.bookId} --chapter ${params.chapter}`,
+      ],
+    });
+  }
+
+  return {
+    book: params.bookId,
+    chapter: prefix,
+    chapterStatus,
+    publishStatus: publishReport?.publish_status ?? null,
+    finalCandidateFile: finalCandidateFile ? relative(params.root, finalCandidateFile) : null,
+    reports: Object.fromEntries(
+      Object.entries(baseReports).filter(([, file]) => existsSync(join(params.root, file))),
+    ),
+    plans,
+  };
+}
+
+function renderDiagnoseChapterRepair(result: DiagnoseChapterResult): string[] {
+  const blocker = result.plans.find((plan) => plan.severity === "blocker");
+  const approvalPlan = result.chapterStatus === "approved"
+    ? result.plans.find((plan) => plan.kind === "approval")
+    : undefined;
+  const primaryPlan = blocker ?? approvalPlan ?? result.plans[0];
+  const lines = [
+    "[diagnose]",
+    `book: ${result.book}`,
+    `chapter: ${result.chapter}`,
+    `chapter_status: ${result.chapterStatus ?? "unknown"}`,
+    `publish_status: ${result.publishStatus ?? "missing"}`,
+    result.finalCandidateFile ? `final_candidate: ${result.finalCandidateFile}` : "final_candidate: n/a",
+    "",
+  ];
+
+  if (primaryPlan) {
+    lines.push("next:");
+    lines.push(`- ${primaryPlan.title}`);
+    for (const command of primaryPlan.nextCommands.slice(0, 2)) lines.push(`- ${command}`);
+    lines.push("");
+  }
+
+  for (const [index, plan] of result.plans.entries()) {
+    lines.push(`plan ${index + 1}: ${plan.title}`);
+    lines.push(`- severity: ${plan.severity}`);
+    lines.push(`- kind: ${plan.kind}`);
+    if (plan.evidence.length) {
+      lines.push("- why:");
+      for (const item of plan.evidence.slice(0, 4)) lines.push(`  - ${item}`);
+    }
+    if (plan.editFiles.length) {
+      lines.push("- edit:");
+      lines.push(`  - ${plan.editFiles[0]}`);
+      if (plan.editFiles.length > 1) lines.push(`  - references: ${plan.editFiles.slice(1, 3).join(", ")}`);
+    }
+    if (plan.inspectFiles.length) {
+      lines.push("- inspect:");
+      for (const file of plan.inspectFiles.slice(0, 2)) lines.push(`  - ${file}`);
+    }
+    if (plan.search.length) {
+      lines.push("- locate:");
+      const target = plan.editFiles[0] ?? ".";
+      lines.push(`  - rg -n "${plan.search.slice(0, 4).join("|")}" ${target}`);
+    }
+    if (plan.change.length) {
+      lines.push("- change:");
+      for (const item of plan.change) lines.push(`- ${item}`);
+    }
+    if (plan.nextCommands.length) {
+      lines.push("- commands:");
+      for (const command of plan.nextCommands) lines.push(`- ${command}`);
+    }
+    lines.push("");
+  }
+
+  return lines;
+}
+
+function makeStateRepairPlan(
+  params: { readonly root: string; readonly bookId: string; readonly bookDir: string; readonly chapter: number },
+  auditIssues: ReadonlyArray<string>,
+): DiagnoseRepairPlan {
+  const editFiles = [
+    join(params.bookDir, "story", "current_state.md"),
+    join(params.bookDir, "story", "state", "current_state.json"),
+    join(params.bookDir, "story", "pending_hooks.md"),
+    join(params.bookDir, "story", "state", "hooks.json"),
+  ].filter(existsSync).map((file) => relative(params.root, file));
+
+  return {
+    id: "state-degraded",
+    severity: "blocker",
+    kind: "state",
+    title: "章节状态为 state-degraded；先修状态/真相文件，不要继续写下一章。",
+    evidence: auditIssues.filter((issue) => /state-validation|状态|current_state|伏笔|hook|当前位置|敌我/u.test(issue)).slice(0, 8),
+    inspectFiles: existingFiles(params.root, [
+      relative(params.root, join(params.bookDir, "chapters", "index.json")),
+      relative(params.root, join(params.bookDir, "story", "audit_drift.md")),
+    ]),
+    editFiles,
+    search: buildSearchHints(auditIssues, ["current_state", "当前位置", "当前目标", "当前冲突", "敌我", "伏笔"]),
+    change: [
+      "先判断正文是否正确：如果正文正确而 state 过期，更新 state/current_state 与 hooks；如果正文本身写错，先改正文。",
+      "删除已经在正文中结束的当前限制；补上正文结尾仍存在的人物位置、敌我关系、资源和伏笔状态。",
+      "不要只改 chapters/index.json 的 status；status 应由 repair-state/sync 后自然恢复。",
+    ],
+    nextCommands: [
+      `node packages/cli/dist/index.js write repair-state ${params.bookId} ${params.chapter}`,
+      `node packages/cli/dist/index.js review publish-ready --book ${params.bookId} --chapter ${params.chapter}`,
+    ],
+  };
+}
+
+function makeResourceRepairPlan(
+  params: { readonly root: string; readonly bookId: string; readonly bookDir: string; readonly chapter: number },
+  resourceReport: Partial<{ status: string; closureStatus: string; closureRequirement: string }> | null,
+  auditIssues: ReadonlyArray<string>,
+  finalCandidateFile: string | null,
+): DiagnoseRepairPlan {
+  const chapterFile = findOriginalChapterFileSync(params.bookDir, params.chapter);
+  const editFiles = [
+    finalCandidateFile,
+    chapterFile,
+    join(params.bookDir, "story", "particle_ledger.md"),
+    join(params.bookDir, "story", "current_state.md"),
+    join(params.bookDir, "story", "state", "current_state.json"),
+  ]
+    .filter((file): file is string => typeof file === "string" && file.length > 0)
+    .filter((file) => existsSync(file))
+    .map((file) => relative(params.root, file));
+
+  return {
+    id: "resource-blocked",
+    severity: "blocker",
+    kind: "resource",
+    title: "资源/账本闭合失败；先修正文中的资源变化和 state 资源余额。",
+    evidence: [
+      resourceReport?.status ? `resource status=${resourceReport.status}` : "",
+      resourceReport?.closureStatus ? `closureStatus=${resourceReport.closureStatus}` : "",
+      resourceReport?.closureRequirement ? `closureRequirement=${resourceReport.closureRequirement}` : "",
+      ...auditIssues.filter((issue) => /resource|资源|积分|余额|账本|closingBalances|RESOURCE_PLAN|RESOURCE_CONSISTENCY/u.test(issue)).slice(0, 8),
+    ].filter(Boolean),
+    inspectFiles: existingFiles(params.root, [
+      relative(params.root, join(params.bookDir, "reviews", "resource-consistency", `${chapterNumberPrefix(params.chapter)}.report.json`)),
+      relative(params.root, join(params.bookDir, "reviews", "resource-consistency", `${chapterNumberPrefix(params.chapter)}.report.md`)),
+      relative(params.root, join(params.bookDir, "reviews", "resource-plan", `${chapterNumberPrefix(params.chapter)}.report.json`)),
+      relative(params.root, join(params.bookDir, "chapters", "index.json")),
+    ]),
+    editFiles,
+    search: buildSearchHints(auditIssues, ["积分", "余额", "系统积分", "获得", "消耗", "兑换", "closingBalances"]),
+    change: [
+      "把正文中资源获得、消耗、期末余额写成一条能闭合的链；不要让正文数值和程序账本互相矛盾。",
+      "如果正文已经改对，同步 current_state/state JSON 中的资源余额。",
+      "如果资源计划要求本章期末余额为某值，正文结尾和状态卡都要体现同一个值。",
+    ],
+    nextCommands: [
+      `node packages/cli/dist/index.js write sync ${params.bookId} ${params.chapter}`,
+      `node packages/cli/dist/index.js review publish-ready --book ${params.bookId} --chapter ${params.chapter}`,
+    ],
+  };
+}
+
+function makeContinuityRepairPlan(
+  params: { readonly root: string; readonly bookId: string; readonly bookDir: string; readonly chapter: number },
+  continuityReport: Partial<ContinuityReport> | null,
+  publishReport: Partial<PublishReadyResult> | null,
+): DiagnoseRepairPlan {
+  return {
+    id: "continuity-blocked",
+    severity: "blocker",
+    kind: "continuity",
+    title: "连续性未通过；先修承接、人物状态、伏笔或战力/伤势矛盾。",
+    evidence: [
+      `continuity=${publishReport?.continuity?.final_status ?? continuityReport?.final_status ?? continuityReport?.status ?? "unknown"}`,
+      typeof continuityReport?.score === "number" ? `score=${continuityReport.score}` : "",
+      ...(continuityReport?.issues ?? []).slice(0, 5).map((issue) => typeof issue === "string" ? issue : JSON.stringify(issue)),
+    ].filter(Boolean),
+    inspectFiles: existingFiles(params.root, [
+      relative(params.root, join(params.bookDir, "reviews", "continuity", `${chapterNumberPrefix(params.chapter)}.final-report.json`)),
+      relative(params.root, join(params.bookDir, "reviews", "continuity", `${chapterNumberPrefix(params.chapter)}.final-report.md`)),
+      relative(params.root, join(params.bookDir, "story", "runtime", `chapter-${chapterNumberPrefix(params.chapter)}.intent.md`)),
+    ]),
+    editFiles: existingFiles(params.root, [
+      relative(params.root, finalCandidatePath(params.bookDir, params.chapter)),
+      relative(params.root, findOriginalChapterFileSync(params.bookDir, params.chapter) ?? ""),
+      relative(params.root, join(params.bookDir, "story", "pending_hooks.md")),
+      relative(params.root, join(params.bookDir, "story", "current_state.md")),
+    ]),
+    search: buildSearchHints([
+      ...readStringArrayField(continuityReport, "warnings"),
+      ...(continuityReport?.issues ?? []).map(String),
+    ], ["上一章", "伏笔", "伤势", "位置", "敌人"]),
+    change: [
+      "优先小改本章正文，补足上一章结尾到本章开头的承接。",
+      "如果问题是伏笔遗漏，补一两句推进或明确延后，不要大改主线。",
+      "如果问题是 state 过期而正文正确，改 state 后执行 write repair-state。",
+    ],
+    nextCommands: [
+      `node packages/cli/dist/index.js review continuity-auto --book ${params.bookId} --chapter ${params.chapter} --max-fix-attempts 1`,
+      `node packages/cli/dist/index.js review publish-ready --book ${params.bookId} --chapter ${params.chapter}`,
+    ],
+  };
+}
+
+function makeQualityRepairPlan(
+  params: { readonly root: string; readonly bookId: string; readonly bookDir: string; readonly chapter: number },
+  publishReport: Partial<PublishReadyResult> | null,
+  qualityReport: Partial<FanqieQualityReport> | null,
+  finalCandidateFile: string | null,
+): DiagnoseRepairPlan {
+  const qualityScore = publishReport?.quality?.score ?? qualityReport?.quality_score;
+  const status = publishReport?.publish_status ?? qualityReport?.status ?? qualityReport?.final_quality_status ?? "unknown";
+  return {
+    id: "quality-blocked",
+    severity: publishReport?.publish_status === "NEED_REWRITE" ? "blocker" : "warning",
+    kind: "quality",
+    title: publishReport?.publish_status === "NEED_REWRITE"
+      ? "质量判断建议重写；小修可能不够。"
+      : publishReport?.publish_status === "READY_WITH_WARNINGS"
+        ? "可选优化：质量有 warning，但不阻断导出。"
+        : "质量未达标；先做番茄风格润色或定点修复。",
+    evidence: [
+      `status=${status}`,
+      typeof qualityScore === "number" ? `score=${qualityScore}` : "",
+      ...(qualityReport?.issues ?? []).slice(0, 5).map((issue) => typeof issue === "string" ? issue : `${issue.type ?? "issue"}: ${issue.detail ?? ""}`),
+    ].filter(Boolean),
+    inspectFiles: existingFiles(params.root, [
+      relative(params.root, join(params.bookDir, "reviews", "fanqie-quality", `${chapterNumberPrefix(params.chapter)}.final-quality-report.json`)),
+      relative(params.root, join(params.bookDir, "reviews", "fanqie-quality", `${chapterNumberPrefix(params.chapter)}.final-quality-report.md`)),
+      relative(params.root, join(params.bookDir, "reviews", "publish-ready", `${chapterNumberPrefix(params.chapter)}.publish-report.json`)),
+    ]),
+    editFiles: existingFiles(params.root, [
+      finalCandidateFile ? relative(params.root, finalCandidateFile) : "",
+      relative(params.root, findOriginalChapterFileSync(params.bookDir, params.chapter) ?? ""),
+      relative(params.root, join(params.bookDir, "chapters-polished", `${chapterNumberPrefix(params.chapter)}_polished_attempt1.md`)),
+    ]),
+    search: qualityLocateHints(qualityReport),
+    change: [
+      "只改表达、节奏、段落和章尾钩子；不要改主线事实和资源数值。",
+      "如果分数接近通过，优先 quality-auto-fix；如果连续多次不升，人工改 final 后重跑 publish-ready。",
+    ],
+    nextCommands: publishReport?.publish_status === "NEED_REWRITE"
+      ? [
+          `node packages/cli/dist/index.js review reject ${params.bookId} ${params.chapter}`,
+          `node packages/cli/dist/index.js write next ${params.bookId}`,
+        ]
+      : [
+          `node packages/cli/dist/index.js review fanqie-polish --book ${params.bookId} --chapter ${params.chapter} --max-polish-attempts 2`,
+          `node packages/cli/dist/index.js review publish-ready --book ${params.bookId} --chapter ${params.chapter}`,
+        ],
+  };
+}
+
+function makePlotRepairPlanIfNeeded(
+  params: { readonly root: string; readonly bookId: string; readonly bookDir: string; readonly chapter: number },
+  publishReport: Partial<PublishReadyResult> | null,
+  exportReportText: string,
+  finalCandidateFile: string | null,
+): DiagnoseRepairPlan | null {
+  const weakExportScore = findExportSixPartScore(exportReportText, params.chapter);
+  const sixStepStatus = publishReport?.six_step_plot?.status;
+  if ((weakExportScore === null || weakExportScore >= 4) && sixStepStatus !== "FAIL_STRUCTURAL") return null;
+
+  return {
+    id: "plot-six-part",
+    severity: "warning",
+    kind: "plot",
+    title: "六段/追读结构偏弱；修 Hook / Pressure / Attempt / Twist / Payoff / Pull 的缺口。",
+    evidence: [
+      weakExportScore !== null ? `export-fanqie 6段检查=${weakExportScore}/6` : "",
+      sixStepStatus ? `six_step_plot=${sixStepStatus} score=${publishReport?.six_step_plot?.score ?? "n/a"}` : "",
+      publishReport?.six_step_plot?.summary ?? "",
+    ].filter(Boolean),
+    inspectFiles: existingFiles(params.root, [
+      relative(params.root, join(params.root, "publish", params.bookId, "fanqie", "report.md")),
+      relative(params.root, join(params.bookDir, "reviews", "six-step-plot", `${chapterNumberPrefix(params.chapter)}.six-step-plot.report.json`)),
+      relative(params.root, join(params.bookDir, "reviews", "publish-ready", `${chapterNumberPrefix(params.chapter)}.publish-report.json`)),
+    ]),
+    editFiles: existingFiles(params.root, [
+      finalCandidateFile ? relative(params.root, finalCandidateFile) : "",
+      relative(params.root, join(params.root, "publish", params.bookId, "fanqie", "chapters", `${chapterNumberPrefix(params.chapter)}.txt`)),
+    ]),
+    search: ["开头", "倒计时|压力|濒死|危险", "却|反而|不对|没想到", "那一刻|门，被|发现", "下一|还有|真正|门后"],
+    change: [
+      "开头补明确事件/危机 Hook；中段保留主角主动尝试；中后段增加预期反转。",
+      "补一个清晰 payoff moment 句；结尾留下下一章拉力。",
+      "不要整章重写，优先在 final 候选里做 3-6 处定点补强。",
+    ],
+    nextCommands: [
+      `node scripts/fanqie/export-fanqie.mjs ${params.bookId} --from ${params.chapter} --to ${params.chapter} --use-reviewed --dry-run`,
+      `node scripts/fanqie/repair-fanqie.mjs ${params.bookId} --chapter ${params.chapter} --apply`,
+      `node packages/cli/dist/index.js review publish-ready --book ${params.bookId} --chapter ${params.chapter}`,
+    ],
+  };
+}
+
+function makeExportRepairPlanIfNeeded(
+  params: { readonly root: string; readonly bookId: string; readonly bookDir: string; readonly chapter: number },
+  exportReportText: string,
+  finalCandidateFile: string | null,
+): DiagnoseRepairPlan | null {
+  if (!/EXPORT_FAILED|非正文标记|残留：\d+ ❌|Missing exported chapter file/u.test(exportReportText)) return null;
+  return {
+    id: "export-format",
+    severity: "blocker",
+    kind: "export",
+    title: "番茄导出格式检查失败；先清理非正文标记或缺失导出文件。",
+    evidence: exportReportText.split(/\r?\n/).filter((line) => /EXPORT_FAILED|非正文标记|残留|Missing exported/u.test(line)).slice(0, 8),
+    inspectFiles: existingFiles(params.root, [
+      relative(params.root, join(params.root, "publish", params.bookId, "fanqie", "report.md")),
+      relative(params.root, join(params.root, "publish", params.bookId, "fanqie", "chapters", `${chapterNumberPrefix(params.chapter)}.txt`)),
+    ]),
+    editFiles: existingFiles(params.root, [
+      finalCandidateFile ? relative(params.root, finalCandidateFile) : "",
+    ]),
+    search: ["```|---|CHAPTER_CONTENT|PRE_WRITE_CHECK|创作说明|审核|检查|修复建议|六段检查"],
+    change: [
+      "删除正文里的过程标记、报告段落、Markdown 表格/标题和非正文批注。",
+      "final 候选文件必须只保留小说正文。",
+    ],
+    nextCommands: [
+      `node scripts/fanqie/export-fanqie.mjs ${params.bookId} --from ${params.chapter} --to ${params.chapter} --use-reviewed --dry-run`,
+    ],
+  };
+}
+
+function existingFiles(root: string, files: ReadonlyArray<string>): string[] {
+  return files
+    .filter(Boolean)
+    .filter((file) => existsSync(isAbsolute(file) ? file : join(root, file)))
+    .map((file) => isAbsolute(file) ? relative(root, file) : file);
+}
+
+async function readTextIfExists(file: string): Promise<string> {
+  try {
+    return await readFile(file, "utf-8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+    throw error;
+  }
+}
+
+async function readChapterIndexEntry(bookDir: string, chapter: number): Promise<Record<string, unknown> | null> {
+  const index = await readJsonIfExists<Record<string, unknown>[]>(join(bookDir, "chapters", "index.json"));
+  return index?.find((entry) => entry.number === chapter) ?? null;
+}
+
+function extractAuditIssues(chapterEntry: Record<string, unknown> | null): string[] {
+  return Array.isArray(chapterEntry?.auditIssues)
+    ? chapterEntry.auditIssues.filter((issue): issue is string => typeof issue === "string")
+    : [];
+}
+
+function readStringArrayField(source: unknown, field: string): string[] {
+  if (!source || typeof source !== "object") return [];
+  const value = (source as Record<string, unknown>)[field];
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function isResourceBlocked(
+  resourceReport: Partial<{ blocking: boolean; closureStatus: string; status: string }> | null,
+  auditIssues: ReadonlyArray<string>,
+): boolean {
+  if (resourceReport) {
+    return resourceReport.blocking === true
+      || resourceReport.closureStatus === "resource_failed"
+      || resourceReport.status === "BLOCKED_BY_RESOURCE_PLAN"
+      || resourceReport.status === "BLOCKED";
+  }
+  return auditIssues.some((issue) => /RESOURCE_PLAN_NOT_CLOSED|RESOURCE_CONSISTENCY_NOT_CLOSED|resource-plan/u.test(issue));
+}
+
+function resolveDiagnoseFinalCandidate(bookDir: string, reportedFile: string | undefined, chapter: number): string | null {
+  const candidates = [
+    finalCandidatePath(bookDir, chapter),
+    reportedFile ? resolveUsedFilePath(bookDir, reportedFile) : null,
+  ].filter((file): file is string => Boolean(file));
+  return candidates.find((file) => existsSync(file)) ?? null;
+}
+
+function finalCandidatePath(bookDir: string, chapter: number): string {
+  return join(bookDir, "chapters-reviewed", `${chapterNumberPrefix(chapter)}_final.md`);
+}
+
+function findOriginalChapterFileSync(bookDir: string, chapter: number): string | null {
+  const chaptersDir = join(bookDir, "chapters");
+  if (!existsSync(chaptersDir)) return null;
+  const stack = [chaptersDir];
+  const matches: string[] = [];
+  while (stack.length) {
+    const dir = stack.pop()!;
+    for (const entry of readdirSync(dir, { withFileTypes: true }) as Dirent[]) {
+      const file = join(dir, entry.name);
+      if (entry.isDirectory()) stack.push(file);
+      else if (getChapterNumberFromFile(file) === chapter) matches.push(file);
+    }
+  }
+  return matches.sort((a, b) => basename(a).localeCompare(basename(b)))[0] ?? null;
+}
+
+function buildSearchHints(issues: ReadonlyArray<string>, fallbacks: ReadonlyArray<string>): string[] {
+  const quoted = issues.flatMap((issue) => [...issue.matchAll(/[“"']([^“”"'\n]{2,24})[”"']/gu)].map((match) => match[1] ?? ""));
+  const chineseTerms = issues.flatMap((issue) => [...issue.matchAll(/[\p{Script=Han}A-Za-z0-9_-]{2,16}/gu)].map((match) => match[0] ?? ""))
+    .filter((term) => !/warning|critical|info|state|resource|consistency|validation|chapter/u.test(term))
+    .slice(0, 8);
+  return [...new Set([...quoted, ...chineseTerms, ...fallbacks].filter(Boolean))].slice(0, 8);
+}
+
+function qualityLocateHints(qualityReport: Partial<FanqieQualityReport> | null): string[] {
+  const issueText = (qualityReport?.issues ?? [])
+    .map((issue) => typeof issue === "string" ? issue : `${issue.type ?? ""} ${issue.detail ?? ""}`)
+    .join("\n");
+  const hints: string[] = [];
+  if (/积分|资源|收益|爽点/u.test(issueText)) hints.push("积分|奖励|收益|口粮|兑换");
+  if (/倒计时|系统|提示|弹出/u.test(issueText)) hints.push("倒计时|系统|提示");
+  if (/钩子|结尾|悬念/u.test(issueText)) hints.push("结尾|下一|还有|真正");
+  if (/段落|密度|节奏/u.test(issueText)) hints.push("。$|！$|？$");
+  if (/忽然|猛地|突然/u.test(issueText)) hints.push("忽然|猛地|突然");
+  return hints.length ? hints : ["积分|系统|结尾|忽然|猛地|突然"];
+}
+
+function findExportSixPartScore(reportText: string, chapter: number): number | null {
+  const match = reportText.match(new RegExp(`第\\s*${chapter}\\s*章：6段检查\\s+(\\d+)\\/6`, "u"));
+  return match ? Number(match[1]) : null;
+}
+
 /**
  * Parse "[book-id] <chapter>" style arguments from variadic args.
  * Supports: "3" (auto-detect book) or "my-book 3"
@@ -4216,6 +4924,36 @@ function parseBookAndChapter(
   }
   throw new Error("Usage: inkos review approve [book-id] <chapter>");
 }
+
+reviewCommand
+  .command("diagnose")
+  .description("Explain what to fix next for a chapter across write/review/export reports")
+  .requiredOption("--book <book-id>", "Book ID")
+  .requiredOption("--chapter <number>", "Chapter number")
+  .option("--json", "Output JSON")
+  .action(async (opts) => {
+    try {
+      const root = findProjectRoot();
+      const bookId = await resolveBookId(opts.book, root);
+      const state = new StateManager(root);
+      const bookDir = state.bookDir(bookId);
+      const chapter = Number.parseInt(opts.chapter, 10);
+      if (!Number.isInteger(chapter) || chapter < 1) {
+        throw new Error("--chapter must be a positive integer");
+      }
+
+      const result = await diagnoseChapterRepair({ root, bookId, bookDir, chapter });
+      if (opts.json) {
+        log(JSON.stringify(result, null, 2));
+      } else {
+        for (const line of renderDiagnoseChapterRepair(result)) log(line);
+      }
+    } catch (e) {
+      if (opts.json) log(JSON.stringify({ error: String(e) }));
+      else logError(`Failed to diagnose: ${e}`);
+      process.exit(1);
+    }
+  });
 
 reviewCommand
   .command("approve")
@@ -4246,6 +4984,9 @@ reviewCommand
         log(JSON.stringify({ bookId, chapter: chapterNum, status: "approved" }));
       } else {
         log(`Chapter ${chapterNum} approved (state committed).`);
+        log("");
+        log("next:");
+        log(`node scripts/fanqie/export-fanqie.mjs ${bookId} --from ${chapterNum} --to ${chapterNum} --use-reviewed --dry-run`);
       }
     } catch (e) {
       if (opts.json) {
