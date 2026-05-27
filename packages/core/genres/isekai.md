@@ -41,3 +41,20 @@ auditDimensions: [1,2,3,4,6,7,8,9,10,13,14,15,16,17,18,19,24,25,26]
 - Relationship building with new world characters grounds the MC emotionally
 - Clash between home culture and new world values creates natural conflict without needing a villain
 - Mid-to-late story: MC's identity shifts from "outsider" to "participant" — track this arc explicitly
+
+## Structure Signal Generation Guidance
+
+This guidance is used during `create_book` for the architect to generate book-specific `story/structure_signals.json`. **Do not copy these descriptions directly as signals** — combine them with the book's character names, world location names, race names, skill names, and cultural concepts into phrases that can be precisely matched in the prose.
+
+- **opening_hook**: Extract from the transportation event (summoning / reincarnation / portal / accident) and the MC's arrival disorientation. Guide: use the book's specific transportation method and the MC's pre-isekai identity anchor.
+- **protagonist_goal**: Extract from the MC's goal in the new world (return home / conquer / change fate / protect someone / understand why they were brought). Guide: goal must reference the book's specific factions or characters in the new world.
+- **pressure_source**: Extract from cultural misunderstandings / language barriers / real-world knowledge backfiring / new-world threats / discrimination against outsiders. Guide: use the book's specific culture-clash events and threat types.
+- **obstacle_dilemma**: Extract from "adapt or reshape" / "integrate or stay independent" / "return or stay". Guide: use the book's specific cultural-dilemma scenes tied to named characters or factions.
+- **solution_possibility**: Extract from real-world knowledge applied creatively / new-world rule discoveries / alliance formation / hidden heritage revealed. Guide: use the book's specific cross-world skills and discovered mechanics.
+- **active_attempt**: Extract from the MC's rule exploration / cultural adaptation attempts / faction building / adventure actions. Guide: use the book's specific exploration locations and action objectives.
+- **payoff_reward**: Extract from new ability gained / relationship formed / identity established / world rule mastered. Guide: use the book's specific ability names, relationship names, and identity titles.
+- **ending_pull**: Extract from "Can the MC return home? What connects the two worlds? What was the true reason for the transportation?" Guide: use the book's specific isekai mystery.
+- **antagonist_pressure**: Extract from the book's specific antagonists (royal court / church / demon lord / other transported individuals / the summoner). Guide: must use the book's actual antagonist names and faction affiliations.
+- **resource_reward**: Extract from the book's specific new-world resources (mana / skill points / rare materials / unique knowledge). Guide: use the book's resource names and acquisition methods.
+- **world_rule**: Extract from the book's unique world mechanics (magic system / racial hierarchies / class system / language barriers). Guide: use the book's specific world-rule descriptions and constraints.
+- **forbidden_false_positive**: Do not use generic terms like "isekai", "culture clash", "adaptation", or "new world" as signals. Every signal must contain the book's specific location names, race names, skill names, or event references.

@@ -1335,6 +1335,11 @@ These phrases will be used by automated reviewers to check whether chapters meet
 Each phrase should be a concrete word or short phrase (2-8 characters in Chinese, 1-3 words in English)
 that can be literally matched in chapter text.
 
+IMPORTANT: Read the "题材特征" (Genre Profile) section above — especially the "Structure Signal Generation Guidance" — to understand genre-specific structural pressures.
+Then synthesize with this book's story outline, world-building, protagonist goals, resource system, and chapter plans
+to produce phrases UNIQUE to THIS book. DO NOT copy generic genre-level descriptions as final signals.
+Every phrase must contain this book's specific character names, location names, system terms, or unique concepts.
+
 Output ONLY valid JSON in a code block:
 
 \`\`\`json
@@ -1379,6 +1384,11 @@ Rules:
 生成一个 JSON 对象，为以下每个维度提供本书专属的结构信号短语。
 这些短语将用于自动化审稿程序，检查章节是否满足结构要求。
 每个短语应为可在章节正文中直接匹配的具体词语或短语（2-8字）。
+
+重要：请先阅读上方"题材特征"部分——特别是其中的"Structure Signal Generation Guidance"——以了解该题材的常见结构压力。
+然后将这些题材级指导与本书的故事大纲、世界观、主角目标、资源系统和章节规划结合，
+生成只属于"本书"的专属短语。禁止直接复制题材 profile 中的泛化描述作为最终信号。
+每个短语必须包含本书具体的人物名、地名、系统术语或独特概念。
 
 只输出 JSON，包裹在代码块中：
 

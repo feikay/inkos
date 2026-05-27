@@ -39,3 +39,20 @@ auditDimensions: [1,2,3,4,6,7,8,9,10,13,14,15,16,17,18,19,24,25,26]
 - Early floors move fast (2-3 chapters each) to hook readers with progression
 - Later floors slow down (5-8 chapters) as complexity and stakes increase
 - The summit should feel like a destination worth the climb — seed hints about what awaits throughout
+
+## Structure Signal Generation Guidance
+
+This guidance is used during `create_book` for the architect to generate book-specific `story/structure_signals.json`. **Do not copy these descriptions directly as signals** — combine them with the book's character names, tower name, floor names, boss names, ability names, and rival climber names into phrases that can be precisely matched in the prose.
+
+- **opening_hook**: Extract from the MC's first floor entry / tower selection / initial trial / first floor-clear moment. Guide: use the book's specific tower entrance scene and the MC's reason for climbing.
+- **protagonist_goal**: Extract from the MC's climbing goal (reach the summit / find someone inside / break the tower / claim its power). Guide: goal must reference the book's specific floor targets and summit legend.
+- **pressure_source**: Extract from escalating floor difficulty / rival climber competition / time limits / floor failure penalties. Guide: use the book's specific floor mechanics and rival names.
+- **obstacle_dilemma**: Extract from "climb alone or form a party" / "help a fallen ally or push forward" / "take a floor shortcut or play safe". Guide: use the book's specific floor-based decision points.
+- **solution_possibility**: Extract from floor rule discoveries / ability combinations / hidden paths / environmental exploitation. Guide: use the book's specific floor gimmicks and discovered strategies.
+- **active_attempt**: Extract from the MC's specific floor challenges / boss fights / rule puzzles / party coordination. Guide: use the book's specific floor names, boss names, and tactic descriptions.
+- **payoff_reward**: Extract from floor cleared / boss defeated / new ability gained / floor secret discovered / rival surpassed. Guide: use the book's specific ability names and floor-clear milestones.
+- **ending_pull**: Extract from "What awaits at the summit? Who built the tower? What happens when someone reaches the top?" Guide: use the book's specific summit mystery.
+- **antagonist_pressure**: Extract from the book's specific rival climbers / floor guardians / tower administrators / the tower itself. Guide: must use the book's actual rival names, floor positions, and guardian types.
+- **resource_reward**: Extract from the book's specific floor rewards (ability fragments / equipment / information / floor passes). Guide: use the book's reward item names and floor-specific acquisitions.
+- **world_rule**: Extract from the book's unique tower mechanics (floor rules / ability rank system / party mechanics / death/respawn conditions). Guide: use the book's specific floor-rule descriptions and mechanical constraints.
+- **forbidden_false_positive**: Do not use generic terms like "climb", "clear floor", "boss fight", or "summit" as signals. Every signal must contain the book's specific tower/floor names, ability names, or character identifiers.

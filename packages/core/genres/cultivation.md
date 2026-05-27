@@ -40,3 +40,20 @@ auditDimensions: [1,2,3,4,6,7,8,9,10,13,14,15,16,17,18,19,24,25,26]
 - Sect/academy politics and mentorship relationships provide non-combat tension
 - Early: frequent small gains. Mid: longer plateaus with harder breakthroughs. Late: rare, climactic stage transitions
 - The journey of cultivation is the story — readers came for the grind, not just the destination
+
+## Structure Signal Generation Guidance
+
+This guidance is used during `create_book` for the architect to generate book-specific `story/structure_signals.json`. **Do not copy these descriptions directly as signals** — combine them with the book's character names, stage names, technique names, sect names, and breakthrough events into phrases that can be precisely matched in the prose.
+
+- **opening_hook**: Extract from the MC's starting condition (mortal / crippled core / exiled disciple / hidden talent revealed). Guide: use the book's specific initial status event and the character/force involved.
+- **protagonist_goal**: Extract from the MC's cultivation goal (reach the peak / avenge master / transcend mortality / protect the sect). Guide: goal must reference the book's specific realm names and personal vendettas.
+- **pressure_source**: Extract from rival sects / tribulation threats / resource competition / inner demons / cultivation bottlenecks. Guide: use the book's specific rival sect names, tribulation types, or resource names.
+- **obstacle_dilemma**: Extract from "kill or spare" / "break through at a cost or wait" / "loyalty to sect vs. personal path". Guide: use the book's specific fork-point decisions tied to named characters or sects.
+- **solution_possibility**: Extract from enlightenment breakthroughs / hidden technique comprehension / alchemy pill mastery / formation cracking. Guide: use the book's specific technique names and insight triggers.
+- **active_attempt**: Extract from the MC's key duels / tribulation survival / secret realm exploration / alchemy crafting. Guide: use the book's specific opponent names, realm names, and technique names.
+- **payoff_reward**: Extract from stage breakthroughs / technique mastery / tribulation survived / core formation. Guide: use the book's specific stage names and breakthrough events.
+- **ending_pull**: Extract from "Can the MC transcend mortality? What is the true Dao? What is the cost of immortality?" Guide: use the book's specific ultimate cultivation question.
+- **antagonist_pressure**: Extract from the book's specific rival cultivators / demonic cultivators / scheming sect elders / heavenly tribulations. Guide: must use the book's actual antagonist names, titles, and sect affiliations.
+- **resource_reward**: Extract from the book's specific cultivation resources (spirit stones / rare herbs / cultivation manuals / pill formulas). Guide: use the book's resource names and acquisition events.
+- **world_rule**: Extract from the book's unique cultivation system (stage names / breakthrough conditions / tribulation mechanics / Dao laws). Guide: use the book's specific stage names and rule descriptions.
+- **forbidden_false_positive**: Do not use generic terms like "breakthrough", "cultivation", "enlightenment", or "transcendence" as signals. Every signal must contain the book's specific stage names, technique names, or character titles.

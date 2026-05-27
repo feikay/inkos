@@ -40,3 +40,20 @@ auditDimensions: [1,2,3,6,7,8,9,10,13,14,15,16,17,18,19,24,25,26]
 - Tech reveals at plot-critical moments only — never dump specs for their own sake
 - Action scenes grounded in established physics/tech rules — no surprise capabilities
 - Settings spanning star systems need clear spatial orientation for readers
+
+## Structure Signal Generation Guidance
+
+This guidance is used during `create_book` for the architect to generate book-specific `story/structure_signals.json`. **Do not copy these descriptions directly as signals** — combine them with the book's character names, planet/station names, tech names, faction names, and discovery events into phrases that can be precisely matched in the prose.
+
+- **opening_hook**: Extract from the inciting discovery / first contact / tech breakthrough / political crisis that sets the story in motion. Guide: use the book's specific event, location, and the characters involved.
+- **protagonist_goal**: Extract from the MC's objective (solve the mystery / prevent war / complete the mission / survive / make contact). Guide: goal must reference the book's specific stellar locations, factions, or tech objectives.
+- **pressure_source**: Extract from failing technology / political adversaries / alien threats / environmental hazards / time constraints. Guide: use the book's specific tech-failure modes, faction names, or hazard types.
+- **obstacle_dilemma**: Extract from "follow protocol or improvise" / "save the few or the many" / "reveal the truth or maintain stability". Guide: use the book's specific decision-point scenes.
+- **solution_possibility**: Extract from tech breakthroughs / alien cooperation / political negotiation / scientific discoveries. Guide: use the book's specific tech names, alien species, or discovered principles.
+- **active_attempt**: Extract from the MC's missions / experiments / negotiations / explorations / repairs. Guide: use the book's specific ship names, planet names, and operation names.
+- **payoff_reward**: Extract from discovery made / tech breakthrough achieved / political victory / first contact successful / survival against odds. Guide: use the book's specific discovery names and milestone descriptions.
+- **ending_pull**: Extract from "What is the nature of the unknown? Can humanity survive? What does first contact truly mean?" Guide: use the book's specific ultimate question or existential stake.
+- **antagonist_pressure**: Extract from the book's specific opposing factions / rival polities / alien species / corporate interests / the tech itself. Guide: must use the book's actual faction names, species names, or antagonist identifiers.
+- **resource_reward**: Extract from the book's specific resources (tech components / data / fuel / diplomatic leverage / territory). Guide: use the book's resource names and acquisition contexts.
+- **world_rule**: Extract from the book's unique tech/physics constraints (FTL limits / AI boundaries / biotech ethics / communication lag / energy sources). Guide: use the book's specific tech-rule descriptions and limitations.
+- **forbidden_false_positive**: Do not use generic terms like "discovery", "technology", "space", or "first contact" as signals. Every signal must contain the book's specific tech names, planet/station names, faction names, or discovery descriptions.

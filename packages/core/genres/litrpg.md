@@ -41,3 +41,20 @@ auditDimensions: [1,2,3,4,5,6,7,8,9,10,13,14,15,16,17,18,19,24,25,26]
 - Late story: tier/rank transitions are rare and climactic
 - Test pacing: Book 3 MC decisively defeats Book 1 version, but challenges never feel trivial
 - Describe stats in narration first (audiobook-friendly), then include stat sheet for detail readers
+
+## Structure Signal Generation Guidance
+
+This guidance is used during `create_book` for the architect to generate book-specific `story/structure_signals.json`. **Do not copy these descriptions directly as signals** — combine them with the book's character names, skill names, system terms, specific locations, and quest names into phrases that can be precisely matched in the prose.
+
+- **opening_hook**: Extract from the system activation / first stat window / tutorial quest / first kill. Guide: use the book's specific trigger event and the unique way the MC experiences the system for the first time.
+- **protagonist_goal**: Extract from the MC's ultimate goal within the system (rank #1 / escape the game / save someone inside / break the system). Guide: the goal must reference the book's specific leaderboard, realm, or quest objective.
+- **pressure_source**: Extract from time-limited quests / PK threats / resource starvation / rival progression. Guide: use the book's specific quest names, rival character IDs, or countdown mechanics.
+- **obstacle_dilemma**: Extract from mutually exclusive quest choices / build path forks / party vs. solo tradeoffs. Guide: use the book's specific fork-point decisions the MC faces.
+- **solution_possibility**: Extract from hidden mechanics / cross-class combos / system loopholes the MC discovers. Guide: use the book's specific mechanical discoveries and strategy names.
+- **active_attempt**: Extract from the MC's key dungeon runs / boss fights / skill experiments / PvP encounters. Guide: use the book's specific dungeon names, boss names, and skill combinations.
+- **payoff_reward**: Extract from level-ups / loot drops / skill unlocks / tier breakthroughs / hidden achievements. Guide: use the book's specific level thresholds, item names, and achievement titles.
+- **ending_pull**: Extract from "Who created the system? Why? What happens at level cap?" Guide: use the book's specific system mystery and endgame hook.
+- **antagonist_pressure**: Extract from the book's specific rival players / PK guilds / system enforcers. Guide: must use the book's actual character IDs, guild names, or enforcer types.
+- **resource_reward**: Extract from the book's specific currency / crafting materials / rare drops / stat points. Guide: use the book's economy-specific item names and acquisition events.
+- **world_rule**: Extract from the book's unique system mechanics (diminishing returns formulas / cooldown rules / class restrictions / death penalties). Guide: use the book's specific numerical constraints and rule text.
+- **forbidden_false_positive**: Do not use generic terms like "level up", "stat gain", "skill unlock", or "power spike" as signals. Every signal must contain the book's specific proper nouns and numerical conditions.

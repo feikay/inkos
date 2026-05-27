@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { mkdir, writeFile, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, writeFile, rm, readdir, readFile } from "node:fs/promises";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import {
   StructureSignalsSchema,
   validateStructureSignals,
@@ -676,5 +677,69 @@ describe("Error diagnostics for missing/corrupt signals", () => {
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
     }
+  });
+});
+
+// ---- Genre profile structure signal guidance completeness ----
+
+describe("Genre profiles contain structure signal generation guidance", () => {
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = dirname(__filename);
+  const genresDir = join(__dirname, "..", "..", "genres");
+
+  it("every genre profile .md file contains the guidance section", async () => {
+    const entries = await readdir(genresDir);
+    const mdFiles = entries.filter((e) => e.endsWith(".md"));
+
+    expect(mdFiles.length).toBeGreaterThanOrEqual(27);
+
+    const missing: string[] = [];
+
+    for (const file of mdFiles) {
+      const content = await readFile(join(genresDir, file), "utf-8");
+      if (!content.includes("## Structure Signal Generation Guidance")) {
+        missing.push(file);
+      }
+    }
+
+    expect(missing).toEqual([]);
+  });
+
+  it("every guidance section references all 12 structure dimensions", async () => {
+    const entries = await readdir(genresDir);
+    const mdFiles = entries.filter((e) => e.endsWith(".md"));
+
+    const requiredDimensions = [
+      "opening_hook",
+      "protagonist_goal",
+      "pressure_source",
+      "obstacle_dilemma",
+      "solution_possibility",
+      "active_attempt",
+      "payoff_reward",
+      "ending_pull",
+      "antagonist_pressure",
+      "resource_reward",
+      "world_rule",
+      "forbidden_false_positive",
+    ];
+
+    const incomplete: { file: string; missing: string[] }[] = [];
+
+    for (const file of mdFiles) {
+      const content = await readFile(join(genresDir, file), "utf-8");
+      const guidanceStart = content.indexOf("## Structure Signal Generation Guidance");
+      if (guidanceStart === -1) continue;
+      const guidanceSection = content.slice(guidanceStart);
+
+      const missingDims = requiredDimensions.filter(
+        (dim) => !guidanceSection.includes(dim),
+      );
+      if (missingDims.length > 0) {
+        incomplete.push({ file, missing: missingDims });
+      }
+    }
+
+    expect(incomplete).toEqual([]);
   });
 });
