@@ -429,6 +429,22 @@ export {
 } from "./utils/hook-governance.js";
 export { arbitrateRuntimeStateDeltaHooks, type HookArbiterDecision } from "./utils/hook-arbiter.js";
 export { analyzeHookHealth } from "./utils/hook-health.js";
+export {
+  readStructureSignals,
+  writeStructureSignals,
+  validateStructureSignals,
+  createEmptyStructureSignals,
+  parseArchitectStructureSignals,
+  matchStructureSignals,
+  buildStructureSignalReport,
+  STRUCTURE_SIGNAL_DIMENSIONS,
+  StructureSignalsSchema,
+  type StructureSignals,
+  type StructureSignalDimension,
+  type StructureSignalMatch,
+  type StructureSignalReport,
+  type StructureSignalsReadResult,
+} from "./utils/structure-signals.js";
 
 // Pipeline
 export { PipelineRunner, type PipelineConfig, type ChapterPipelineResult, type DraftResult, type PlanChapterResult, type ComposeChapterResult, type ReviseResult, type TruthFiles, type BookStatusInfo, type ImportChaptersInput, type ImportChaptersResult, type TokenUsageSummary } from "./pipeline/runner.js";

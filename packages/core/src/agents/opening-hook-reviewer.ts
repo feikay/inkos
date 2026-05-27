@@ -2,6 +2,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { BaseAgent } from "./base.js";
 import { OPENING_HOOK_METHODS } from "../story-methods/opening-hooks.js";
+import type { StructureSignals, StructureSignalReport } from "../utils/structure-signals.js";
+import { buildStructureSignalReport, STRUCTURE_SIGNAL_DIMENSIONS } from "../utils/structure-signals.js";
 
 export const OPENING_HOOK_DIMENSIONS = [
   "suspense_gap",
@@ -45,6 +47,7 @@ export interface OpeningHookReviewReport {
   readonly suggestions: ReadonlyArray<string>;
   readonly summary: string;
   readonly skippedReason?: string;
+  readonly structureSignalReport?: StructureSignalReport;
 }
 
 export interface OpeningHookReviewInput {
@@ -53,6 +56,7 @@ export interface OpeningHookReviewInput {
   readonly chapterTitle?: string;
   readonly resourceBlocking?: boolean;
   readonly chapterIndexStatus?: string;
+  readonly structureSignals?: StructureSignals | null;
 }
 
 const DIMENSION_LABELS: Record<OpeningHookDimension, string> = {
@@ -61,6 +65,15 @@ const DIMENSION_LABELS: Record<OpeningHookDimension, string> = {
   conflict_first: "矛盾前置",
   worldview_bomb: "世界观炸弹",
   extreme_emotion: "极致情绪",
+};
+
+// Map opening hook dimensions to structure signal dimensions for book-level phrase matching
+const DIM_TO_STRUCTURE_SIGNALS: Record<OpeningHookDimension, (typeof STRUCTURE_SIGNAL_DIMENSIONS)[number][]> = {
+  suspense_gap: ["opening_hook", "ending_pull"],
+  extreme_contrast: ["opening_hook", "pressure_source"],
+  conflict_first: ["opening_hook", "pressure_source", "obstacle_dilemma"],
+  worldview_bomb: ["world_rule"],
+  extreme_emotion: ["opening_hook", "pressure_source"],
 };
 
 // Signal groups — shared pattern with golden_3_chapter opening_hook_delivery
@@ -193,14 +206,29 @@ export class OpeningHookReviewerAgent extends BaseAgent {
     let totalMatches = 0;
 
     for (const [hookId, patterns] of Object.entries(HOOK_SIGNAL_GROUPS)) {
+      const dim = hookId as OpeningHookDimension;
       const matchCount = patterns.filter((p) => p.test(opening)).length;
-      totalMatches += matchCount;
-      const score = Math.min(100, matchCount * 30 + 40);
-      if (matchCount > 0 && score > bestHookScore) {
+
+      // Count book-level structure signal phrase matches
+      let bookMatches = 0;
+      if (input.structureSignals) {
+        const signalDims = DIM_TO_STRUCTURE_SIGNALS[dim] ?? [];
+        for (const signalDim of signalDims) {
+          const phrases = input.structureSignals.signals[signalDim] ?? [];
+          for (const phrase of phrases) {
+            if (opening.includes(phrase)) bookMatches++;
+          }
+        }
+      }
+
+      const totalMatchCount = matchCount + bookMatches;
+      totalMatches += totalMatchCount;
+      const score = Math.min(100, totalMatchCount * 25 + 40);
+      if (totalMatchCount > 0 && score > bestHookScore) {
         bestHookScore = score;
         bestHookType = hookId;
       }
-      dimensions[hookId as OpeningHookDimension] = score;
+      dimensions[dim] = score;
     }
 
     let hookStrength: HookStrength;
@@ -356,6 +384,16 @@ export class OpeningHookReviewerAgent extends BaseAgent {
         .join("；")}`;
     }
 
+    const structureSignalReport = input.structureSignals
+      ? buildStructureSignalReport(content, input.structureSignals, [
+          "opening_hook",
+          "pressure_source",
+          "obstacle_dilemma",
+          "world_rule",
+          "ending_pull",
+        ])
+      : undefined;
+
     return {
       chapterIndex: input.chapterIndex ?? 0,
       chapterTitle: input.chapterTitle,
@@ -370,6 +408,7 @@ export class OpeningHookReviewerAgent extends BaseAgent {
       issues,
       suggestions,
       summary,
+      structureSignalReport,
     };
   }
 }

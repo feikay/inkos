@@ -2,6 +2,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { BaseAgent } from "./base.js";
 import { SIX_STEP_PLOT_METHOD } from "../story-methods/six-step-plot.js";
+import type { StructureSignals, StructureSignalReport } from "../utils/structure-signals.js";
+import { buildStructureSignalReport, STRUCTURE_SIGNAL_DIMENSIONS } from "../utils/structure-signals.js";
 
 export const SIX_STEP_PLOT_DIMENSIONS = [
   "emotion_event",
@@ -49,6 +51,7 @@ export interface SixStepPlotReport {
   readonly suggestions: ReadonlyArray<string>;
   readonly summary: string;
   readonly skippedReason?: string;
+  readonly structureSignalReport?: StructureSignalReport;
 }
 
 export interface SixStepPlotReviewInput {
@@ -58,9 +61,20 @@ export interface SixStepPlotReviewInput {
   readonly chapterIntent?: string;
   readonly resourceBlocking?: boolean;
   readonly chapterIndexStatus?: string;
+  readonly structureSignals?: StructureSignals | null;
 }
 
 // ---- dimension labels from SIX_STEP_PLOT_METHOD ----
+
+// Map six-step-plot dimensions to structure signal dimensions for book-level phrase matching
+const DIM_TO_STRUCTURE_SIGNALS: Partial<Record<SixStepPlotDimension, (typeof STRUCTURE_SIGNAL_DIMENSIONS)[number][]>> = {
+  emotion_event: ["opening_hook", "pressure_source"],
+  desire_goal: ["protagonist_goal"],
+  obstacle_dilemma: ["obstacle_dilemma", "antagonist_pressure"],
+  solution_possibility: ["solution_possibility", "world_rule"],
+  action_resolution: ["active_attempt", "resource_reward"],
+  ending_feedback: ["ending_pull", "payoff_reward"],
+};
 
 const DIMENSION_LABELS: Record<SixStepPlotDimension, string> = Object.fromEntries(
   SIX_STEP_PLOT_METHOD.steps.map((s) => {
@@ -268,7 +282,7 @@ function semanticChecklistPassed(content: string, stepId: string, item: string):
 
   if (stepId === "obstacle-dilemma") {
     if (/内在规则|硬拦/u.test(item)) {
-      return /规则|权限|系统|资源|晶核|积分|门禁|倒计时|强制|条件|代价/u.test(content);
+      return /规则|权限|系统|资源|倒计时|强制|条件|代价/u.test(content);
     }
     if (/积蓄爆发|单纯虐/u.test(item)) {
       return /提前|只剩|逼近|越来越|爆发|冲破|裂.{0,4}缝|死局|必须立刻/u.test(content);
@@ -277,25 +291,25 @@ function semanticChecklistPassed(content: string, stepId: string, item: string):
 
   if (stepId === "solution-possibility") {
     if (/线索|能力|盟友|规则漏洞/u.test(item)) {
-      return /线索|能力|盟友|规则|漏洞|权限|员工卡|兑换|系统|机会|办法/u.test(content);
+      return /线索|能力|盟友|规则|漏洞|权限|兑换|系统|机会|办法/u.test(content);
     }
     if (/没有被困境写死/u.test(item)) {
-      return /还能|还有|可以|机会|办法|兑换|激活|换取|三发|选择/u.test(content);
+      return /还能|还有|可以|机会|办法|兑换|激活|换取|选择/u.test(content);
     }
   }
 
   if (stepId === "action-resolution") {
     if (/主角选择|外力代劳/u.test(item)) {
-      return /陈默.{0,30}(?:摸出|开口|拿起|兑换|没有留|指尖|选择|扣|射)|他没有留|第一箭/u.test(content);
+      return /(?:摸出|开口|拿起|兑换|选择|扣|射)|他没有留/u.test(content);
     }
     if (/情绪|局势|认知升级/u.test(item)) {
-      return /这才反应|分明|提前|盯准|003|强制|死局|净赚|效率/u.test(content);
+      return /这才反应|分明|提前|盯准|强制|死局|净赚|效率/u.test(content);
     }
   }
 
   if (stepId === "ending-feedback") {
     if (/变强|拿到东西|心态变化|关系变化/u.test(item)) {
-      return /获得|净赚|兑换|淬毒弩箭|体力|伤口|代价|效率|坐实/u.test(content);
+      return /获得|净赚|兑换|体力|伤口|代价|效率|坐实/u.test(content);
     }
     if (/下一轮问题|彻底停住/u.test(item)) {
       return /下一|未解决|倒计时|强制抽取|裂.{0,4}缝|冲破|死局|第一箭|选择/u.test(ending);
@@ -486,9 +500,25 @@ export class SixStepPlotReviewerAgent extends BaseAgent {
       const checklistPassed = step ? countChecklistPassed(content, stepId, step.reviewChecklist) : 0;
       const intentScore = intentOverlapScore(content, input.chapterIntent, dim);
 
-      // Score: method signal detection (0-60) + checklist (0-40), with
-      // chapter_intent overlap as a generic floor for project-specific phrasing.
-      const signalScore = Math.min(60, matchCount * 8);
+      // Book-level structure signal phrase matching (boosts score when available)
+      let bookSignalBonus = 0;
+      if (input.structureSignals) {
+        const signalDims = DIM_TO_STRUCTURE_SIGNALS[dim] ?? [];
+        for (const signalDim of signalDims) {
+          const phrases = input.structureSignals.signals[signalDim] ?? [];
+          for (const phrase of phrases) {
+            if (content.includes(phrase)) {
+              bookSignalBonus += 4;
+            }
+          }
+        }
+      }
+
+      // Score: generic signal detection (0-60 without book signals, 0-40 + book bonus otherwise)
+      // + checklist (0-40), with chapter_intent overlap as a generic floor.
+      const signalScore = input.structureSignals
+        ? Math.min(60, Math.min(40, matchCount * 6) + bookSignalBonus)
+        : Math.min(60, matchCount * 8);
       const checklistScore = step ? checklistPassed * 20 : 0; // each of 2 items = 20 pts
       dimensions[dim] = Math.min(100, Math.max(signalScore, intentScore) + checklistScore);
     }
@@ -623,6 +653,20 @@ export class SixStepPlotReviewerAgent extends BaseAgent {
       summary = `六步剧情审核未通过（${score}/100），checklist ${totalChecklistPassed}/12 项通过。${critIssues.join("；")}${intentSummary}`;
     }
 
+    const structureSignalReport = input.structureSignals
+      ? buildStructureSignalReport(content, input.structureSignals, [
+          "opening_hook",
+          "protagonist_goal",
+          "pressure_source",
+          "obstacle_dilemma",
+          "solution_possibility",
+          "active_attempt",
+          "payoff_reward",
+          "ending_pull",
+          "antagonist_pressure",
+        ])
+      : undefined;
+
     return {
       chapterIndex: input.chapterIndex ?? 0,
       chapterTitle: input.chapterTitle,
@@ -640,6 +684,7 @@ export class SixStepPlotReviewerAgent extends BaseAgent {
       issues,
       suggestions,
       summary,
+      structureSignalReport,
     };
   }
 }

@@ -3,7 +3,7 @@ import type { BookConfig, FanficMode } from "../models/book.js";
 import type { GenreProfile } from "../models/genre-profile.js";
 import { readGenreProfile } from "./rules-reader.js";
 import { writeFile, mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import { renderHookSnapshot } from "../utils/memory-retrieval.js";
 import {
   ANTAGONIST_TEMPLATES,
@@ -20,6 +20,7 @@ import {
   buildSubplotBoardContent,
   type FoundationDocumentMeta,
 } from "./foundation-documents.js";
+import { parseArchitectStructureSignals, writeStructureSignals } from "../utils/structure-signals.js";
 
 export interface ArchitectOutput {
   readonly storyBible: string;
@@ -32,6 +33,7 @@ export interface ArchitectOutput {
   readonly antagonistMap?: string;
   readonly motivationMatrix?: string;
   readonly first10ChapterPlan?: string;
+  readonly structureSignals?: string;
 }
 
 interface WebnovelTemplateFiles {
@@ -709,10 +711,13 @@ ${pendingHooksPrompt}
 
 ${storySkeletonPrompt}
 
+=== SECTION: structure_signals ===
+${this.buildStructureSignalsPrompt(resolvedLanguage)}
+
 ${finalRequirementsPrompt}`;
 
     const langPrefix = resolvedLanguage === "en"
-      ? `【LANGUAGE OVERRIDE】ALL output (story_bible, volume_outline, book_rules, current_state, pending_hooks, genre_architecture, world_engine, antagonist_map, motivation_matrix, first_10_chapter_plan) MUST be written in English. Character names, place names, and all prose must be in English. The === SECTION: === tags remain unchanged.\n\n`
+      ? `【LANGUAGE OVERRIDE】ALL output (story_bible, volume_outline, book_rules, current_state, pending_hooks, genre_architecture, world_engine, antagonist_map, motivation_matrix, first_10_chapter_plan, structure_signals) MUST be written in English. Character names, place names, and all prose must be in English. The === SECTION: === tags remain unchanged.\n\n`
       : "";
     const userMessage = resolvedLanguage === "en"
       ? `Generate the complete foundation for a ${gp.name} novel titled "${book.title}". Write everything in English.`
@@ -810,6 +815,16 @@ ${finalRequirementsPrompt}`;
         "utf-8",
       ),
     );
+
+    // Write structure_signals.json from architect output
+    if (output.structureSignals) {
+      const signals = parseArchitectStructureSignals(output.structureSignals, basename(bookDir));
+      await writeStructureSignals(bookDir, signals);
+    } else {
+      // Book created without structure signals — still write an empty file so the absence is explicit
+      const empty = parseArchitectStructureSignals("", basename(bookDir));
+      await writeStructureSignals(bookDir, empty);
+    }
 
     const templateFiles = this.buildWebnovelTemplateFiles(webnovelTemplate);
     if (templateFiles) {
@@ -1309,6 +1324,99 @@ List possible reader drop-off risks and avoidance strategies.`;
 
 ## 5. 前10章追读风险
 列出可能导致读者流失的风险，并给出规避策略。`;
+  }
+
+  private buildStructureSignalsPrompt(language: "zh" | "en"): string {
+    if (language === "en") {
+      return `# Structure Signals
+
+Generate a JSON object containing book-specific structure signal phrases for each dimension below.
+These phrases will be used by automated reviewers to check whether chapters meet structural requirements.
+Each phrase should be a concrete word or short phrase (2-8 characters in Chinese, 1-3 words in English)
+that can be literally matched in chapter text.
+
+Output ONLY valid JSON in a code block:
+
+\`\`\`json
+{
+  "signals": {
+    "opening_hook": ["phrase1", "phrase2", ...],
+    "protagonist_goal": ["phrase1", "phrase2", ...],
+    "pressure_source": ["phrase1", "phrase2", ...],
+    "obstacle_dilemma": ["phrase1", "phrase2", ...],
+    "solution_possibility": ["phrase1", "phrase2", ...],
+    "active_attempt": ["phrase1", "phrase2", ...],
+    "payoff_reward": ["phrase1", "phrase2", ...],
+    "ending_pull": ["phrase1", "phrase2", ...],
+    "antagonist_pressure": ["phrase1", "phrase2", ...],
+    "resource_reward": ["phrase1", "phrase2", ...],
+    "world_rule": ["phrase1", "phrase2", ...],
+    "forbidden_false_positive": ["phrase1", "phrase2", ...]
+  }
+}
+\`\`\`
+
+Rules:
+- Each array MUST contain 3-8 concrete phrases specific to THIS book's world, characters, and conflict.
+- "opening_hook": phrases that signal strong chapter openings (conflict, suspense, emotion, contrast).
+- "protagonist_goal": phrases that signal the protagonist has a clear objective.
+- "pressure_source": phrases that signal external pressure or threat sources.
+- "obstacle_dilemma": phrases that signal a dilemma or hard choice.
+- "solution_possibility": phrases that signal a potential solution, clue, or method.
+- "active_attempt": phrases that signal the protagonist taking action.
+- "payoff_reward": phrases that signal a reward, gain, or progress.
+- "ending_pull": phrases that signal a cliffhanger or reason to continue reading.
+- "antagonist_pressure": phrases that signal antagonist activity or threat.
+- "resource_reward": phrases that signal resource gain, exchange, or consumption.
+- "world_rule": phrases that signal world rules being invoked or explained.
+- "forbidden_false_positive": phrases that should NOT count as structure signals (common words that might falsely trigger reviewers).
+- Do NOT use generic words. Use phrases specific to this book's setting, power system, character names, and unique concepts.
+- Phrases should be matchable in chapter text.`;
+    }
+
+    return `# 书级结构信号
+
+生成一个 JSON 对象，为以下每个维度提供本书专属的结构信号短语。
+这些短语将用于自动化审稿程序，检查章节是否满足结构要求。
+每个短语应为可在章节正文中直接匹配的具体词语或短语（2-8字）。
+
+只输出 JSON，包裹在代码块中：
+
+\`\`\`json
+{
+  "signals": {
+    "opening_hook": ["短语1", "短语2", ...],
+    "protagonist_goal": ["短语1", "短语2", ...],
+    "pressure_source": ["短语1", "短语2", ...],
+    "obstacle_dilemma": ["短语1", "短语2", ...],
+    "solution_possibility": ["短语1", "短语2", ...],
+    "active_attempt": ["短语1", "短语2", ...],
+    "payoff_reward": ["短语1", "短语2", ...],
+    "ending_pull": ["短语1", "短语2", ...],
+    "antagonist_pressure": ["短语1", "短语2", ...],
+    "resource_reward": ["短语1", "短语2", ...],
+    "world_rule": ["短语1", "短语2", ...],
+    "forbidden_false_positive": ["短语1", "短语2", ...]
+  }
+}
+\`\`\`
+
+规则：
+- 每个数组必须包含 3-8 个具体短语，专属于本书的世界观、角色和冲突。
+- "opening_hook"：标志强烈章节开头的短语（冲突、悬念、情绪、反差）。
+- "protagonist_goal"：标志主角有明确目标的短语。
+- "pressure_source"：标志外部压力或威胁来源的短语。
+- "obstacle_dilemma"：标志两难困境或艰难选择的短语。
+- "solution_possibility"：标志潜在解决方案、线索或方法的短语。
+- "active_attempt"：标志主角采取行动的短语。
+- "payoff_reward"：标志奖励、收获或进展的短语。
+- "ending_pull"：标志悬念或继续阅读动力的短语。
+- "antagonist_pressure"：标志反派活动或威胁的短语。
+- "resource_reward"：标志资源获取、交换或消耗的短语。
+- "world_rule"：标志世界规则被调用或解释的短语。
+- "forbidden_false_positive"：不应被计为结构信号的短语（可能误触发审稿的常见词）。
+- 禁止使用泛化词汇。必须使用本书独有设定、战力体系、角色名和特色概念。
+- 每个短语必须能在正文中直接匹配到。`;
   }
 
   private contentOrFallback(
@@ -1831,6 +1939,7 @@ ${trimmed}\n`;
       antagonistMap: parsedSections.get(this.normalizeSectionName("antagonist_map")),
       motivationMatrix: parsedSections.get(this.normalizeSectionName("motivation_matrix")),
       first10ChapterPlan: parsedSections.get(this.normalizeSectionName("first_10_chapter_plan")),
+      structureSignals: parsedSections.get(this.normalizeSectionName("structure_signals")),
     };
   }
 

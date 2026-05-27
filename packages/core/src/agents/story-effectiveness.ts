@@ -1,6 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { BaseAgent } from "./base.js";
+import type { StructureSignals, StructureSignalReport } from "../utils/structure-signals.js";
+import { buildStructureSignalReport, STRUCTURE_SIGNAL_DIMENSIONS } from "../utils/structure-signals.js";
 
 export const STORY_EFFECTIVENESS_DIMENSIONS = [
   "emotion_event",
@@ -31,6 +33,7 @@ export interface StoryEffectivenessReport {
   readonly issues: ReadonlyArray<StoryEffectivenessIssue>;
   readonly suggestions: ReadonlyArray<string>;
   readonly skippedReason?: string;
+  readonly structureSignalReport?: StructureSignalReport;
 }
 
 export interface StoryEffectivenessReviewInput {
@@ -39,6 +42,7 @@ export interface StoryEffectivenessReviewInput {
   readonly chapterIntent?: string;
   readonly resourceBlocking?: boolean;
   readonly chapterIndexStatus?: string;
+  readonly structureSignals?: StructureSignals | null;
 }
 
 const DIMENSION_LABELS: Record<StoryEffectivenessDimension, string> = {
@@ -48,6 +52,16 @@ const DIMENSION_LABELS: Record<StoryEffectivenessDimension, string> = {
   solution_method: "解决方法",
   climax_payoff: "行动高潮",
   ending_pull: "结局反馈",
+};
+
+// Map story-effectiveness dimensions to structure signal dimensions for book-level phrase matching
+const DIM_TO_STRUCTURE_SIGNALS: Partial<Record<StoryEffectivenessDimension, (typeof STRUCTURE_SIGNAL_DIMENSIONS)[number][]>> = {
+  emotion_event: ["opening_hook", "pressure_source"],
+  desire_goal: ["protagonist_goal"],
+  obstacle_pressure: ["obstacle_dilemma", "antagonist_pressure"],
+  solution_method: ["solution_possibility", "world_rule"],
+  climax_payoff: ["active_attempt", "payoff_reward"],
+  ending_pull: ["ending_pull"],
 };
 
 // ---- hard-scan signal sets ----
@@ -67,7 +81,7 @@ const DESIRE_GOAL_SIGNALS = [
   /唯一目标|本章目标|当前目标|必须.{0,12}(?:做出|完成|拿到|救|护|守|挡|逃|赢)/u,
   /为了|为的是|只为|只想|只要.{0,10}就/u,
   /拿到|逃出|揭开|压住|赢过|找到|救出|保护|阻止|破坏|夺取|获得/u,
-  /攒够|换.{0,8}(?:武器|物资|积分)|护住|守住|挡下/u,
+  /攒够|换.{0,8}(?:武器|物资|资源)|护住|守住|挡下/u,
 ];
 
 const OBSTACLE_PRESSURE_SIGNALS = [
@@ -106,6 +120,23 @@ const STRENGTH_PATTERNS: Array<{ readonly pattern: RegExp; readonly dimension: S
   { pattern: /钩子|悬念|伏笔.*(?:留|埋)/u, dimension: "ending_pull", label: "结尾留下钩子" },
 ];
 
+function countBookSignalMatches(
+  content: string,
+  signals: StructureSignals | null | undefined,
+  dim: StoryEffectivenessDimension,
+): number {
+  if (!signals) return 0;
+  const signalDims = DIM_TO_STRUCTURE_SIGNALS[dim] ?? [];
+  let count = 0;
+  for (const signalDim of signalDims) {
+    const phrases = signals.signals[signalDim] ?? [];
+    for (const phrase of phrases) {
+      if (content.includes(phrase)) count++;
+    }
+  }
+  return count;
+}
+
 export class StoryEffectivenessAgent extends BaseAgent {
   get name(): string {
     return "story-effectiveness";
@@ -136,13 +167,15 @@ export class StoryEffectivenessAgent extends BaseAgent {
     const conclusions: Record<StoryEffectivenessDimension, string> = { ...defaultConclusions("未检测到明显信号。") };
 
     // ---- emotion_event ----
+    const emotionBookMatches = countBookSignalMatches(opening, input.structureSignals, "emotion_event");
     const emotionSignals = EMOTION_EVENT_SIGNALS.filter((p) => p.test(opening));
     const weakStart = EMOTION_WEAK_START.some((p) => p.test(opening));
-    if (emotionSignals.length >= 2 && !weakStart) {
+    const emotionTotal = emotionSignals.length + emotionBookMatches;
+    if (emotionTotal >= 2 && !weakStart) {
       dimensions.emotion_event = 90;
       conclusions.emotion_event = "开头包含具体冲突画面或情绪事件。";
       strengths.push("开头以具体冲突画面调动读者情绪。");
-    } else if (emotionSignals.length >= 1 && !weakStart) {
+    } else if (emotionTotal >= 1 && !weakStart) {
       dimensions.emotion_event = 75;
       conclusions.emotion_event = "开头有一定冲突信号但情绪强度可加强。";
       issues.push({
@@ -172,12 +205,14 @@ export class StoryEffectivenessAgent extends BaseAgent {
     }
 
     // ---- desire_goal ----
+    const goalBookMatches = countBookSignalMatches(goalSpan, input.structureSignals, "desire_goal");
     const goalSignals = DESIRE_GOAL_SIGNALS.filter((p) => p.test(goalSpan));
-    if (goalSignals.length >= 2) {
+    const goalTotal = goalSignals.length + goalBookMatches;
+    if (goalTotal >= 2) {
       dimensions.desire_goal = 90;
       conclusions.desire_goal = "主角目标明确且可行动。";
       strengths.push("主角目标清晰可追踪。");
-    } else if (goalSignals.length >= 1) {
+    } else if (goalTotal >= 1) {
       dimensions.desire_goal = 75;
       conclusions.desire_goal = "检测到主角目标但表达可更明确。";
       issues.push({
@@ -198,12 +233,14 @@ export class StoryEffectivenessAgent extends BaseAgent {
     }
 
     // ---- obstacle_pressure ----
+    const obstacleBookMatches = countBookSignalMatches(content, input.structureSignals, "obstacle_pressure");
     const obstacleSignals = OBSTACLE_PRESSURE_SIGNALS.filter((p) => p.test(content));
-    if (obstacleSignals.length >= 3) {
+    const obstacleTotal = obstacleSignals.length + obstacleBookMatches;
+    if (obstacleTotal >= 3) {
       dimensions.obstacle_pressure = 90;
       conclusions.obstacle_pressure = "阻碍来源多样，递进压力充足。";
       strengths.push("阻碍压力充足且来源多样。");
-    } else if (obstacleSignals.length >= 1) {
+    } else if (obstacleTotal >= 1) {
       dimensions.obstacle_pressure = 75;
       conclusions.obstacle_pressure = "检测到阻碍但压力和递进可加强。";
       issues.push({
@@ -224,12 +261,14 @@ export class StoryEffectivenessAgent extends BaseAgent {
     }
 
     // ---- solution_method ----
+    const solutionBookMatches = countBookSignalMatches(content, input.structureSignals, "solution_method");
     const solutionSignals = SOLUTION_METHOD_SIGNALS.filter((p) => p.test(content));
-    if (solutionSignals.length >= 2) {
+    const solutionTotal = solutionSignals.length + solutionBookMatches;
+    if (solutionTotal >= 2) {
       dimensions.solution_method = 90;
       conclusions.solution_method = "破局有策略、伏笔或代价支撑。";
       strengths.push("破局方法有依据而非临时开挂。");
-    } else if (solutionSignals.length >= 1) {
+    } else if (solutionTotal >= 1) {
       dimensions.solution_method = 75;
       conclusions.solution_method = "检测到破局方法但策略感可加强。";
       issues.push({
@@ -250,12 +289,14 @@ export class StoryEffectivenessAgent extends BaseAgent {
     }
 
     // ---- climax_payoff ----
+    const climaxBookMatches = countBookSignalMatches(content, input.structureSignals, "climax_payoff");
     const climaxSignals = CLIMAX_PAYOFF_SIGNALS.filter((p) => p.test(content));
-    if (climaxSignals.length >= 3) {
+    const climaxTotal = climaxSignals.length + climaxBookMatches;
+    if (climaxTotal >= 3) {
       dimensions.climax_payoff = 90;
       conclusions.climax_payoff = "本章包含清晰的高潮场景和收益/代价。";
       strengths.push("高潮有转折且有收益或代价交代。");
-    } else if (climaxSignals.length >= 1) {
+    } else if (climaxTotal >= 1) {
       dimensions.climax_payoff = 75;
       conclusions.climax_payoff = "检测到高潮信号但力度可加强。";
       issues.push({
@@ -276,12 +317,14 @@ export class StoryEffectivenessAgent extends BaseAgent {
     }
 
     // ---- ending_pull ----
+    const endingBookMatches = countBookSignalMatches(ending, input.structureSignals, "ending_pull");
     const endingSignals = ENDING_PULL_SIGNALS.filter((p) => p.test(ending));
-    if (endingSignals.length >= 2) {
+    const endingTotal = endingSignals.length + endingBookMatches;
+    if (endingTotal >= 2) {
       dimensions.ending_pull = 90;
       conclusions.ending_pull = "结尾有明确钩子或未解决问题。";
       strengths.push("结尾留下悬念或下一章推进方向。");
-    } else if (endingSignals.length >= 1) {
+    } else if (endingTotal >= 1) {
       dimensions.ending_pull = 75;
       conclusions.ending_pull = "结尾有一定的延伸感但钩子可更强。";
       issues.push({
@@ -327,6 +370,20 @@ export class StoryEffectivenessAgent extends BaseAgent {
       .filter((issue) => issue.suggestion)
       .map((issue) => issue.suggestion!);
 
+    const structureSignalReport = input.structureSignals
+      ? buildStructureSignalReport(content, input.structureSignals, [
+          "opening_hook",
+          "protagonist_goal",
+          "pressure_source",
+          "obstacle_dilemma",
+          "solution_possibility",
+          "active_attempt",
+          "payoff_reward",
+          "ending_pull",
+          "antagonist_pressure",
+        ])
+      : undefined;
+
     return {
       chapter: input.chapter,
       status,
@@ -336,6 +393,7 @@ export class StoryEffectivenessAgent extends BaseAgent {
       strengths: [...new Set(strengths)],
       issues,
       suggestions,
+      structureSignalReport,
     };
   }
 }

@@ -9,6 +9,11 @@ import {
   isApiKeyOptionalForEndpoint,
   LLMConfigSchema,
   readGenreProfile,
+  readStructureSignals,
+  matchStructureSignals,
+  STRUCTURE_SIGNAL_DIMENSIONS,
+  type StructureSignals,
+  type StructureSignalsReadResult,
   renderContinuityMarkdown,
   renderFanqieQualityMarkdown,
   buildNumericExpressionGuidance,
@@ -1210,6 +1215,12 @@ interface PublishReadyResult {
     readonly score: number | null;
     readonly summary: string;
   };
+  readonly structure_signals_source?: string;
+  readonly structure_signals_error?: string;
+  readonly structure_signals_matched?: number;
+  readonly structure_signals_missing?: number;
+  readonly structure_signals_dimensions?: number;
+  readonly structure_signals_dimension_details?: readonly { dimension: string; matched: number; missing: number }[];
 }
 
 interface PublishReadyManualContinuityAcceptance {
@@ -2542,6 +2553,50 @@ async function writePublishReadyReport(bookDir: string, report: PublishReadyResu
   const jsonPath = join(reportDir, `${prefix}.publish-report.json`);
   const markdownPath = join(reportDir, `${prefix}.publish-report.md`);
 
+  // Load book-level structure signals (not genre profile) for structure review
+  const signalsResult = await readStructureSignals(bookDir);
+  let signalSource: string;
+  let signalError: string | undefined;
+  let signalMatchedTotal = 0;
+  let signalMissingTotal = 0;
+  let signalDimensionsCount = 0;
+  const signalDimensionDetails: { dimension: string; matched: number; missing: number }[] = [];
+
+  if (signalsResult.status === "ok") {
+    signalSource = "structure_signals.json";
+    const dims = Object.entries(signalsResult.signals.signals) as [string, string[]][];
+    signalDimensionsCount = dims.filter(([, phrases]) => phrases.length > 0).length;
+
+    // Resolve chapter content to compute actual matched/missing
+    try {
+      const resolved = await resolveContentForTransitionQuality(
+        bookDir,
+        report.chapter_index,
+        report.final_candidate_file || undefined,
+        report.source_file || undefined,
+      );
+      if (resolved) {
+        const matches = matchStructureSignals(resolved.content, signalsResult.signals, STRUCTURE_SIGNAL_DIMENSIONS);
+        signalMatchedTotal = matches.reduce((sum, m) => sum + m.matched.length, 0);
+        signalMissingTotal = matches.reduce((sum, m) => sum + m.missing.length, 0);
+        for (const m of matches) {
+          if (m.matched.length > 0 || m.missing.length > 0) {
+            signalDimensionDetails.push({ dimension: m.dimension, matched: m.matched.length, missing: m.missing.length });
+          }
+        }
+      }
+    } catch {
+      // If content resolution fails, leave totals at 0
+    }
+  } else {
+    signalSource = signalsResult.status;
+    signalError = signalsResult.error;
+  }
+
+  // Extract signals for passing to generate functions
+  const activeSignals: StructureSignals | undefined =
+    signalsResult.status === "ok" ? signalsResult.signals : undefined;
+
   // Merge story-effectiveness summary if not already provided
   let seSummary = report.story_effectiveness ?? await readStoryEffectivenessSummary(bookDir, report.chapter_index);
 
@@ -2555,7 +2610,7 @@ async function writePublishReadyReport(bookDir: string, report: PublishReadyResu
         report.source_file || undefined,
       );
       if (resolved) {
-        seSummary = await generateStoryEffectivenessReport(bookDir, report.chapter_index, resolved.content);
+        seSummary = await generateStoryEffectivenessReport(bookDir, report.chapter_index, resolved.content, activeSignals);
       }
     } catch {
       // If we can't find any chapter content, skip generation
@@ -2587,7 +2642,7 @@ async function writePublishReadyReport(bookDir: string, report: PublishReadyResu
         report.source_file || undefined,
       );
       if (resolved) {
-        ohSummary = await generateOpeningHookReport(bookDir, report.chapter_index, resolved.content);
+        ohSummary = await generateOpeningHookReport(bookDir, report.chapter_index, resolved.content, undefined, activeSignals);
       }
     } catch {
       // If we can't find any chapter content, skip generation
@@ -2656,7 +2711,7 @@ async function writePublishReadyReport(bookDir: string, report: PublishReadyResu
         report.source_file || undefined,
       );
       if (resolved) {
-        ssSummary = await generateSixStepPlotReport(bookDir, report.chapter_index, resolved.content);
+        ssSummary = await generateSixStepPlotReport(bookDir, report.chapter_index, resolved.content, undefined, activeSignals);
       }
     } catch {
       // If we can't find any chapter content, skip generation
@@ -2691,7 +2746,9 @@ async function writePublishReadyReport(bookDir: string, report: PublishReadyResu
     transition_quality: tqSummary,
     six_step_plot: ssSummary,
     publish_status: structureDecision.publishStatus as PublishReadyResult["publish_status"],
-    warnings: structureDecision.warnings,
+    warnings: signalError
+      ? [...(structureDecision.warnings ?? []), `structure_signals: ${signalError}`]
+      : structureDecision.warnings,
     structure_pass_threshold: structurePassThreshold,
     structure_accept_threshold: structureAcceptThreshold,
     final_candidate_file: report.final_candidate_file
@@ -2702,6 +2759,12 @@ async function writePublishReadyReport(bookDir: string, report: PublishReadyResu
       : report.source_file,
     report_json_path: jsonPath,
     report_markdown_path: markdownPath,
+    structure_signals_source: signalSource,
+    structure_signals_error: signalError,
+    structure_signals_matched: signalMatchedTotal,
+    structure_signals_missing: signalMissingTotal,
+    structure_signals_dimensions: signalDimensionsCount,
+    structure_signals_dimension_details: signalDimensionDetails.length ? signalDimensionDetails : undefined,
   };
   await mkdir(reportDir, { recursive: true });
   await writeFile(jsonPath, `${JSON.stringify(finalReport, null, 2)}\n`, "utf-8");
@@ -2744,6 +2807,13 @@ ${report.accepted_reason ? `- accepted_reason: ${report.accepted_reason}\n` : ""
   ${report.transition_quality.summary}` : ""}${report.six_step_plot ? `
 - six_step_plot: ${report.six_step_plot.status} (${report.six_step_plot.score ?? "n/a"})
   ${report.six_step_plot.summary}` : ""}
+- structure_signals_source: ${report.structure_signals_source ?? "none"}${report.structure_signals_error ? `
+- structure_signals_error: ${report.structure_signals_error}` : ""}${report.structure_signals_dimensions != null ? `
+- structure_signals_dimensions: ${report.structure_signals_dimensions}
+- structure_signals_matched: ${report.structure_signals_matched ?? 0}
+- structure_signals_missing: ${report.structure_signals_missing ?? 0}${report.structure_signals_dimension_details ? `
+- structure_signals_dimension_details:
+${report.structure_signals_dimension_details.map((d) => `  - ${d.dimension}: matched=${d.matched} missing=${d.missing}`).join("\n")}` : ""}` : ""}
 
 ## Source Chain
 
@@ -3312,10 +3382,10 @@ ${formatPlotReportForPrompt(sixStepReport)}
 4. 第一屏必须同时有“目标 + 阻碍 + 情绪压力”。
 
 【如果报告提到 story_effectiveness / 主角目标 / 结尾钩子】
-1. 必须在前 500 字明确主角本章目标，目标要能被读者复述，例如“用001员工卡把晶核兑换成积分和武器，保住防空洞的人”。
-2. 必须让目标遇到具体阻碍，例如幸存者不信任、晶核不足、迷彩服逼近、003员工卡威胁。
+1. 必须在前 500 字明确主角本章目标，目标要能被读者复述，例如”用[本书核心道具]换取[资源]，保住[重要据点]”。
+2. 必须让目标遇到具体阻碍，例如盟友不信任、资源不足、敌对势力逼近、权限威胁。
 3. 结尾必须留下一个未解决问题或下一章选择，不能只列状态数值。
-4. 章末钩子要和本章目标直接相连，例如更高保护费、003卡掠夺权限、是否接受支线任务、门禁即将失守。
+4. 章末钩子要和本章目标直接相连，例如更高代价、权限掠夺、是否接受支线任务、防御即将失守。
 
 【硬性要求】
 1. 保留原剧情主线、人物关系、资源数值、物品、地点和章尾方向。
@@ -4665,11 +4735,13 @@ export async function generateStoryEffectivenessReport(
   bookDir: string,
   chapterIndex: number,
   chapterContent: string,
+  structureSignals?: StructureSignals | null,
 ): Promise<{ status: string; score: number | null; summary: string } | undefined> {
   const reviewer = new StoryEffectivenessAgent(DUMMY_CTX);
   const report = await reviewer.review({
     chapter: chapterIndex,
     chapterContent,
+    structureSignals,
   });
   const prefix = chapterNumberPrefix(chapterIndex);
   const reportDir = join(bookDir, "reviews", "story-effectiveness");
@@ -4711,12 +4783,14 @@ export async function generateOpeningHookReport(
   chapterIndex: number,
   chapterContent: string,
   chapterTitle?: string,
+  structureSignals?: StructureSignals | null,
 ): Promise<{ status: string; score: number | null; summary: string } | undefined> {
   const reviewer = new OpeningHookReviewerAgent(DUMMY_CTX);
   const report = await reviewer.review({
     chapterContent,
     chapterIndex,
     chapterTitle,
+    structureSignals,
   });
   const prefix = chapterNumberPrefix(chapterIndex);
   const reportDir = join(bookDir, "reviews", "opening-hook");
@@ -4811,6 +4885,7 @@ export async function generateSixStepPlotReport(
   chapterIndex: number,
   chapterContent: string,
   chapterTitle?: string,
+  structureSignals?: StructureSignals | null,
 ): Promise<{ status: string; score: number | null; summary: string } | undefined> {
   // Optionally read chapterIntent for intentFidelity; failure must not block generation
   const prefix = String(chapterIndex).padStart(4, "0");
@@ -4828,6 +4903,7 @@ export async function generateSixStepPlotReport(
     chapterIndex,
     chapterTitle,
     chapterIntent,
+    structureSignals,
   });
   const reportDir = join(bookDir, "reviews", "six-step-plot");
   await writeSixStepPlotReportFiles({
