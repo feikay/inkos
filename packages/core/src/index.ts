@@ -437,6 +437,9 @@ export {
   parseArchitectStructureSignals,
   matchStructureSignals,
   buildStructureSignalReport,
+  inspectStructureSignals,
+  validateStructureSignalsFull,
+  appendStructureSignal,
   STRUCTURE_SIGNAL_DIMENSIONS,
   StructureSignalsSchema,
   type StructureSignals,
@@ -444,6 +447,9 @@ export {
   type StructureSignalMatch,
   type StructureSignalReport,
   type StructureSignalsReadResult,
+  type InspectStructureSignalsResult,
+  type ValidateStructureSignalsResult,
+  type AppendStructureSignalResult,
 } from "./utils/structure-signals.js";
 
 // Pipeline

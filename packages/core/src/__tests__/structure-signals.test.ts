@@ -12,6 +12,9 @@ import {
   parseArchitectStructureSignals,
   matchStructureSignals,
   buildStructureSignalReport,
+  inspectStructureSignals,
+  validateStructureSignalsFull,
+  appendStructureSignal,
   STRUCTURE_SIGNAL_DIMENSIONS,
   type StructureSignals,
 } from "../utils/structure-signals.js";
@@ -426,5 +429,252 @@ describe("Reviewers do not contain hardcoded book-specific words", () => {
     expect(src).not.toMatch(/积分/);
     expect(src).not.toMatch(/门禁/);
     expect(src).not.toMatch(/员工卡/);
+  });
+});
+
+// ---- inspectStructureSignals ----
+
+describe("inspectStructureSignals", () => {
+  it("reports dimension counts and empty dimensions", () => {
+    const signals = createEmptyStructureSignals("test-book");
+    signals.signals.opening_hook = ["冲突", "恐惧"];
+    signals.signals.pressure_source = ["追兵"];
+
+    const result = inspectStructureSignals(signals);
+
+    expect(result.bookId).toBe("test-book");
+    expect(result.totalPhrases).toBe(3);
+    expect(result.totalUnique).toBe(3);
+    expect(result.dimensions).toHaveLength(12);
+
+    const openingHook = result.dimensions.find((d) => d.dimension === "opening_hook");
+    expect(openingHook!.phraseCount).toBe(2);
+    expect(openingHook!.phrases).toEqual(["冲突", "恐惧"]);
+
+    // Unset dimensions should be empty
+    expect(result.emptyDimensions).toContain("protagonist_goal");
+  });
+
+  it("detects duplicate phrases across dimensions", () => {
+    const signals = makeValidSignals();
+    signals.signals.opening_hook = ["冲突"];
+    signals.signals.pressure_source = ["冲突"]; // same phrase in different dimension
+
+    const result = inspectStructureSignals(signals);
+
+    expect(result.duplicates).toHaveLength(1);
+    expect(result.duplicates[0]!.phrase).toBe("冲突");
+    expect(result.duplicates[0]!.dimensions).toContain("opening_hook");
+    expect(result.duplicates[0]!.dimensions).toContain("pressure_source");
+  });
+
+  it("detects suspiciously short phrases", () => {
+    const signals = makeValidSignals();
+    signals.signals.opening_hook = ["血"]; // single-char Chinese
+
+    const result = inspectStructureSignals(signals);
+
+    expect(result.suspiciousPhrases).toHaveLength(1);
+    expect(result.suspiciousPhrases[0]!.phrase).toBe("血");
+    expect(result.suspiciousPhrases[0]!.reason).toContain("单字");
+  });
+
+  it("counts unique phrases correctly with duplicates", () => {
+    const signals = createEmptyStructureSignals("test-book");
+    signals.signals.opening_hook = ["冲突"];
+    signals.signals.pressure_source = ["冲突"];
+
+    const result = inspectStructureSignals(signals);
+
+    expect(result.totalPhrases).toBe(2);
+    expect(result.totalUnique).toBe(1);
+  });
+});
+
+// ---- validateStructureSignalsFull ----
+
+describe("validateStructureSignalsFull", () => {
+  it("returns PASS for a clean signals file", () => {
+    const signals = makeValidSignals();
+    signals.signals.opening_hook = ["冲突", "恐惧"];
+    signals.signals.protagonist_goal = ["目标"];
+    signals.signals.pressure_source = ["追兵"];
+
+    const result = validateStructureSignalsFull(signals);
+
+    expect(result.status).toBe("PASS");
+    expect(result.issues).toHaveLength(0);
+  });
+
+  it("returns FAIL when dimensions are missing", () => {
+    const signals = makeValidSignals();
+    // Manually remove a dimension key to simulate schema issue
+    delete (signals.signals as Record<string, unknown>).opening_hook;
+
+    const result = validateStructureSignalsFull(signals);
+
+    expect(result.status).toBe("FAIL");
+    expect(result.issues.some((i) => i.message.includes("opening_hook"))).toBe(true);
+  });
+
+  it("returns WARN for duplicate phrases within a dimension", () => {
+    const signals = makeValidSignals();
+    signals.signals.opening_hook = ["冲突", "冲突"];
+
+    const result = validateStructureSignalsFull(signals);
+
+    expect(result.status).toBe("WARN");
+    expect(result.issues.some((i) => i.message.includes("重复"))).toBe(true);
+  });
+
+  it("returns WARN for overly short phrases", () => {
+    const signals = makeValidSignals();
+    signals.signals.opening_hook = ["a"];
+
+    const result = validateStructureSignalsFull(signals);
+
+    expect(result.status).toBe("WARN");
+    expect(result.issues.some((i) => i.message.includes("过短"))).toBe(true);
+  });
+
+  it("returns FAIL for empty phrases", () => {
+    const signals = makeValidSignals();
+    signals.signals.opening_hook = [""];
+
+    const result = validateStructureSignalsFull(signals);
+
+    expect(result.status).toBe("FAIL");
+    expect(result.issues.some((i) => i.message.includes("空短语"))).toBe(true);
+  });
+});
+
+// ---- appendStructureSignal ----
+
+describe("appendStructureSignal", () => {
+  it("appends a phrase to a legal dimension", () => {
+    const signals = makeValidSignals();
+    const { updated, alreadyExists } = appendStructureSignal(signals, "opening_hook", "新冲突");
+
+    expect(alreadyExists).toBe(false);
+    expect(updated.signals.opening_hook).toContain("新冲突");
+    // updatedAt is refreshed on append
+    expect(typeof updated.updatedAt).toBe("string");
+    const originalLength = signals.signals.opening_hook!.length;
+    expect(updated.signals.opening_hook).toHaveLength(originalLength + 1);
+  });
+
+  it("throws on illegal dimension", () => {
+    const signals = makeValidSignals();
+    expect(() => appendStructureSignal(signals, "nonexistent_dim", "test")).toThrow("非法维度");
+  });
+
+  it("returns alreadyExists=true and does not duplicate", () => {
+    const signals = makeValidSignals();
+    signals.signals.opening_hook = ["冲突"];
+
+    const { updated, alreadyExists } = appendStructureSignal(signals, "opening_hook", "冲突");
+
+    expect(alreadyExists).toBe(true);
+    expect(updated.signals.opening_hook).toEqual(["冲突"]);
+  });
+
+  it("trims whitespace from phrase", () => {
+    const signals = makeValidSignals();
+    const { updated, alreadyExists } = appendStructureSignal(signals, "opening_hook", "  暴风  ");
+
+    expect(alreadyExists).toBe(false);
+    expect(updated.signals.opening_hook).toContain("暴风");
+    expect(updated.signals.opening_hook).not.toContain("  暴风  ");
+  });
+
+  it("throws on empty phrase after trim", () => {
+    const signals = makeValidSignals();
+    expect(() => appendStructureSignal(signals, "opening_hook", "   ")).toThrow("不能为空");
+  });
+
+  it("maintains other dimensions unchanged", () => {
+    const signals = makeValidSignals();
+    signals.signals.pressure_source = ["追兵"];
+
+    const { updated } = appendStructureSignal(signals, "opening_hook", "新冲突");
+
+    expect(updated.signals.pressure_source).toEqual(["追兵"]);
+  });
+});
+
+// ---- Maintenance commands: no LLM, no genre profile ----
+
+describe("Maintenance functions are pure (no LLM, no genre profile)", () => {
+  it("inspectStructureSignals does not access filesystem or external resources", () => {
+    const signals = makeValidSignals();
+    // Pure function — should complete without any I/O
+    const result = inspectStructureSignals(signals);
+    expect(result.bookId).toBe("test-book");
+  });
+
+  it("validateStructureSignalsFull does not access filesystem or external resources", () => {
+    const signals = makeValidSignals();
+    const result = validateStructureSignalsFull(signals);
+    expect(result.status).toBeDefined();
+  });
+
+  it("appendStructureSignal does not access filesystem or external resources", () => {
+    const signals = makeValidSignals();
+    const { updated, alreadyExists } = appendStructureSignal(signals, "opening_hook", "test");
+    expect(alreadyExists).toBe(false);
+    expect(updated.signals.opening_hook).toContain("test");
+  });
+});
+
+// ---- Error diagnostics for missing/corrupt signals ----
+
+describe("Error diagnostics for missing/corrupt signals", () => {
+  it("readStructureSignals returns 'missing' status for nonexistent file", async () => {
+    const tmpDir = join(tmpdir(), `inkos-test-${randomUUID()}`);
+    await mkdir(tmpDir, { recursive: true });
+
+    try {
+      const result = await readStructureSignals(tmpDir);
+      expect(result.status).toBe("missing");
+      if (result.status !== "missing") throw new Error("expected missing");
+      expect(result.error).toContain("not found");
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("readStructureSignals returns 'corrupt' status for invalid JSON", async () => {
+    const tmpDir = join(tmpdir(), `inkos-test-${randomUUID()}`);
+    const storyDir = join(tmpDir, "story");
+    await mkdir(storyDir, { recursive: true });
+    await writeFile(join(storyDir, "structure_signals.json"), "not valid json", "utf-8");
+
+    try {
+      const result = await readStructureSignals(tmpDir);
+      expect(result.status).toBe("corrupt");
+      if (result.status !== "corrupt") throw new Error("expected corrupt");
+      expect(result.error).toContain("Invalid JSON");
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("readStructureSignals returns 'corrupt' for schema mismatch", async () => {
+    const tmpDir = join(tmpdir(), `inkos-test-${randomUUID()}`);
+    const storyDir = join(tmpDir, "story");
+    await mkdir(storyDir, { recursive: true });
+    await writeFile(
+      join(storyDir, "structure_signals.json"),
+      JSON.stringify({ wrong: "schema" }),
+      "utf-8",
+    );
+
+    try {
+      const result = await readStructureSignals(tmpDir);
+      expect(result.status).toBe("corrupt");
+      if (result.status !== "corrupt") throw new Error("expected corrupt");
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
   });
 });

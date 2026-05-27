@@ -203,3 +203,173 @@ export function buildStructureSignalReport(
     matches: matchStructureSignals(content, signals, dimensions),
   };
 }
+
+// ---- Maintenance utilities (inspect / validate / append) ----
+
+export interface InspectDimensionInfo {
+  readonly dimension: StructureSignalDimension;
+  readonly phraseCount: number;
+  readonly phrases: string[];
+}
+
+export interface InspectStructureSignalsResult {
+  readonly bookId: string;
+  readonly updatedAt: string;
+  readonly dimensions: InspectDimensionInfo[];
+  readonly emptyDimensions: StructureSignalDimension[];
+  /** Duplicate phrases with which dimensions they appear in */
+  readonly duplicates: { phrase: string; dimensions: StructureSignalDimension[] }[];
+  /** Phrases that are suspiciously short (1 char) or overly generic */
+  readonly suspiciousPhrases: { phrase: string; dimension: StructureSignalDimension; reason: string }[];
+  readonly totalPhrases: number;
+  readonly totalUnique: number;
+}
+
+export function inspectStructureSignals(signals: StructureSignals): InspectStructureSignalsResult {
+  const dimensions: InspectDimensionInfo[] = [];
+  const emptyDimensions: StructureSignalDimension[] = [];
+  const phraseToDimensions = new Map<string, StructureSignalDimension[]>();
+  const suspiciousPhrases: InspectStructureSignalsResult["suspiciousPhrases"] = [];
+
+  for (const dim of STRUCTURE_SIGNAL_DIMENSIONS) {
+    const phrases = signals.signals[dim] ?? [];
+    dimensions.push({ dimension: dim, phraseCount: phrases.length, phrases });
+
+    if (phrases.length === 0) {
+      emptyDimensions.push(dim);
+    }
+
+    for (const phrase of phrases) {
+      // Track duplicates across dimensions
+      const existing = phraseToDimensions.get(phrase);
+      if (existing) {
+        existing.push(dim);
+      } else {
+        phraseToDimensions.set(phrase, [dim]);
+      }
+
+      // Check for suspiciously short phrases
+      if (phrase.length <= 1) {
+        suspiciousPhrases.push({ phrase, dimension: dim, reason: "单字短语，匹配过于泛化" });
+      }
+    }
+  }
+
+  const duplicates: InspectStructureSignalsResult["duplicates"] = [];
+  for (const [phrase, dims] of phraseToDimensions) {
+    if (dims.length > 1) {
+      duplicates.push({ phrase, dimensions: dims });
+    }
+  }
+
+  let totalPhrases = 0;
+  for (const d of dimensions) {
+    totalPhrases += d.phraseCount;
+  }
+
+  return {
+    bookId: signals.bookId,
+    updatedAt: signals.updatedAt,
+    dimensions,
+    emptyDimensions,
+    duplicates,
+    suspiciousPhrases,
+    totalPhrases,
+    totalUnique: phraseToDimensions.size,
+  };
+}
+
+export interface ValidateIssue {
+  readonly severity: "ERROR" | "WARN";
+  readonly message: string;
+}
+
+export interface ValidateStructureSignalsResult {
+  readonly status: "PASS" | "WARN" | "FAIL";
+  readonly issues: ValidateIssue[];
+}
+
+export function validateStructureSignalsFull(signals: StructureSignals): ValidateStructureSignalsResult {
+  const issues: ValidateIssue[] = [];
+
+  // Check all 12 dimensions present
+  for (const dim of STRUCTURE_SIGNAL_DIMENSIONS) {
+    if (!(dim in signals.signals)) {
+      issues.push({ severity: "ERROR", message: `缺少维度: ${dim}` });
+    }
+  }
+
+  // Check for duplicate phrases and empty strings per dimension
+  for (const dim of STRUCTURE_SIGNAL_DIMENSIONS) {
+    const phrases = signals.signals[dim];
+    if (!phrases) continue;
+
+    const seen = new Set<string>();
+    for (const phrase of phrases) {
+      if (phrase.trim().length === 0) {
+        issues.push({ severity: "ERROR", message: `维度 ${dim} 包含空短语` });
+      } else if (seen.has(phrase)) {
+        issues.push({ severity: "WARN", message: `维度 ${dim} 包含重复短语: "${phrase}"` });
+      } else {
+        seen.add(phrase);
+      }
+
+      // Overly short
+      if (phrase.trim().length === 1) {
+        issues.push({ severity: "WARN", message: `维度 ${dim} 短语过短: "${phrase}"` });
+      }
+    }
+  }
+
+  const errorCount = issues.filter((i) => i.severity === "ERROR").length;
+  const warnCount = issues.filter((i) => i.severity === "WARN").length;
+
+  let status: "PASS" | "WARN" | "FAIL";
+  if (errorCount > 0) {
+    status = "FAIL";
+  } else if (warnCount > 0) {
+    status = "WARN";
+  } else {
+    status = "PASS";
+  }
+
+  return { status, issues };
+}
+
+export interface AppendStructureSignalResult {
+  readonly updated: StructureSignals;
+  readonly alreadyExists: boolean;
+}
+
+export function appendStructureSignal(
+  signals: StructureSignals,
+  dimension: string,
+  phrase: string,
+): AppendStructureSignalResult {
+  const trimmed = phrase.trim();
+  if (trimmed.length === 0) {
+    throw new Error("phrase 不能为空");
+  }
+
+  if (!(STRUCTURE_SIGNAL_DIMENSIONS as readonly string[]).includes(dimension)) {
+    throw new Error(`非法维度: ${dimension}。合法维度: ${STRUCTURE_SIGNAL_DIMENSIONS.join(", ")}`);
+  }
+
+  const dim = dimension as StructureSignalDimension;
+  const currentPhrases = signals.signals[dim] ?? [];
+
+  if (currentPhrases.includes(trimmed)) {
+    return { updated: signals, alreadyExists: true };
+  }
+
+  const updated = {
+    ...signals,
+    updatedAt: new Date().toISOString(),
+    signals: {
+      ...signals.signals,
+      [dim]: [...currentPhrases, trimmed],
+    },
+  };
+
+  return { updated, alreadyExists: false };
+}

@@ -10,10 +10,15 @@ import {
   LLMConfigSchema,
   readGenreProfile,
   readStructureSignals,
+  writeStructureSignals,
   matchStructureSignals,
   STRUCTURE_SIGNAL_DIMENSIONS,
+  inspectStructureSignals,
+  validateStructureSignalsFull,
+  appendStructureSignal,
   type StructureSignals,
   type StructureSignalsReadResult,
+  type InspectStructureSignalsResult,
   renderContinuityMarkdown,
   renderFanqieQualityMarkdown,
   buildNumericExpressionGuidance,
@@ -5993,6 +5998,190 @@ reviewCommand
         log(JSON.stringify({ error: String(e) }));
       } else {
         logError(`Failed to reject: ${e}`);
+      }
+      process.exit(1);
+    }
+  });
+
+// ---- structure-signals maintenance commands ----
+
+const structureSignalsCmd = reviewCommand
+  .command("structure-signals")
+  .description("Manage book-level structure signals (no LLM, no genre profile)");
+
+structureSignalsCmd
+  .command("inspect")
+  .description("Display structure signal dimensions, counts, and diagnostics")
+  .requiredOption("--book <book>", "Book ID")
+  .option("--json", "Output JSON")
+  .action(async (opts) => {
+    try {
+      const root = findProjectRoot();
+      const book = await resolveContinuityBook(root, opts.book);
+      const signalsResult = await readStructureSignals(book.dir);
+
+      if (signalsResult.status !== "ok") {
+        const msg = `structure_signals.json ${signalsResult.status === "missing" ? "缺失" : "损坏"}: ${signalsResult.error}`;
+        if (opts.json) {
+          log(JSON.stringify({ error: msg, status: signalsResult.status }));
+        } else {
+          logError(msg);
+          log("请重新创建书籍骨架或手动补齐 story/structure_signals.json");
+        }
+        process.exit(1);
+      }
+
+      const info = inspectStructureSignals(signalsResult.signals);
+
+      if (opts.json) {
+        log(JSON.stringify(info, null, 2));
+        return;
+      }
+
+      log(`book: ${info.bookId}`);
+      log(`updated: ${info.updatedAt}`);
+      log(`dimensions: ${info.dimensions.length}`);
+      log(`total phrases: ${info.totalPhrases} (unique: ${info.totalUnique})`);
+      log("");
+
+      for (const d of info.dimensions) {
+        const marker = d.phraseCount === 0 ? " [空]" : "";
+        log(`  ${d.dimension}: ${d.phraseCount} phrases${marker}`);
+        if (d.phrases.length > 0) {
+          for (const p of d.phrases) {
+            log(`    - ${p}`);
+          }
+        }
+      }
+
+      if (info.emptyDimensions.length > 0) {
+        log(`\n空维度 (${info.emptyDimensions.length}):`);
+        for (const dim of info.emptyDimensions) {
+          log(`  - ${dim}`);
+        }
+      }
+
+      if (info.duplicates.length > 0) {
+        log(`\n跨维度重复 (${info.duplicates.length}):`);
+        for (const dup of info.duplicates) {
+          log(`  - "${dup.phrase}" 出现在: ${dup.dimensions.join(", ")}`);
+        }
+      }
+
+      if (info.suspiciousPhrases.length > 0) {
+        log(`\n疑似过泛化短语 (${info.suspiciousPhrases.length}):`);
+        for (const sus of info.suspiciousPhrases) {
+          log(`  - [${sus.dimension}] "${sus.phrase}" — ${sus.reason}`);
+        }
+      }
+    } catch (e) {
+      if (opts.json) {
+        log(JSON.stringify({ error: String(e) }));
+      } else {
+        logError(`inspect 失败: ${e}`);
+      }
+      process.exit(1);
+    }
+  });
+
+structureSignalsCmd
+  .command("validate")
+  .description("Validate structure_signals.json schema and content quality")
+  .requiredOption("--book <book>", "Book ID")
+  .option("--json", "Output JSON")
+  .action(async (opts) => {
+    try {
+      const root = findProjectRoot();
+      const book = await resolveContinuityBook(root, opts.book);
+      const signalsResult = await readStructureSignals(book.dir);
+
+      if (signalsResult.status !== "ok") {
+        const msg = `structure_signals.json ${signalsResult.status === "missing" ? "缺失" : "损坏"}: ${signalsResult.error}`;
+        if (opts.json) {
+          log(JSON.stringify({ error: msg, status: signalsResult.status }));
+        } else {
+          logError(msg);
+          log("请重新创建书籍骨架或手动补齐 story/structure_signals.json");
+        }
+        process.exit(1);
+      }
+
+      const result = validateStructureSignalsFull(signalsResult.signals);
+
+      if (opts.json) {
+        log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      log(`book: ${signalsResult.signals.bookId}`);
+      log(`status: ${result.status}`);
+      log(`issues: ${result.issues.length}`);
+      if (result.issues.length > 0) {
+        for (const issue of result.issues) {
+          log(`  [${issue.severity}] ${issue.message}`);
+        }
+      }
+    } catch (e) {
+      if (opts.json) {
+        log(JSON.stringify({ error: String(e) }));
+      } else {
+        logError(`validate 失败: ${e}`);
+      }
+      process.exit(1);
+    }
+  });
+
+structureSignalsCmd
+  .command("append")
+  .description("Append a phrase to a structure signal dimension")
+  .requiredOption("--book <book>", "Book ID")
+  .requiredOption("--dimension <dim>", "Target dimension (e.g. opening_hook)")
+  .requiredOption("--phrase <phrase>", "Phrase to append")
+  .option("--json", "Output JSON")
+  .action(async (opts) => {
+    try {
+      const root = findProjectRoot();
+      const book = await resolveContinuityBook(root, opts.book);
+      const signalsResult = await readStructureSignals(book.dir);
+
+      if (signalsResult.status !== "ok") {
+        const msg = `structure_signals.json ${signalsResult.status === "missing" ? "缺失" : "损坏"}: ${signalsResult.error}`;
+        if (opts.json) {
+          log(JSON.stringify({ error: msg, status: signalsResult.status }));
+        } else {
+          logError(msg);
+          log("请重新创建书籍骨架或手动补齐 story/structure_signals.json");
+        }
+        process.exit(1);
+      }
+
+      const { updated, alreadyExists } = appendStructureSignal(
+        signalsResult.signals,
+        opts.dimension,
+        opts.phrase,
+      );
+
+      if (alreadyExists) {
+        if (opts.json) {
+          log(JSON.stringify({ status: "already_exists", dimension: opts.dimension, phrase: opts.phrase }));
+        } else {
+          log(`already_exists: "${opts.phrase}" 已存在于维度 ${opts.dimension} 中，未重复写入`);
+        }
+        return;
+      }
+
+      await writeStructureSignals(book.dir, updated);
+
+      if (opts.json) {
+        log(JSON.stringify({ status: "appended", dimension: opts.dimension, phrase: opts.phrase }));
+      } else {
+        log(`已追加 "${opts.phrase}" → ${opts.dimension}`);
+      }
+    } catch (e) {
+      if (opts.json) {
+        log(JSON.stringify({ error: String(e) }));
+      } else {
+        logError(`append 失败: ${e}`);
       }
       process.exit(1);
     }
