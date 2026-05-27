@@ -102,23 +102,45 @@ export async function writeStructureSignals(
   await writeFile(filePath, JSON.stringify(updated, null, 2), "utf-8");
 }
 
+export type ParseArchitectStructureSignalsResult =
+  | { status: "ok"; signals: StructureSignals }
+  | { status: "parse_error"; error: string; signals: StructureSignals };
+
+export const MIN_PHRASES_PER_DIMENSION = 3;
+export const MIN_TOTAL_PHRASES = 12;
+
 /**
  * Parse structure_signals section from architect LLM output into a StructureSignals object.
  * The LLM returns JSON wrapped in a markdown code block.
+ * Returns a discriminated union: { status: "ok", signals } on success,
+ * or { status: "parse_error", error, signals } on parse failure (with an empty signals fallback).
  */
 export function parseArchitectStructureSignals(
   sectionContent: string,
   bookId: string,
-): StructureSignals {
+): ParseArchitectStructureSignalsResult {
   const jsonMatch = sectionContent.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
   const raw = jsonMatch ? jsonMatch[1]!.trim() : sectionContent.trim();
+
+  // Empty section content: valid edge case (architect produced no structure_signals section).
+  // Return an explicit parse_error so callers can distinguish "no output" from "good output".
+  if (raw.length === 0) {
+    return {
+      status: "parse_error",
+      error: "structure_signals section is empty — architect produced no output",
+      signals: createEmptyStructureSignals(bookId),
+    };
+  }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
-  } catch {
-    // If LLM didn't return valid JSON, create empty signals
-    return createEmptyStructureSignals(bookId);
+  } catch (err: unknown) {
+    return {
+      status: "parse_error",
+      error: `Failed to parse structure_signals JSON: ${(err as Error).message}`,
+      signals: createEmptyStructureSignals(bookId),
+    };
   }
 
   if (
@@ -127,13 +149,18 @@ export function parseArchitectStructureSignals(
     !("signals" in parsed) ||
     typeof (parsed as Record<string, unknown>).signals !== "object"
   ) {
-    return createEmptyStructureSignals(bookId);
+    return {
+      status: "parse_error",
+      error: "structure_signals JSON missing 'signals' object",
+      signals: createEmptyStructureSignals(bookId),
+    };
   }
 
   const obj = parsed as Record<string, unknown>;
   const signals = obj.signals as Record<string, unknown>;
 
   const result = createEmptyStructureSignals(bookId);
+  let extractedCount = 0;
 
   for (const dim of STRUCTURE_SIGNAL_DIMENSIONS) {
     const val = signals[dim];
@@ -141,10 +168,19 @@ export function parseArchitectStructureSignals(
       result.signals[dim] = val
         .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
         .map((v) => v.trim());
+      extractedCount += result.signals[dim].length;
     }
   }
 
-  return result;
+  if (extractedCount === 0) {
+    return {
+      status: "parse_error",
+      error: "structure_signals JSON contained no valid signal phrases across all 12 dimensions",
+      signals: result,
+    };
+  }
+
+  return { status: "ok", signals: result };
 }
 
 /**
@@ -291,23 +327,43 @@ export interface ValidateStructureSignalsResult {
 
 export function validateStructureSignalsFull(signals: StructureSignals): ValidateStructureSignalsResult {
   const issues: ValidateIssue[] = [];
+  let totalPhrases = 0;
 
-  // Check all 12 dimensions present
+  // Check all 12 dimensions present and non-empty
   for (const dim of STRUCTURE_SIGNAL_DIMENSIONS) {
     if (!(dim in signals.signals)) {
       issues.push({ severity: "ERROR", message: `缺少维度: ${dim}` });
+      continue;
     }
+    const phrases = signals.signals[dim];
+    if (!phrases || phrases.length === 0) {
+      issues.push({ severity: "ERROR", message: `维度 ${dim} 为空（至少需要 ${MIN_PHRASES_PER_DIMENSION} 个短语）` });
+    } else if (phrases.length < MIN_PHRASES_PER_DIMENSION) {
+      issues.push({ severity: "WARN", message: `维度 ${dim} 仅有 ${phrases.length} 个短语（建议至少 ${MIN_PHRASES_PER_DIMENSION} 个）` });
+    }
+  }
+
+  // Check total phrase count
+  for (const dim of STRUCTURE_SIGNAL_DIMENSIONS) {
+    const phrases = signals.signals[dim];
+    if (phrases) totalPhrases += phrases.length;
+  }
+
+  if (totalPhrases === 0) {
+    issues.push({ severity: "ERROR", message: "所有维度均为空，总短语数为 0——structure_signals.json 未正确生成" });
+  } else if (totalPhrases < MIN_TOTAL_PHRASES) {
+    issues.push({ severity: "WARN", message: `总短语数仅 ${totalPhrases}（建议至少 ${MIN_TOTAL_PHRASES}）` });
   }
 
   // Check for duplicate phrases and empty strings per dimension
   for (const dim of STRUCTURE_SIGNAL_DIMENSIONS) {
     const phrases = signals.signals[dim];
-    if (!phrases) continue;
+    if (!phrases || phrases.length === 0) continue;
 
     const seen = new Set<string>();
     for (const phrase of phrases) {
       if (phrase.trim().length === 0) {
-        issues.push({ severity: "ERROR", message: `维度 ${dim} 包含空短语` });
+        issues.push({ severity: "ERROR", message: `维度 ${dim} 包含空字符串短语` });
       } else if (seen.has(phrase)) {
         issues.push({ severity: "WARN", message: `维度 ${dim} 包含重复短语: "${phrase}"` });
       } else {
@@ -316,7 +372,7 @@ export function validateStructureSignalsFull(signals: StructureSignals): Validat
 
       // Overly short
       if (phrase.trim().length === 1) {
-        issues.push({ severity: "WARN", message: `维度 ${dim} 短语过短: "${phrase}"` });
+        issues.push({ severity: "WARN", message: `维度 ${dim} 短语过短（1字）: "${phrase}"` });
       }
     }
   }

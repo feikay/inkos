@@ -20,7 +20,7 @@ import {
   buildSubplotBoardContent,
   type FoundationDocumentMeta,
 } from "./foundation-documents.js";
-import { parseArchitectStructureSignals, writeStructureSignals } from "../utils/structure-signals.js";
+import { parseArchitectStructureSignals, writeStructureSignals, validateStructureSignalsFull } from "../utils/structure-signals.js";
 
 export interface ArchitectOutput {
   readonly storyBible: string;
@@ -817,14 +817,45 @@ ${finalRequirementsPrompt}`;
     );
 
     // Write structure_signals.json from architect output
-    if (output.structureSignals) {
-      const signals = parseArchitectStructureSignals(output.structureSignals, basename(bookDir));
-      await writeStructureSignals(bookDir, signals);
-    } else {
-      // Book created without structure signals — still write an empty file so the absence is explicit
-      const empty = parseArchitectStructureSignals("", basename(bookDir));
-      await writeStructureSignals(bookDir, empty);
+    if (!output.structureSignals) {
+      throw new Error(
+        "[architect] structure_signals 生成失败：LLM 输出中缺少 structure_signals section。" +
+        "请检查题材 profile 指导是否已更新，或重新建书以重新生成 structure_signals.json。" +
+        "不要手工编辑 structure_signals.json 来伪造通过。",
+      );
     }
+
+    const parseResult = parseArchitectStructureSignals(output.structureSignals, basename(bookDir));
+    if (parseResult.status === "parse_error") {
+      throw new Error(
+        `[architect] structure_signals 解析失败：${parseResult.error}。` +
+        "可能原因：architect LLM 输出的 structure_signals JSON 格式不正确。" +
+        "请重新建书以重新生成 structure_signals.json。不要手工编辑来伪造通过。",
+      );
+    }
+
+    const validation = validateStructureSignalsFull(parseResult.signals);
+    if (validation.status === "FAIL") {
+      const errors = validation.issues
+        .filter((i) => i.severity === "ERROR")
+        .map((i) => i.message)
+        .join("; ");
+      throw new Error(
+        `[architect] structure_signals 校验失败：${errors}。` +
+        "可能原因：architect 生成的信号不满足最低质量要求。" +
+        "请重新建书以重新生成 structure_signals.json。不要手工编辑来伪造通过。",
+      );
+    }
+
+    if (validation.status === "WARN") {
+      const warnings = validation.issues
+        .filter((i) => i.severity === "WARN")
+        .map((i) => i.message)
+        .join("; ");
+      console.warn(`[architect] structure_signals validation warnings: ${warnings}`);
+    }
+
+    await writeStructureSignals(bookDir, parseResult.signals);
 
     const templateFiles = this.buildWebnovelTemplateFiles(webnovelTemplate);
     if (templateFiles) {

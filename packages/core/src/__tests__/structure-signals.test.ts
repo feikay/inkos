@@ -48,17 +48,17 @@ function makeValidSignals(bookId = "test-book"): StructureSignals {
     updatedAt: new Date().toISOString(),
     signals: {
       opening_hook: ["冲突", "恐惧", "威胁"],
-      protagonist_goal: ["目标明确", "一定要"],
-      pressure_source: ["追兵", "倒计时"],
-      obstacle_dilemma: ["死局", "没选择"],
-      solution_possibility: ["线索", "破绽"],
-      active_attempt: ["选择", "冲出去"],
-      payoff_reward: ["获得", "解锁"],
-      ending_pull: ["未解决", "新危机"],
-      antagonist_pressure: ["反派逼近", "围堵"],
-      resource_reward: ["兑换", "净赚"],
-      world_rule: ["规则限制", "天道"],
-      forbidden_false_positive: ["普通", "日常"],
+      protagonist_goal: ["目标明确", "一定要", "必须完成"],
+      pressure_source: ["追兵", "倒计时", "限期将至"],
+      obstacle_dilemma: ["死局", "没选择", "进退两难"],
+      solution_possibility: ["线索", "破绽", "一线生机"],
+      active_attempt: ["选择", "冲出去", "奋力一搏"],
+      payoff_reward: ["获得", "解锁", "突破瓶颈"],
+      ending_pull: ["未解决", "新危机", "更大威胁"],
+      antagonist_pressure: ["反派逼近", "围堵", "暗中窥视"],
+      resource_reward: ["兑换", "净赚", "资源到手"],
+      world_rule: ["规则限制", "天道", "法则约束"],
+      forbidden_false_positive: ["普通", "日常", "无关"],
     },
   };
 }
@@ -173,29 +173,52 @@ describe("parseArchitectStructureSignals", () => {
     ].join("\n");
 
     const result = parseArchitectStructureSignals(section, "book-1");
-    expect(result.bookId).toBe("book-1");
-    expect(result.signals.opening_hook).toEqual(["冲突", "恐惧"]);
-    expect(result.signals.protagonist_goal).toEqual(["目标"]);
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") throw new Error("expected ok");
+    expect(result.signals.bookId).toBe("book-1");
+    expect(result.signals.signals.opening_hook).toEqual(["冲突", "恐惧"]);
+    expect(result.signals.signals.protagonist_goal).toEqual(["目标"]);
   });
 
-  it("returns empty signals for invalid architect output", () => {
+  it("returns parse_error for invalid architect output with empty fallback signals", () => {
     const result = parseArchitectStructureSignals("gibberish not json", "book-1");
-    expect(result.bookId).toBe("book-1");
+    expect(result.status).toBe("parse_error");
+    if (result.status !== "parse_error") throw new Error("expected parse_error");
+    expect(result.signals.bookId).toBe("book-1");
     for (const dim of STRUCTURE_SIGNAL_DIMENSIONS) {
-      expect(result.signals[dim]).toEqual([]);
+      expect(result.signals.signals[dim]).toEqual([]);
     }
   });
 
-  it("filters out empty strings from arrays", () => {
+  it("returns parse_error when extracted phrases are all empty", () => {
     const section = [
       "```json",
-      JSON.stringify({ signals: { opening_hook: ["冲突", "", "  "], protagonist_goal: [] } }),
+      JSON.stringify({ signals: { opening_hook: ["", "  "], protagonist_goal: [] } }),
       "```",
     ].join("\n");
 
     const result = parseArchitectStructureSignals(section, "book-1");
-    expect(result.signals.opening_hook).toEqual(["冲突"]);
-    expect(result.signals.protagonist_goal).toEqual([]);
+    expect(result.status).toBe("parse_error");
+    if (result.status !== "parse_error") throw new Error("expected parse_error");
+    expect(result.error).toContain("no valid signal phrases");
+  });
+
+  it("returns parse_error (not throws) for malformed JSON so create_book can handle gracefully", () => {
+    const result = parseArchitectStructureSignals("{ not valid }", "book-1");
+    expect(result.status).toBe("parse_error");
+    if (result.status !== "parse_error") throw new Error("expected parse_error");
+    // Still provides a usable empty signals object so downstream code doesn't crash
+    expect(result.signals.bookId).toBe("book-1");
+    for (const dim of STRUCTURE_SIGNAL_DIMENSIONS) {
+      expect(result.signals.signals[dim]).toEqual([]);
+    }
+  });
+
+  it("returns parse_error for empty section content", () => {
+    const result = parseArchitectStructureSignals("", "book-1");
+    expect(result.status).toBe("parse_error");
+    if (result.status !== "parse_error") throw new Error("expected parse_error");
+    expect(result.error).toContain("empty");
   });
 });
 
@@ -497,9 +520,6 @@ describe("inspectStructureSignals", () => {
 describe("validateStructureSignalsFull", () => {
   it("returns PASS for a clean signals file", () => {
     const signals = makeValidSignals();
-    signals.signals.opening_hook = ["冲突", "恐惧"];
-    signals.signals.protagonist_goal = ["目标"];
-    signals.signals.pressure_source = ["追兵"];
 
     const result = validateStructureSignalsFull(signals);
 
@@ -545,7 +565,48 @@ describe("validateStructureSignalsFull", () => {
     const result = validateStructureSignalsFull(signals);
 
     expect(result.status).toBe("FAIL");
-    expect(result.issues.some((i) => i.message.includes("空短语"))).toBe(true);
+    expect(result.issues.some((i) => i.message.includes("空字符串"))).toBe(true);
+  });
+
+  it("returns FAIL for all-empty dimensions (total phrases = 0)", () => {
+    const signals = createEmptyStructureSignals("test-book");
+
+    const result = validateStructureSignalsFull(signals);
+
+    expect(result.status).toBe("FAIL");
+    expect(result.issues.some((i) => i.message.includes("所有维度均为空"))).toBe(true);
+  });
+
+  it("returns FAIL when a single dimension is empty", () => {
+    const signals = makeValidSignals();
+    signals.signals.opening_hook = [];
+
+    const result = validateStructureSignalsFull(signals);
+
+    expect(result.status).toBe("FAIL");
+    expect(result.issues.some((i) => i.message.includes("opening_hook") && i.message.includes("为空"))).toBe(true);
+  });
+
+  it("returns WARN when per-dimension phrase count is below minimum", () => {
+    const signals = makeValidSignals();
+    // Set a dimension to only 2 phrases (below MIN_PHRASES_PER_DIMENSION = 3)
+    signals.signals.opening_hook = ["冲突", "恐惧"];
+
+    const result = validateStructureSignalsFull(signals);
+
+    expect(result.status).toBe("WARN");
+    expect(result.issues.some((i) => i.message.includes("仅有") && i.message.includes("短语"))).toBe(true);
+  });
+
+  it("all-empty fails with total-phrase-count error", () => {
+    const signals = createEmptyStructureSignals("test-book");
+    // Add just one phrase so total > 0 but all other dims empty
+    signals.signals.opening_hook = ["冲突"];
+
+    const result = validateStructureSignalsFull(signals);
+
+    expect(result.status).toBe("FAIL"); // 11 dimensions still empty → FAIL
+    expect(result.issues.some((i) => i.message.includes("总短语数仅"))).toBe(true);
   });
 });
 

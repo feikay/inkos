@@ -11,6 +11,30 @@ const ZERO_USAGE = {
   totalTokens: 0,
 } as const;
 
+function validStructureSignalsSection(): string {
+  return [
+    "# Structure Signals",
+    "```json",
+    JSON.stringify({
+      signals: {
+        opening_hook: ["冲突", "恐惧", "威胁"],
+        protagonist_goal: ["目标明确", "一定要", "必须完成"],
+        pressure_source: ["追兵", "倒计时", "限期将至"],
+        obstacle_dilemma: ["死局", "没选择", "进退两难"],
+        solution_possibility: ["线索", "破绽", "一线生机"],
+        active_attempt: ["选择", "冲出去", "奋力一搏"],
+        payoff_reward: ["获得", "解锁", "突破瓶颈"],
+        ending_pull: ["未解决", "新危机", "更大威胁"],
+        antagonist_pressure: ["反派逼近", "围堵", "暗中窥视"],
+        resource_reward: ["兑换", "净赚", "资源到手"],
+        world_rule: ["规则限制", "天道", "法则约束"],
+        forbidden_false_positive: ["普通", "日常", "无关"],
+      },
+    }),
+    "```",
+  ].join("\n");
+}
+
 describe("ArchitectAgent", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -736,6 +760,7 @@ describe("ArchitectAgent", () => {
           bookRules: "# Book Rules",
           currentState: "# Current State",
           pendingHooks: "# Pending Hooks",
+          structureSignals: validStructureSignalsSection(),
         },
         true,
         "zh",
@@ -858,6 +883,7 @@ describe("ArchitectAgent", () => {
           currentState: "# Current State",
           pendingHooks: "# Pending Hooks",
           genreArchitecture: "# 题材架构\n\n自定义题材骨架",
+          structureSignals: validStructureSignalsSection(),
         },
         false,
         "zh",
@@ -995,6 +1021,7 @@ describe("ArchitectAgent", () => {
             "| 2 | 展示差异 | 惩罚降临 | 弄懂系统 | 众人围观 | 试探规则 | 小爽 | 奖励异常 |",
             "| 3 | 树敌 | 爪牙出手 | 查清任务来源 | 阶段敌人 | 借力破局 | 反转 | 核心反派露影 |",
           ].join("\n"),
+          structureSignals: validStructureSignalsSection(),
         },
         false,
         "zh",
@@ -1136,6 +1163,7 @@ describe("ArchitectAgent", () => {
             "| 4 | 线索追踪 | 苏晚晴试探 | 找到乱码来源 | 黑曜会盯梢 | 假装无知 | 信息差 | 秘书现身 |",
             "| 5 | 小爽点 | 林墨反坑秘书 | 逼出幕后线索 | 舆论压迫 | 系统技能反制 | 打脸 | 无面加码 |",
           ].join("\n"),
+          structureSignals: validStructureSignalsSection(),
         },
         false,
         "zh",
@@ -1167,5 +1195,226 @@ describe("ArchitectAgent", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  describe("structure_signals write gate", () => {
+    it("throws when structureSignals section is missing", async () => {
+      const root = await mkdtemp(join(tmpdir(), "inkos-architect-sig-gate-"));
+      const agent = new ArchitectAgent({
+        client: {
+          provider: "openai",
+          apiFormat: "chat",
+          stream: false,
+          defaults: {
+            temperature: 0.7,
+            maxTokens: 4096,
+            thinkingBudget: 0, maxTokensCap: null,
+            extra: {},
+          },
+        },
+        model: "test-model",
+        projectRoot: process.cwd(),
+      });
+
+      try {
+        await expect(
+          agent.writeFoundationFiles(
+            root,
+            {
+              storyBible: "# Story Bible",
+              volumeOutline: "# Volume Outline",
+              bookRules: "# Book Rules",
+              currentState: "# Current State",
+              pendingHooks: "# Pending Hooks",
+              // structureSignals intentionally omitted
+            },
+            false,
+            "zh",
+          ),
+        ).rejects.toThrow(/缺少 structure_signals section/);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it("throws on parse_error and does not write empty file", async () => {
+      const root = await mkdtemp(join(tmpdir(), "inkos-architect-sig-gate-"));
+      const agent = new ArchitectAgent({
+        client: {
+          provider: "openai",
+          apiFormat: "chat",
+          stream: false,
+          defaults: {
+            temperature: 0.7,
+            maxTokens: 4096,
+            thinkingBudget: 0, maxTokensCap: null,
+            extra: {},
+          },
+        },
+        model: "test-model",
+        projectRoot: process.cwd(),
+      });
+
+      try {
+        await expect(
+          agent.writeFoundationFiles(
+            root,
+            {
+              storyBible: "# Story Bible",
+              volumeOutline: "# Volume Outline",
+              bookRules: "# Book Rules",
+              currentState: "# Current State",
+              pendingHooks: "# Pending Hooks",
+              structureSignals: "gibberish that cannot be parsed as JSON",
+            },
+            false,
+            "zh",
+          ),
+        ).rejects.toThrow(/解析失败/);
+
+        // Verify structure_signals.json was NOT written
+        await expect(
+          readFile(join(root, "story", "structure_signals.json"), "utf-8"),
+        ).rejects.toThrow();
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it("throws on validate FAIL and does not write invalid file", async () => {
+      const root = await mkdtemp(join(tmpdir(), "inkos-architect-sig-gate-"));
+      const agent = new ArchitectAgent({
+        client: {
+          provider: "openai",
+          apiFormat: "chat",
+          stream: false,
+          defaults: {
+            temperature: 0.7,
+            maxTokens: 4096,
+            thinkingBudget: 0, maxTokensCap: null,
+            extra: {},
+          },
+        },
+        model: "test-model",
+        projectRoot: process.cwd(),
+      });
+
+      try {
+        // 11 dims have 1 phrase, 1 dim is empty → parse ok, validate FAIL (empty dimension ERROR)
+        const failSection = [
+          "# Structure Signals",
+          "```json",
+          JSON.stringify({
+            signals: {
+              opening_hook: [],
+              protagonist_goal: ["目标"],
+              pressure_source: ["追兵"],
+              obstacle_dilemma: ["死局"],
+              solution_possibility: ["线索"],
+              active_attempt: ["选择"],
+              payoff_reward: ["获得"],
+              ending_pull: ["未解决"],
+              antagonist_pressure: ["反派"],
+              resource_reward: ["兑换"],
+              world_rule: ["规则"],
+              forbidden_false_positive: ["普通"],
+            },
+          }),
+          "```",
+        ].join("\n");
+
+        await expect(
+          agent.writeFoundationFiles(
+            root,
+            {
+              storyBible: "# Story Bible",
+              volumeOutline: "# Volume Outline",
+              bookRules: "# Book Rules",
+              currentState: "# Current State",
+              pendingHooks: "# Pending Hooks",
+              structureSignals: failSection,
+            },
+            false,
+            "zh",
+          ),
+        ).rejects.toThrow(/校验失败/);
+
+        // Verify structure_signals.json was NOT written
+        await expect(
+          readFile(join(root, "story", "structure_signals.json"), "utf-8"),
+        ).rejects.toThrow();
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it("writes structure_signals.json for valid signals", async () => {
+      const root = await mkdtemp(join(tmpdir(), "inkos-architect-sig-gate-"));
+      const agent = new ArchitectAgent({
+        client: {
+          provider: "openai",
+          apiFormat: "chat",
+          stream: false,
+          defaults: {
+            temperature: 0.7,
+            maxTokens: 4096,
+            thinkingBudget: 0, maxTokensCap: null,
+            extra: {},
+          },
+        },
+        model: "test-model",
+        projectRoot: process.cwd(),
+      });
+
+      try {
+        const validSignalsContent = JSON.stringify({
+          signals: {
+            opening_hook: ["冲突", "恐惧", "威胁"],
+            protagonist_goal: ["目标明确", "一定要", "必须完成"],
+            pressure_source: ["追兵", "倒计时", "限期将至"],
+            obstacle_dilemma: ["死局", "没选择", "进退两难"],
+            solution_possibility: ["线索", "破绽", "一线生机"],
+            active_attempt: ["选择", "冲出去", "奋力一搏"],
+            payoff_reward: ["获得", "解锁", "突破瓶颈"],
+            ending_pull: ["未解决", "新危机", "更大威胁"],
+            antagonist_pressure: ["反派逼近", "围堵", "暗中窥视"],
+            resource_reward: ["兑换", "净赚", "资源到手"],
+            world_rule: ["规则限制", "天道", "法则约束"],
+            forbidden_false_positive: ["普通", "日常", "无关"],
+          },
+        });
+
+        const section = [
+          "# Structure Signals",
+          "```json",
+          validSignalsContent,
+          "```",
+        ].join("\n");
+
+        await agent.writeFoundationFiles(
+          root,
+          {
+            storyBible: "# Story Bible",
+            volumeOutline: "# Volume Outline",
+            bookRules: "# Book Rules",
+            currentState: "# Current State",
+            pendingHooks: "# Pending Hooks",
+            structureSignals: section,
+          },
+          false,
+          "zh",
+        );
+
+        const written = await readFile(
+          join(root, "story", "structure_signals.json"),
+          "utf-8",
+        );
+        const parsed = JSON.parse(written);
+        expect(parsed.bookId).toBeDefined();
+        expect(parsed.signals.opening_hook).toEqual(["冲突", "恐惧", "威胁"]);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
   });
 });

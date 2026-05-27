@@ -44,6 +44,30 @@ const hasNodeSqlite = (() => {
 
 const sqliteIt = hasNodeSqlite ? it : it.skip;
 
+function validStructureSignalsSection(): string {
+  return [
+    "# Structure Signals",
+    "```json",
+    JSON.stringify({
+      signals: {
+        opening_hook: ["冲突", "恐惧", "威胁"],
+        protagonist_goal: ["目标明确", "一定要", "必须完成"],
+        pressure_source: ["追兵", "倒计时", "限期将至"],
+        obstacle_dilemma: ["死局", "没选择", "进退两难"],
+        solution_possibility: ["线索", "破绽", "一线生机"],
+        active_attempt: ["选择", "冲出去", "奋力一搏"],
+        payoff_reward: ["获得", "解锁", "突破瓶颈"],
+        ending_pull: ["未解决", "新危机", "更大威胁"],
+        antagonist_pressure: ["反派逼近", "围堵", "暗中窥视"],
+        resource_reward: ["兑换", "净赚", "资源到手"],
+        world_rule: ["规则限制", "天道", "法则约束"],
+        forbidden_false_positive: ["普通", "日常", "无关"],
+      },
+    }),
+    "```",
+  ].join("\n");
+}
+
 const ZERO_USAGE = {
   promptTokens: 0,
   completionTokens: 0,
@@ -527,6 +551,7 @@ describe("PipelineRunner", () => {
       bookRules: "---\nversion: \"1.0\"\n---\n\n# Book Rules\n",
       currentState: "# Current State\n",
       pendingHooks: "# Pending Hooks\n",
+      structureSignals: validStructureSignalsSection(),
     });
 
     try {
@@ -581,6 +606,7 @@ describe("PipelineRunner", () => {
       bookRules: "---\nversion: \"1.0\"\n---\n\n# Book Rules\n",
       currentState: "# Current State\n",
       pendingHooks: "# Pending Hooks\n",
+      structureSignals: validStructureSignalsSection(),
     });
 
     try {
@@ -1316,6 +1342,7 @@ describe("PipelineRunner", () => {
         conflict: "The mentor debt is still personal.",
       }),
       pendingHooks: "# Pending Hooks\n",
+      structureSignals: validStructureSignalsSection(),
     });
 
     try {
@@ -4122,6 +4149,7 @@ describe("PipelineRunner", () => {
         conflict: "The old faction watches every move.",
       }),
       pendingHooks: "# Pending Hooks\n",
+      structureSignals: validStructureSignalsSection(),
     });
     vi.spyOn(runner, "generateStyleGuide").mockRejectedValue(new Error("style failed"));
 
@@ -4203,6 +4231,7 @@ describe("PipelineRunner", () => {
         conflict: "The mentor debt is still personal.",
       }),
       pendingHooks: "# Pending Hooks\n",
+      structureSignals: validStructureSignalsSection(),
     });
     vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockResolvedValue(
       createAnalyzedOutput({
@@ -4247,6 +4276,7 @@ describe("PipelineRunner", () => {
         conflict: "The trial deadline is closing in.",
       }),
       pendingHooks: "# Pending Hooks\n",
+      structureSignals: validStructureSignalsSection(),
     });
 
     vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter")
@@ -4490,6 +4520,7 @@ describe("PipelineRunner", () => {
         conflict: "The harbor watch is searching every ship.",
       }),
       pendingHooks: "# Pending Hooks\n\n| hook_id | start_chapter | type | status | last_advanced_chapter | expected_payoff | notes |\n| --- | --- | --- | --- | --- | --- | --- |\n",
+      structureSignals: validStructureSignalsSection(),
     });
     const saveChapter = vi.spyOn(WriterAgent.prototype, "saveChapter");
 
@@ -4564,6 +4595,7 @@ describe("PipelineRunner", () => {
         conflict: "The mentor debt is still personal.",
       }),
       pendingHooks: "# Pending Hooks\n",
+      structureSignals: validStructureSignalsSection(),
     });
     vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockResolvedValue(
       createAnalyzedOutput({
@@ -4618,6 +4650,7 @@ describe("PipelineRunner", () => {
         "| captain-letter | 1 | mystery | open | 0 | The captain's disappearance is explained. | The sealed letter points to the missing captain. |",
         "",
       ].join("\n"),
+      structureSignals: validStructureSignalsSection(),
     });
 
     const analyzeChapter = vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockResolvedValue(
@@ -4725,6 +4758,7 @@ describe("PipelineRunner", () => {
         "| future-hook | 60 | mystery | open | 60 | Future payoff | FUTURE LEAK |",
         "",
       ].join("\n"),
+      structureSignals: validStructureSignalsSection(),
     });
 
     let stateSeenByFirstReplay = "";

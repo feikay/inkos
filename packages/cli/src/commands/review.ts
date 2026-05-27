@@ -6107,19 +6107,33 @@ structureSignalsCmd
       }
 
       const result = validateStructureSignalsFull(signalsResult.signals);
+      const inspection = inspectStructureSignals(signalsResult.signals);
 
       if (opts.json) {
-        log(JSON.stringify(result, null, 2));
+        log(JSON.stringify({ ...result, ...inspection }, null, 2));
         return;
       }
 
       log(`book: ${signalsResult.signals.bookId}`);
       log(`status: ${result.status}`);
-      log(`issues: ${result.issues.length}`);
+      log(`totalPhrases: ${inspection.totalPhrases} (unique: ${inspection.totalUnique})`);
+      if (inspection.emptyDimensions.length > 0) {
+        log(`emptyDimensions: ${inspection.emptyDimensions.join(", ")}`);
+      }
+      for (const dim of inspection.dimensions) {
+        log(`  ${dim.dimension}: ${dim.phraseCount} phrases`);
+      }
       if (result.issues.length > 0) {
+        log(`issues: ${result.issues.length}`);
         for (const issue of result.issues) {
           log(`  [${issue.severity}] ${issue.message}`);
         }
+      }
+      if (result.status === "FAIL") {
+        log("");
+        log("注意：结构信号校验失败，问题可能出在建书生成链路（create_book / architect）。");
+        log("请检查题材 profile 指导是否已更新，或重新建书以重新生成 structure_signals.json。");
+        log("不要手工编辑 structure_signals.json 来伪造通过。");
       }
     } catch (e) {
       if (opts.json) {
