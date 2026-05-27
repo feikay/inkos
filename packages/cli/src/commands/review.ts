@@ -23,9 +23,15 @@ import {
   type FanqieFinalQualityStatus,
   type FanqieQualityReport,
   type StoryEffectivenessReport,
+  StoryEffectivenessAgent,
+  writeStoryEffectivenessReportFiles,
   type Golden3ChapterReport,
   readOpeningHookSummary,
+  OpeningHookReviewerAgent,
+  writeOpeningHookReportFiles,
   readAntagonistIntelligenceSummary,
+  AntagonistIntelligenceReviewerAgent,
+  writeAntagonistIntelligenceReportFiles,
   readTransitionQualitySummary,
   TransitionQualityReviewerAgent,
   writeTransitionQualityReportFiles,
@@ -35,11 +41,13 @@ import {
   type AgentContext,
 } from "@actalk/inkos-core";
 import { existsSync, readdirSync, type Dirent } from "node:fs";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createClient, findProjectRoot, loadConfig, resolveBookId, log, logError, loadReviewPresentation, GLOBAL_ENV_PATH } from "../utils.js";
 
 const DUMMY_CTX = {} as unknown as AgentContext;
+const DEFAULT_STRUCTURE_PASS_THRESHOLD = 85;
+const DEFAULT_STRUCTURE_ACCEPT_THRESHOLD = 70;
 
 export const reviewCommand = new Command("review")
   .description("Review and approve chapters");
@@ -180,6 +188,8 @@ reviewCommand
   .option("--quality-fix-threshold <number>", "Minimum quality score for targeted fix", "75")
   .option("--quality-pass-threshold <number>", "Ideal quality score threshold", "85")
   .option("--quality-accept-threshold <number>", "Minimum accepted quality score threshold", "75")
+  .option("--structure-pass-threshold <number>", "Ideal publish-ready structure score threshold", String(DEFAULT_STRUCTURE_PASS_THRESHOLD))
+  .option("--structure-accept-threshold <number>", "Minimum accepted publish-ready structure score threshold", String(DEFAULT_STRUCTURE_ACCEPT_THRESHOLD))
   .option("--min-chapter-words <number>", "Minimum effective chapter word count", "1000")
   .option("--max-fix-attempts <number>", "Maximum continuity fix attempts after targeted fix", "1")
   .option("--json", "Output JSON")
@@ -193,7 +203,12 @@ reviewCommand
       const qualityFixThreshold = parsePositiveInt(opts.qualityFixThreshold, "--quality-fix-threshold");
       const qualityPassThreshold = parsePositiveInt(opts.qualityPassThreshold, "--quality-pass-threshold");
       const qualityAcceptThreshold = parsePositiveInt(opts.qualityAcceptThreshold, "--quality-accept-threshold");
+      const structurePassThreshold = parsePositiveInt(opts.structurePassThreshold, "--structure-pass-threshold");
+      const structureAcceptThreshold = parsePositiveInt(opts.structureAcceptThreshold, "--structure-accept-threshold");
       const minChapterWords = parsePositiveInt(opts.minChapterWords, "--min-chapter-words");
+      if (structureAcceptThreshold > structurePassThreshold) {
+        throw new Error("--structure-accept-threshold must be <= --structure-pass-threshold");
+      }
       const maxFixAttempts = parseNonNegativeInt(opts.maxFixAttempts, "--max-fix-attempts");
       const results: QualityAutoFixResult[] = [];
 
@@ -232,6 +247,59 @@ reviewCommand
     } catch (e) {
       if (opts.json) log(JSON.stringify({ error: String(e) }));
       else logError(`Quality auto-fix failed: ${e}`);
+      process.exit(1);
+    }
+  });
+
+reviewCommand
+  .command("plot-auto-fix")
+  .description("Target-fix chapters blocked by publish-ready six-step plot structure")
+  .requiredOption("--book <book-id>", "Book ID")
+  .option("--chapter <number>", "Single chapter number")
+  .option("--from <number>", "First chapter number in range")
+  .option("--to <number>", "Last chapter number in range")
+  .option("--max-plot-fix-attempts <number>", "Maximum targeted plot fix attempts", "1")
+  .option("--json", "Output JSON")
+  .action(async (opts) => {
+    try {
+      const root = findProjectRoot();
+      const runtime = await loadContinuityRuntime(true);
+      const book = await resolveContinuityBook(root, opts.book);
+      const range = resolveContinuityRange(opts);
+      const maxPlotFixAttempts = parsePositiveInt(opts.maxPlotFixAttempts, "--max-plot-fix-attempts");
+      const results: PlotAutoFixResult[] = [];
+
+      for (let chapter = range.from; chapter <= range.to; chapter += 1) {
+        if (!opts.json) {
+          log("[plot-auto-fix]");
+          log(`chapter: ${chapterNumberPrefix(chapter)}`);
+        }
+        const result = await runPlotAutoFixChapter({
+          bookId: book.id,
+          bookDir: book.dir,
+          chapter,
+          client: runtime.client!,
+          model: runtime.model!,
+          maxPlotFixAttempts,
+          json: Boolean(opts.json),
+        });
+        results.push(result);
+        if (!opts.json) {
+          if (result.input_file) log(`input: ${result.input_file}`);
+          if (result.output_file) log(`output: ${result.output_file}`);
+          if (result.final_candidate_file) log(`final: ${result.final_candidate_file}`);
+          log(`result: ${result.status}`);
+          if (result.skipped_reason) log(`reason: ${result.skipped_reason}`);
+          log("");
+          log("next:");
+          log(`node packages/cli/dist/index.js review publish-ready --book ${book.id} --chapter ${chapter}`);
+        }
+      }
+
+      if (opts.json) log(JSON.stringify({ bookId: book.id, results }, null, 2));
+    } catch (e) {
+      if (opts.json) log(JSON.stringify({ error: String(e) }));
+      else logError(`Plot auto-fix failed: ${e}`);
       process.exit(1);
     }
   });
@@ -718,9 +786,12 @@ reviewCommand
   .option("--max-fix-attempts <number>", "Maximum continuity fix attempts", "2")
   .option("--max-polish-attempts <number>", "Maximum polish attempts", "2")
   .option("--max-quality-fix-attempts <number>", "Maximum targeted quality fix attempts", "1")
+  .option("--max-plot-fix-attempts <number>", "Maximum targeted publish-ready plot fix attempts", "0")
   .option("--quality-fix-threshold <number>", "Minimum quality score for targeted fix", "75")
   .option("--quality-pass-threshold <number>", "Ideal quality score threshold", "85")
   .option("--quality-accept-threshold <number>", "Minimum accepted quality score threshold", "75")
+  .option("--structure-pass-threshold <number>", "Ideal publish-ready structure score threshold", String(DEFAULT_STRUCTURE_PASS_THRESHOLD))
+  .option("--structure-accept-threshold <number>", "Minimum accepted publish-ready structure score threshold", String(DEFAULT_STRUCTURE_ACCEPT_THRESHOLD))
   .option("--min-chapter-words <number>", "Minimum effective chapter word count", "1000")
   .option("--accept-manual-continuity", "Allow explicit publish-ready processing for MANUAL_REVIEW continuity")
   .option("--continuity-override-pass", "Trust a PASS final continuity report and skip repeated continuity recheck")
@@ -734,10 +805,16 @@ reviewCommand
       const maxFixAttempts = parseNonNegativeInt(opts.maxFixAttempts, "--max-fix-attempts");
       const maxPolishAttempts = parsePositiveInt(opts.maxPolishAttempts, "--max-polish-attempts");
       const maxQualityFixAttempts = parseNonNegativeInt(opts.maxQualityFixAttempts, "--max-quality-fix-attempts");
+      const maxPlotFixAttempts = parseNonNegativeInt(opts.maxPlotFixAttempts, "--max-plot-fix-attempts");
       const qualityFixThreshold = parsePositiveInt(opts.qualityFixThreshold, "--quality-fix-threshold");
       const qualityPassThreshold = parsePositiveInt(opts.qualityPassThreshold, "--quality-pass-threshold");
       const qualityAcceptThreshold = parsePositiveInt(opts.qualityAcceptThreshold, "--quality-accept-threshold");
+      const structurePassThreshold = parsePositiveInt(opts.structurePassThreshold, "--structure-pass-threshold");
+      const structureAcceptThreshold = parsePositiveInt(opts.structureAcceptThreshold, "--structure-accept-threshold");
       const minChapterWords = parsePositiveInt(opts.minChapterWords, "--min-chapter-words");
+      if (structureAcceptThreshold > structurePassThreshold) {
+        throw new Error("--structure-accept-threshold must be <= --structure-pass-threshold");
+      }
       const results: PublishReadyResult[] = [];
       const isBatchMode = Boolean(!opts.chapter && opts.from && opts.to);
 
@@ -756,9 +833,12 @@ reviewCommand
           maxFixAttempts,
           maxPolishAttempts,
           maxQualityFixAttempts,
+          maxPlotFixAttempts,
           qualityFixThreshold,
           qualityPassThreshold,
           qualityAcceptThreshold,
+          structurePassThreshold,
+          structureAcceptThreshold,
           minChapterWords,
           acceptManualContinuity: Boolean(opts.acceptManualContinuity),
           continuityOverridePass: Boolean(opts.continuityOverridePass),
@@ -771,6 +851,12 @@ reviewCommand
           log("result:");
           log(result.publish_status);
           if (result.final_candidate_file) log(`final file: ${result.final_candidate_file}`);
+          const structureLines = renderPublishReadyStructureConsole(result);
+          if (structureLines.length) {
+            log("");
+            log("structure:");
+            for (const line of structureLines) log(line);
+          }
           log(`report: ${result.report_json_path}`);
           log("");
           if (isExportablePublishStatus(result.publish_status)) {
@@ -785,6 +871,15 @@ reviewCommand
               log(`可选诊断：node packages/cli/dist/index.js review diagnose --book ${book.id} --chapter ${chapter}`);
             }
           } else {
+            if (result.publish_status === "MANUAL_REVIEW" && hasPublishReadyStructureBlocker(result) && maxPlotFixAttempts === 0) {
+              const reasons = publishReadyStructureBlockerSummaries(result);
+              log(`blocked: publish-ready structural review`);
+              if (reasons.length) log(`reason: ${reasons[0]}`);
+              log("");
+              log("next:");
+              log(`node packages/cli/dist/index.js review publish-ready --book ${book.id} --chapter ${chapter} --max-plot-fix-attempts 1`);
+              log("");
+            }
             log("diagnose:");
             log(`node packages/cli/dist/index.js review diagnose --book ${book.id} --chapter ${chapter}`);
           }
@@ -1068,6 +1163,8 @@ interface PublishReadyResult {
   readonly quality_score?: number;
   readonly quality_pass_threshold?: number;
   readonly quality_accept_threshold?: number;
+  readonly structure_pass_threshold?: number;
+  readonly structure_accept_threshold?: number;
   readonly accepted_reason?: string;
   readonly warnings?: ReadonlyArray<string>;
   readonly manualContinuityAccepted?: boolean;
@@ -1139,6 +1236,20 @@ interface QualityAutoFixResult {
   readonly skipped_reason?: string;
 }
 
+interface PlotAutoFixResult {
+  readonly book: string;
+  readonly chapter_index: number;
+  readonly status: "FIXED" | "SKIPPED";
+  readonly input_file: string;
+  readonly output_file: string;
+  readonly final_candidate_file: string;
+  readonly six_step_status_before?: string;
+  readonly six_step_score_before?: number | null;
+  readonly report_json_path: string;
+  readonly report_markdown_path: string;
+  readonly skipped_reason?: string;
+}
+
 async function runPublishReadyChapter(params: {
   readonly root: string;
   readonly bookId: string;
@@ -1149,19 +1260,170 @@ async function runPublishReadyChapter(params: {
   readonly maxFixAttempts: number;
   readonly maxPolishAttempts: number;
   readonly maxQualityFixAttempts: number;
+  readonly maxPlotFixAttempts: number;
   readonly qualityFixThreshold: number;
   readonly qualityPassThreshold: number;
   readonly qualityAcceptThreshold: number;
+  readonly structurePassThreshold: number;
+  readonly structureAcceptThreshold: number;
   readonly minChapterWords: number;
   readonly acceptManualContinuity: boolean;
   readonly continuityOverridePass: boolean;
   readonly json: boolean;
 }): Promise<PublishReadyResult> {
+  const first = await runPublishReadyChapterOnce(params);
+  if (!shouldRunPublishReadyPlotAutoFix(first, params.maxPlotFixAttempts)) return first;
+
+  if (!params.json) {
+    log("");
+    log("structure precheck:");
+    for (const line of renderPublishReadyStructureConsole(first)) log(line);
+    log("source: existing publish-ready/final candidate precheck");
+    log("");
+    log("[plot-auto-fix]");
+    const reasons = publishReadyStructureBlockerSummaries(first);
+    log(`reason: ${reasons[0] ?? `publish_status=${first.publish_status}`}`);
+  }
+  const fixed = await runPlotAutoFixChapter({
+    bookId: params.bookId,
+    bookDir: params.bookDir,
+    chapter: params.chapter,
+    client: params.client,
+    model: params.model,
+    maxPlotFixAttempts: params.maxPlotFixAttempts,
+    json: params.json,
+  });
+  if (!params.json) {
+    if (fixed.input_file) log(`input: ${fixed.input_file}`);
+    if (fixed.output_file) log(`output: ${fixed.output_file}`);
+    if (fixed.final_candidate_file) log(`final: ${fixed.final_candidate_file}`);
+    log(`status: ${fixed.status}`);
+  }
+  if (fixed.status !== "FIXED") return first;
+
+  if (!params.json) {
+    log("");
+    log("plot recheck publish-ready:");
+  }
+  return runPublishReadyChapterOnce(params, {
+    preferReviewedFinal: true,
+    skipAcceptedExistingCandidate: true,
+  });
+}
+
+function shouldRunPublishReadyPlotAutoFix(report: PublishReadyResult, maxPlotFixAttempts: number): boolean {
+  return maxPlotFixAttempts > 0
+    && report.publish_status === "MANUAL_REVIEW"
+    && hasPublishReadyStructureBlocker(report)
+    && Boolean(report.final_candidate_file);
+}
+
+function hasPublishReadyStructuralFailure(report: Partial<PublishReadyResult> | null): boolean {
+  if (!report) return false;
+  return report.story_effectiveness?.status === "FAIL_STRUCTURAL"
+    || report.golden_3_chapter?.status === "FAIL_STRUCTURAL"
+    || report.opening_hook?.status === "FAIL_STRUCTURAL"
+    || report.antagonist_intelligence?.status === "FAIL_REPORT_ONLY"
+    || report.transition_quality?.status === "FAIL_STRUCTURAL"
+    || report.six_step_plot?.status === "FAIL_STRUCTURAL";
+}
+
+function hasPublishReadyStructureBlocker(report: Partial<PublishReadyResult> | null): boolean {
+  return publishReadyStructureBlockerSummaries(report).length > 0;
+}
+
+function publishReadyStructureBlockerSummaries(report: Partial<PublishReadyResult> | null): string[] {
+  if (!report) return [];
+  const acceptThreshold = report.structure_accept_threshold ?? DEFAULT_STRUCTURE_ACCEPT_THRESHOLD;
+  const items: Array<[string, { readonly status: string; readonly score: number | null; readonly summary: string } | undefined]> = [
+    ["story_effectiveness", report.story_effectiveness],
+    ["golden_3_chapter", report.golden_3_chapter],
+    ["opening_hook", report.opening_hook],
+    ["antagonist_intelligence", report.antagonist_intelligence],
+    ["transition_quality", report.transition_quality],
+    ["six_step_plot", report.six_step_plot],
+  ];
+  return items
+    .filter(([, item]) =>
+      item?.status === "FAIL_STRUCTURAL"
+      || item?.status === "FAIL_REPORT_ONLY"
+      || typeof item?.score === "number" && item.score < acceptThreshold,
+    )
+    .map(([name, item]) => {
+      const score = item!.score ?? "n/a";
+      const threshold = typeof item!.score === "number" ? ` accepted=${acceptThreshold}` : "";
+      return `${name}=${item!.status} score=${score}${threshold}: ${item!.summary}`;
+    });
+}
+
+function publishReadyStructuralFailureSummaries(report: Partial<PublishReadyResult> | null): string[] {
+  if (!report) return [];
+  const items: Array<[string, { readonly status: string; readonly score: number | null; readonly summary: string } | undefined]> = [
+    ["story_effectiveness", report.story_effectiveness],
+    ["golden_3_chapter", report.golden_3_chapter],
+    ["opening_hook", report.opening_hook],
+    ["antagonist_intelligence", report.antagonist_intelligence],
+    ["transition_quality", report.transition_quality],
+    ["six_step_plot", report.six_step_plot],
+  ];
+  return items
+    .filter(([, item]) => item?.status === "FAIL_STRUCTURAL" || item?.status === "FAIL_REPORT_ONLY")
+    .map(([name, item]) => `${name}=${item!.status} score=${item!.score ?? "n/a"}: ${item!.summary}`);
+}
+
+function renderPublishReadyStructureConsole(report: Partial<PublishReadyResult>): string[] {
+  const items: Array<[string, { readonly status: string; readonly score: number | null; readonly summary: string } | undefined]> = [
+    ["story_effectiveness", report.story_effectiveness],
+    ["golden_3_chapter", report.golden_3_chapter],
+    ["opening_hook", report.opening_hook],
+    ["antagonist_intelligence", report.antagonist_intelligence],
+    ["transition_quality", report.transition_quality],
+    ["six_step_plot", report.six_step_plot],
+  ];
+  return items
+    .filter(([, item]) => Boolean(item))
+    .map(([name, item]) => {
+      const score = item!.score ?? "n/a";
+      return `${name}: ${item!.status} score=${score}`;
+    });
+}
+
+async function runPublishReadyChapterOnce(params: {
+  readonly root: string;
+  readonly bookId: string;
+  readonly bookDir: string;
+  readonly chapter: number;
+  readonly client: ReturnType<typeof createClient>;
+  readonly model: string;
+  readonly maxFixAttempts: number;
+  readonly maxPolishAttempts: number;
+  readonly maxQualityFixAttempts: number;
+  readonly maxPlotFixAttempts: number;
+  readonly qualityFixThreshold: number;
+  readonly qualityPassThreshold: number;
+  readonly qualityAcceptThreshold: number;
+  readonly structurePassThreshold: number;
+  readonly structureAcceptThreshold: number;
+  readonly minChapterWords: number;
+  readonly acceptManualContinuity: boolean;
+  readonly continuityOverridePass: boolean;
+  readonly json: boolean;
+}, options: {
+  readonly preferReviewedFinal?: boolean;
+  readonly skipAcceptedExistingCandidate?: boolean;
+} = {}): Promise<PublishReadyResult> {
   const sourceChain = new Set<string>();
   const original = await findChapterFile(params.bookDir, params.chapter);
   sourceChain.add(relative(params.bookDir, original.file));
   const reviewedFinal = await findReviewedFinalChapterFile(params.bookDir, params.chapter);
   const reviewedFinalExists = Boolean(reviewedFinal);
+  const prefix = chapterNumberPrefix(params.chapter);
+  const hasFreshPlotFix = await isFileNewerThan(
+    join(params.bookDir, "reviews", "plot-auto-fix", `${prefix}.plot-fix-report.json`),
+    join(params.bookDir, "reviews", "publish-ready", `${prefix}.publish-report.json`),
+  );
+  const preferReviewedFinal = Boolean(options.preferReviewedFinal || hasFreshPlotFix);
+  const skipAcceptedExistingCandidate = Boolean(options.skipAcceptedExistingCandidate || hasFreshPlotFix);
 
   // Resource hard gate: check resource consistency report before continuity/quality
   const resourceReport = await readResourceConsistencyReportIfExists(params.bookDir, params.chapter);
@@ -1204,7 +1466,7 @@ async function runPublishReadyChapter(params: {
     params.bookDir,
     params.chapter,
     original.file,
-    params.acceptManualContinuity,
+    params.acceptManualContinuity || preferReviewedFinal,
   );
   if (candidateOverride === original.file) candidateOverride = undefined;
   if (params.continuityOverridePass) {
@@ -1225,8 +1487,10 @@ async function runPublishReadyChapter(params: {
       report_markdown_path: "",
     });
   }
-  const existingReady = await tryWriteAcceptedExistingCandidate(params, candidateOverride ?? original.file, sourceChain);
-  if (existingReady) return existingReady;
+  if (!skipAcceptedExistingCandidate) {
+    const existingReady = await tryWriteAcceptedExistingCandidate(params, candidateOverride ?? original.file, sourceChain);
+    if (existingReady) return existingReady;
+  }
   let continuity: ContinuityCommandResult | undefined;
   let continuityReport: ContinuityReport | undefined;
   let quality: FanqieQualityCommandResult | undefined;
@@ -1312,6 +1576,8 @@ async function runPublishReadyChapter(params: {
         quality_score: quality.report.quality_score,
         quality_pass_threshold: params.qualityPassThreshold,
         quality_accept_threshold: params.qualityAcceptThreshold,
+        structure_pass_threshold: params.structurePassThreshold,
+        structure_accept_threshold: params.structureAcceptThreshold,
         accepted_reason: immediateQualityDecision === "QUALITY_WARN_POLISH_OPTIONAL" ? "quality score is publishable with optional polish" : undefined,
         warnings: qualityWarnings(immediateQualityDecision, quality.report.quality_score, params.qualityPassThreshold),
         ...manualContinuityAcceptance,
@@ -1486,6 +1752,8 @@ async function runPublishReadyChapter(params: {
         quality_score: qualityScore,
         quality_pass_threshold: params.qualityPassThreshold,
         quality_accept_threshold: params.qualityAcceptThreshold,
+        structure_pass_threshold: params.structurePassThreshold,
+        structure_accept_threshold: params.structureAcceptThreshold,
         accepted_reason: qualityDecision === "QUALITY_WARN_POLISH_OPTIONAL" ? "quality score is publishable with optional polish" : undefined,
         warnings: qualityWarnings(qualityDecision, qualityScore, params.qualityPassThreshold),
         ...manualContinuityAcceptance,
@@ -2223,6 +2491,45 @@ export function applySixStepPlotDecision(
   return { publishStatus, warnings: existingWarnings };
 }
 
+function applyStructureScoreGate(
+  publishStatus: string,
+  existingWarnings: ReadonlyArray<string> | undefined,
+  summaries: ReadonlyArray<{
+    readonly name: string;
+    readonly summary?: { readonly status: string; readonly score: number | null; readonly summary: string };
+  }>,
+  passThreshold: number,
+  acceptThreshold: number,
+): { publishStatus: string; warnings: ReadonlyArray<string> | undefined } {
+  const hardBlocked = publishStatus === "BLOCKED_BY_RESOURCE"
+    || publishStatus === "BLOCKED_BY_CONTINUITY"
+    || publishStatus === "BLOCKED_BY_QUALITY"
+    || publishStatus === "NEED_REWRITE";
+  if (hardBlocked) return { publishStatus, warnings: existingWarnings };
+
+  let nextStatus = publishStatus;
+  const warnings = [...(existingWarnings ?? [])];
+
+  for (const item of summaries) {
+    const summary = item.summary;
+    if (!summary || summary.status === "SKIPPED" || summary.score === null) continue;
+    if (summary.score < acceptThreshold) {
+      warnings.push(`${item.name}: score ${summary.score} is below accepted ${acceptThreshold}; structure fix is required before export.`);
+      if (nextStatus === "READY_TO_EXPORT" || nextStatus === "READY_WITH_WARNINGS") {
+        nextStatus = "MANUAL_REVIEW";
+      }
+    } else if (summary.score < passThreshold) {
+      warnings.push(`${item.name}: score ${summary.score} is below ideal ${passThreshold}; export is allowed with warning.`);
+      if (nextStatus === "READY_TO_EXPORT") nextStatus = "READY_WITH_WARNINGS";
+    }
+  }
+
+  return {
+    publishStatus: nextStatus,
+    warnings: warnings.length ? [...new Set(warnings)] : existingWarnings,
+  };
+}
+
 function qualityWarnings(decision: PublishQualityDecision, score: number, passThreshold: number): ReadonlyArray<string> | undefined {
   return decision === "QUALITY_WARN_POLISH_OPTIONAL"
     ? [`quality_score ${score} is below ideal ${passThreshold}; polish is optional before export.`]
@@ -2236,7 +2543,24 @@ async function writePublishReadyReport(bookDir: string, report: PublishReadyResu
   const markdownPath = join(reportDir, `${prefix}.publish-report.md`);
 
   // Merge story-effectiveness summary if not already provided
-  const seSummary = report.story_effectiveness ?? await readStoryEffectivenessSummary(bookDir, report.chapter_index);
+  let seSummary = report.story_effectiveness ?? await readStoryEffectivenessSummary(bookDir, report.chapter_index);
+
+  // If no existing story-effectiveness report and not resource-blocked, generate one from chapter content
+  if (!seSummary && report.publish_status !== "BLOCKED_BY_RESOURCE") {
+    try {
+      const resolved = await resolveContentForTransitionQuality(
+        bookDir,
+        report.chapter_index,
+        report.final_candidate_file || undefined,
+        report.source_file || undefined,
+      );
+      if (resolved) {
+        seSummary = await generateStoryEffectivenessReport(bookDir, report.chapter_index, resolved.content);
+      }
+    } catch {
+      // If we can't find any chapter content, skip generation
+    }
+  }
 
   // Apply story-effectiveness decision semantics (see applyStoryEffectivenessDecision for details)
   const seDecision = applyStoryEffectivenessDecision(report.publish_status, report.warnings, seSummary);
@@ -2251,13 +2575,47 @@ async function writePublishReadyReport(bookDir: string, report: PublishReadyResu
   const gcDecision = applyGolden3ChapterDecision(seDecision.publishStatus, seDecision.warnings, gcSummary);
 
   // Merge opening-hook summary (all chapters)
-  const ohSummary = report.opening_hook ?? await readOpeningHookSummaryLocal(bookDir, report.chapter_index);
+  let ohSummary = report.opening_hook ?? await readOpeningHookSummaryLocal(bookDir, report.chapter_index);
+
+  // If no existing opening-hook report and not resource-blocked, generate one from chapter content
+  if (!ohSummary && report.publish_status !== "BLOCKED_BY_RESOURCE") {
+    try {
+      const resolved = await resolveContentForTransitionQuality(
+        bookDir,
+        report.chapter_index,
+        report.final_candidate_file || undefined,
+        report.source_file || undefined,
+      );
+      if (resolved) {
+        ohSummary = await generateOpeningHookReport(bookDir, report.chapter_index, resolved.content);
+      }
+    } catch {
+      // If we can't find any chapter content, skip generation
+    }
+  }
 
   // Apply opening-hook decision semantics (same pattern, chain after SE and golden_3)
   const ohDecision = applyOpeningHookDecision(gcDecision.publishStatus, gcDecision.warnings, ohSummary);
 
   // Merge antagonist-intelligence summary (all chapters)
-  const aiSummary = report.antagonist_intelligence ?? await readAntagonistIntelligenceSummaryLocal(bookDir, report.chapter_index);
+  let aiSummary = report.antagonist_intelligence ?? await readAntagonistIntelligenceSummaryLocal(bookDir, report.chapter_index);
+
+  // If no existing antagonist-intelligence report and not resource-blocked, generate one from chapter content
+  if (!aiSummary && report.publish_status !== "BLOCKED_BY_RESOURCE") {
+    try {
+      const resolved = await resolveContentForTransitionQuality(
+        bookDir,
+        report.chapter_index,
+        report.final_candidate_file || undefined,
+        report.source_file || undefined,
+      );
+      if (resolved) {
+        aiSummary = await generateAntagonistIntelligenceReport(bookDir, report.chapter_index, resolved.content);
+      }
+    } catch {
+      // If we can't find any chapter content, skip generation
+    }
+  }
 
   // Apply antagonist-intelligence decision semantics (chain after opening-hook)
   const aiDecision = applyAntagonistIntelligenceDecision(ohDecision.publishStatus, ohDecision.warnings, aiSummary);
@@ -2307,6 +2665,22 @@ async function writePublishReadyReport(bookDir: string, report: PublishReadyResu
 
   // Apply six-step-plot decision semantics (chain after transition-quality)
   const ssDecision = applySixStepPlotDecision(tqDecision.publishStatus, tqDecision.warnings, ssSummary);
+  const structurePassThreshold = report.structure_pass_threshold ?? DEFAULT_STRUCTURE_PASS_THRESHOLD;
+  const structureAcceptThreshold = report.structure_accept_threshold ?? DEFAULT_STRUCTURE_ACCEPT_THRESHOLD;
+  const structureDecision = applyStructureScoreGate(
+    ssDecision.publishStatus,
+    ssDecision.warnings,
+    [
+      { name: "story-effectiveness", summary: seSummary },
+      { name: "golden-3-chapter", summary: gcSummary },
+      { name: "opening-hook", summary: ohSummary },
+      { name: "antagonist-intelligence", summary: aiSummary },
+      { name: "transition-quality", summary: tqSummary },
+      { name: "six-step-plot", summary: ssSummary },
+    ],
+    structurePassThreshold,
+    structureAcceptThreshold,
+  );
 
   const finalReport = {
     ...report,
@@ -2316,8 +2690,10 @@ async function writePublishReadyReport(bookDir: string, report: PublishReadyResu
     antagonist_intelligence: aiSummary,
     transition_quality: tqSummary,
     six_step_plot: ssSummary,
-    publish_status: ssDecision.publishStatus as PublishReadyResult["publish_status"],
-    warnings: ssDecision.warnings,
+    publish_status: structureDecision.publishStatus as PublishReadyResult["publish_status"],
+    warnings: structureDecision.warnings,
+    structure_pass_threshold: structurePassThreshold,
+    structure_accept_threshold: structureAcceptThreshold,
     final_candidate_file: report.final_candidate_file
       ? `books/${report.book}/${report.final_candidate_file}`
       : "",
@@ -2745,6 +3121,247 @@ function renderQualityFixMarkdown(report: QualityAutoFixResult): string {
 - quality_score_after: ${report.quality_score_after ?? "n/a"}
 - continuity_score_after: ${report.continuity_score_after ?? "n/a"}
 - final_candidate_file: ${report.final_candidate_file || "无"}
+${report.skipped_reason ? `- skipped_reason: ${report.skipped_reason}\n` : ""}`;
+}
+
+async function runPlotAutoFixChapter(params: {
+  readonly bookId: string;
+  readonly bookDir: string;
+  readonly chapter: number;
+  readonly client: ReturnType<typeof createClient>;
+  readonly model: string;
+  readonly maxPlotFixAttempts: number;
+  readonly json: boolean;
+}): Promise<PlotAutoFixResult> {
+  const context = await resolvePlotAutoFixContext(params.bookDir, params.chapter);
+  if (!context.eligible) {
+    return writePlotFixReport(params.bookDir, {
+      book: params.bookId,
+      chapter_index: params.chapter,
+      status: "SKIPPED",
+      input_file: context.inputFile ? relative(params.bookDir, context.inputFile) : "",
+      output_file: "",
+      final_candidate_file: context.finalCandidateFile ? relative(params.bookDir, context.finalCandidateFile) : "",
+      six_step_status_before: context.sixStepStatus,
+      six_step_score_before: context.sixStepScore,
+      report_json_path: "",
+      report_markdown_path: "",
+      skipped_reason: context.reason,
+    });
+  }
+
+  let inputFile = context.inputFile;
+  let outputFile = "";
+  for (let attempt = 1; attempt <= params.maxPlotFixAttempts; attempt += 1) {
+    if (!params.json) log(`attempt ${attempt}/${params.maxPlotFixAttempts} -> fixing publish-ready structure...`);
+    outputFile = await writePlotFixedChapter({
+      bookDir: params.bookDir,
+      chapter: params.chapter,
+      attempt,
+      client: params.client,
+      model: params.model,
+      currentText: await readFile(inputFile, "utf-8"),
+      publishReport: context.publishReport,
+      sixStepReport: context.sixStepReport,
+    });
+    inputFile = outputFile;
+  }
+
+  const finalFile = await writeReviewedFinalChapter(params.bookDir, params.chapter, outputFile);
+  await deletePublishReadyStructureReportsIfExists(params.bookDir, params.chapter);
+  return writePlotFixReport(params.bookDir, {
+    book: params.bookId,
+    chapter_index: params.chapter,
+    status: "FIXED",
+    input_file: relative(params.bookDir, context.inputFile),
+    output_file: relative(params.bookDir, outputFile),
+    final_candidate_file: relative(params.bookDir, finalFile),
+    six_step_status_before: context.sixStepStatus,
+    six_step_score_before: context.sixStepScore,
+    report_json_path: "",
+    report_markdown_path: "",
+  });
+}
+
+async function resolvePlotAutoFixContext(
+  bookDir: string,
+  chapter: number,
+): Promise<{
+  readonly eligible: boolean;
+  readonly reason: string;
+  readonly inputFile: string;
+  readonly finalCandidateFile: string;
+  readonly publishReport: Partial<PublishReadyResult> | null;
+  readonly sixStepReport: Record<string, unknown> | null;
+  readonly sixStepStatus?: string;
+  readonly sixStepScore?: number | null;
+}> {
+  const publishReport = await readPublishReadyReportIfExists(bookDir, chapter);
+  const sixStepReport = await readSixStepPlotReportIfExists(bookDir, chapter);
+  const sixStepStatus = String(publishReport?.six_step_plot?.status ?? sixStepReport?.status ?? "");
+  const rawScore = publishReport?.six_step_plot?.score ?? sixStepReport?.score;
+  const sixStepScore = typeof rawScore === "number" ? rawScore : rawScore === null ? null : undefined;
+  const finalCandidateFile = await findReviewedFinalChapterFile(bookDir, chapter) ?? "";
+  const inputFile = finalCandidateFile
+    || (publishReport?.final_candidate_file ? resolveUsedFilePath(bookDir, publishReport.final_candidate_file) ?? "" : "");
+
+  if (!hasPublishReadyStructureBlocker(publishReport)) {
+    return {
+      eligible: false,
+      reason: `no publish-ready structural failure found; six_step_plot status is ${sixStepStatus || "missing"}`,
+      inputFile,
+      finalCandidateFile,
+      publishReport,
+      sixStepReport,
+      sixStepStatus: sixStepStatus || undefined,
+      sixStepScore,
+    };
+  }
+  if (!inputFile || !existsSync(inputFile)) {
+    return {
+      eligible: false,
+      reason: "final candidate file not found; run publish-ready first so there is a chapters-reviewed final candidate",
+      inputFile,
+      finalCandidateFile,
+      publishReport,
+      sixStepReport,
+      sixStepStatus,
+      sixStepScore,
+    };
+  }
+  return {
+    eligible: true,
+    reason: "",
+    inputFile,
+    finalCandidateFile,
+    publishReport,
+    sixStepReport,
+    sixStepStatus,
+    sixStepScore,
+  };
+}
+
+async function writePlotFixedChapter(params: {
+  readonly bookDir: string;
+  readonly chapter: number;
+  readonly attempt: number;
+  readonly client: ReturnType<typeof createClient>;
+  readonly model: string;
+  readonly currentText: string;
+  readonly publishReport: Partial<PublishReadyResult> | null;
+  readonly sixStepReport: Record<string, unknown> | null;
+}): Promise<string> {
+  const numericExpressionGuidance = buildNumericExpressionGuidance(
+    await readBookNumericExpressionMode(params.bookDir),
+    "zh",
+    "polish",
+  );
+  const response = await chatCompletion(params.client, params.model, [
+    {
+      role: "system",
+      content: [
+        "你是网文章节追读结构定向修复编辑。",
+        "只输出修复后的完整章节正文。",
+        "不要输出说明、报告、JSON、Markdown 代码块。",
+        numericExpressionGuidance,
+      ].join("\n"),
+    },
+    { role: "user", content: buildPlotAutoFixPrompt(params.currentText, params.publishReport, params.sixStepReport) },
+  ], { temperature: 0.3, maxTokens: 8192, stage: "six-step-plot-fix" });
+  const fixed = stripMarkdownCodeFence(response.content).trim();
+  if (!fixed) throw new Error("plot-auto-fix returned empty chapter content");
+  const outDir = join(params.bookDir, "chapters-plot-fixed");
+  const outputPath = join(outDir, `${chapterNumberPrefix(params.chapter)}_plot_fix_attempt${params.attempt}.md`);
+  await mkdir(outDir, { recursive: true });
+  await writeFile(outputPath, `${fixed.trimEnd()}\n`, "utf-8");
+  return outputPath;
+}
+
+function buildPlotAutoFixPrompt(
+  currentText: string,
+  publishReport: Partial<PublishReadyResult> | null,
+  sixStepReport: Record<string, unknown> | null,
+): string {
+  return `你正在修复一章 publish-ready 的 six_step_plot=FAIL_STRUCTURAL 问题。
+
+【当前章节】
+${currentText}
+
+【publish-ready 摘要】
+${JSON.stringify({
+    publish_status: publishReport?.publish_status,
+    final_candidate_file: publishReport?.final_candidate_file,
+    six_step_plot: publishReport?.six_step_plot,
+    warnings: publishReport?.warnings,
+  }, null, 2)}
+
+【six-step-plot 报告】
+${formatPlotReportForPrompt(sixStepReport)}
+
+【修复目标】
+1. 让章节具备清晰的 Hook / Pressure / Attempt / Twist / Payoff / Pull。
+2. 开头 1-3 段补出明确情绪事件或即时危机，不要空泛铺陈。
+3. 中段明确主角目标、压力升级、主动尝试和阶段反馈。
+4. 中后段补一个预期偏差或信息反转，不要只平推动作。
+5. 结尾保留下一章拉力：新危机、新信息、新选择或未解决问题。
+
+【如果报告提到 emotion_event / 情绪事件】
+1. 必须改写或补强前 300 字。
+2. 开头必须出现一个可被读者立刻感知的外部事件，例如：有人当众压价/羞辱、关键物品被夺走、交易条件突然变卦、敌人逼近、门被封死、倒计时压迫。
+3. 这个事件必须迫使主角立刻做选择，不能只是环境描写、设定说明或心理独白。
+4. 第一屏必须同时有“目标 + 阻碍 + 情绪压力”。
+
+【如果报告提到 story_effectiveness / 主角目标 / 结尾钩子】
+1. 必须在前 500 字明确主角本章目标，目标要能被读者复述，例如“用001员工卡把晶核兑换成积分和武器，保住防空洞的人”。
+2. 必须让目标遇到具体阻碍，例如幸存者不信任、晶核不足、迷彩服逼近、003员工卡威胁。
+3. 结尾必须留下一个未解决问题或下一章选择，不能只列状态数值。
+4. 章末钩子要和本章目标直接相连，例如更高保护费、003卡掠夺权限、是否接受支线任务、门禁即将失守。
+
+【硬性要求】
+1. 保留原剧情主线、人物关系、资源数值、物品、地点和章尾方向。
+2. 不改变已经通过连续性/资源检查的事实。
+3. 不整章重写，保留原文 70% 以上，只做 3-10 处定点补强。
+4. 不新增无来源的系统规则、战力设定、隐藏道具或重大角色关系。
+5. 输出完整章节正文。`;
+}
+
+function formatPlotReportForPrompt(report: Record<string, unknown> | null): string {
+  if (!report) return "未找到 six-step-plot 详细报告；请按 publish-ready 摘要修复结构。";
+  const compact = {
+    status: report.status,
+    score: report.score,
+    summary: report.summary,
+    issues: report.issues,
+    checklist: report.checklist,
+    dimensions: report.dimensions,
+    suggestions: report.suggestions,
+  };
+  return JSON.stringify(compact, null, 2).slice(0, 9000);
+}
+
+async function writePlotFixReport(bookDir: string, report: PlotAutoFixResult): Promise<PlotAutoFixResult> {
+  const reportDir = join(bookDir, "reviews", "plot-auto-fix");
+  const prefix = chapterNumberPrefix(report.chapter_index);
+  const jsonPath = join(reportDir, `${prefix}.plot-fix-report.json`);
+  const markdownPath = join(reportDir, `${prefix}.plot-fix-report.md`);
+  const finalReport = { ...report, report_json_path: jsonPath, report_markdown_path: markdownPath };
+  await mkdir(reportDir, { recursive: true });
+  await writeFile(jsonPath, `${JSON.stringify(finalReport, null, 2)}\n`, "utf-8");
+  await writeFile(markdownPath, renderPlotFixMarkdown(finalReport), "utf-8");
+  return finalReport;
+}
+
+function renderPlotFixMarkdown(report: PlotAutoFixResult): string {
+  return `# Plot Auto Fix Report
+
+- book: ${report.book}
+- chapter: ${chapterNumberPrefix(report.chapter_index)}
+- status: ${report.status}
+- input_file: ${report.input_file || "无"}
+- output_file: ${report.output_file || "无"}
+- final_candidate_file: ${report.final_candidate_file || "无"}
+- six_step_status_before: ${report.six_step_status_before ?? "n/a"}
+- six_step_score_before: ${report.six_step_score_before ?? "n/a"}
 ${report.skipped_reason ? `- skipped_reason: ${report.skipped_reason}\n` : ""}`;
 }
 
@@ -3989,6 +4606,24 @@ async function readPublishReadyReportIfExists(
   return readJsonIfExists<Partial<PublishReadyResult>>(file);
 }
 
+async function readPlotFixReportIfExists(
+  bookDir: string,
+  chapter: number,
+): Promise<Partial<PlotAutoFixResult> | null> {
+  const file = join(bookDir, "reviews", "plot-auto-fix", `${chapterNumberPrefix(chapter)}.plot-fix-report.json`);
+  return readJsonIfExists<Partial<PlotAutoFixResult>>(file);
+}
+
+async function isFileNewerThan(file: string, baseline: string): Promise<boolean> {
+  try {
+    const [fileStat, baselineStat] = await Promise.all([stat(file), stat(baseline)]);
+    return fileStat.mtimeMs > baselineStat.mtimeMs;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 async function readStoryEffectivenessReportIfExists(
   bookDir: string,
   chapter: number,
@@ -4026,6 +4661,26 @@ async function readStoryEffectivenessSummary(
   return { status, score, summary };
 }
 
+export async function generateStoryEffectivenessReport(
+  bookDir: string,
+  chapterIndex: number,
+  chapterContent: string,
+): Promise<{ status: string; score: number | null; summary: string } | undefined> {
+  const reviewer = new StoryEffectivenessAgent(DUMMY_CTX);
+  const report = await reviewer.review({
+    chapter: chapterIndex,
+    chapterContent,
+  });
+  const prefix = chapterNumberPrefix(chapterIndex);
+  const reportDir = join(bookDir, "reviews", "story-effectiveness");
+  await writeStoryEffectivenessReportFiles({
+    report,
+    jsonPath: join(reportDir, `${prefix}.report.json`),
+    markdownPath: join(reportDir, `${prefix}.report.md`),
+  });
+  return readStoryEffectivenessSummary(bookDir, chapterIndex);
+}
+
 async function readGolden3ChapterReportIfExists(
   bookDir: string,
 ): Promise<Partial<Golden3ChapterReport> | null> {
@@ -4051,11 +4706,61 @@ async function readOpeningHookSummaryLocal(
   return readOpeningHookSummary(bookDir, chapter);
 }
 
+export async function generateOpeningHookReport(
+  bookDir: string,
+  chapterIndex: number,
+  chapterContent: string,
+  chapterTitle?: string,
+): Promise<{ status: string; score: number | null; summary: string } | undefined> {
+  const reviewer = new OpeningHookReviewerAgent(DUMMY_CTX);
+  const report = await reviewer.review({
+    chapterContent,
+    chapterIndex,
+    chapterTitle,
+  });
+  const prefix = chapterNumberPrefix(chapterIndex);
+  const reportDir = join(bookDir, "reviews", "opening-hook");
+  await writeOpeningHookReportFiles({
+    report,
+    jsonPath: join(reportDir, `${prefix}.opening-hook.report.json`),
+    markdownPath: join(reportDir, `${prefix}.opening-hook.report.md`),
+  });
+  return {
+    status: report.status,
+    score: report.score,
+    summary: report.summary,
+  };
+}
+
 async function readAntagonistIntelligenceSummaryLocal(
   bookDir: string,
   chapter: number,
 ): Promise<{ status: string; score: number | null; summary: string } | undefined> {
   return readAntagonistIntelligenceSummary(bookDir, chapter);
+}
+
+export async function generateAntagonistIntelligenceReport(
+  bookDir: string,
+  chapterIndex: number,
+  chapterContent: string,
+): Promise<{ status: string; score: number | null; summary: string } | undefined> {
+  const reviewer = new AntagonistIntelligenceReviewerAgent(DUMMY_CTX);
+  const report = await reviewer.review({
+    chapter: chapterIndex,
+    chapterContent,
+  });
+  const prefix = chapterNumberPrefix(chapterIndex);
+  const reportDir = join(bookDir, "reviews", "antagonist-intelligence");
+  await writeAntagonistIntelligenceReportFiles({
+    report,
+    jsonPath: join(reportDir, `${prefix}.report.json`),
+    markdownPath: join(reportDir, `${prefix}.report.md`),
+  });
+  return {
+    status: report.status,
+    score: report.score,
+    summary: report.summary,
+  };
 }
 
 async function readTransitionQualitySummaryLocal(
@@ -4070,6 +4775,35 @@ async function readSixStepPlotSummaryLocal(
   chapter: number,
 ): Promise<{ status: string; score: number | null; summary: string } | undefined> {
   return readSixStepPlotSummary(bookDir, chapter);
+}
+
+async function readSixStepPlotReportIfExists(
+  bookDir: string,
+  chapter: number,
+): Promise<Record<string, unknown> | null> {
+  const file = join(bookDir, "reviews", "six-step-plot", `${chapterNumberPrefix(chapter)}.six-step-plot.report.json`);
+  return readJsonIfExists<Record<string, unknown>>(file);
+}
+
+async function deletePublishReadyStructureReportsIfExists(bookDir: string, chapter: number): Promise<void> {
+  const prefix = chapterNumberPrefix(chapter);
+  const files = [
+    join(bookDir, "reviews", "story-effectiveness", `${prefix}.report.json`),
+    join(bookDir, "reviews", "story-effectiveness", `${prefix}.report.md`),
+    join(bookDir, "reviews", "opening-hook", `${prefix}.opening-hook.report.json`),
+    join(bookDir, "reviews", "opening-hook", `${prefix}.opening-hook.report.md`),
+    join(bookDir, "reviews", "antagonist-intelligence", `${prefix}.report.json`),
+    join(bookDir, "reviews", "antagonist-intelligence", `${prefix}.report.md`),
+    join(bookDir, "reviews", "transition-quality", `${prefix}.transition-quality.report.json`),
+    join(bookDir, "reviews", "transition-quality", `${prefix}.transition-quality.report.md`),
+    join(bookDir, "reviews", "six-step-plot", `${prefix}.six-step-plot.report.json`),
+    join(bookDir, "reviews", "six-step-plot", `${prefix}.six-step-plot.report.md`),
+  ];
+  await Promise.all(files.map((file) =>
+    unlink(file).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    }),
+  ));
 }
 
 export async function generateSixStepPlotReport(
@@ -4312,7 +5046,7 @@ function getQualityFixAttemptFromFilename(file: string): number | null {
 }
 
 type DiagnoseSeverity = "blocker" | "warning" | "info";
-type DiagnoseKind = "write" | "state" | "resource" | "continuity" | "quality" | "plot" | "export" | "approval" | "unknown";
+type DiagnoseKind = "write" | "state" | "resource" | "continuity" | "quality" | "plot" | "export" | "review" | "approval" | "unknown";
 
 interface DiagnoseRepairPlan {
   readonly id: string;
@@ -4346,6 +5080,10 @@ async function diagnoseChapterRepair(params: {
   const prefix = chapterNumberPrefix(params.chapter);
   const chapterStatus = await readChapterIndexStatus(params.bookDir, params.chapter);
   const publishReport = await readPublishReadyReportIfExists(params.bookDir, params.chapter);
+  const publishReportPath = join(params.bookDir, "reviews", "publish-ready", `${prefix}.publish-report.json`);
+  const plotFixReportPath = join(params.bookDir, "reviews", "plot-auto-fix", `${prefix}.plot-fix-report.json`);
+  const plotFixReport = await readPlotFixReportIfExists(params.bookDir, params.chapter);
+  const plotFixNewerThanPublishReady = await isFileNewerThan(plotFixReportPath, publishReportPath);
   const continuityReport = await readContinuityReportIfExists(params.bookDir, params.chapter, "final-report");
   const qualityReport = await readQualityReportIfExists(params.bookDir, params.chapter, "final-quality-report")
     ?? await readQualityReportIfExists(params.bookDir, params.chapter, "quality-report");
@@ -4361,6 +5099,7 @@ async function diagnoseChapterRepair(params: {
   const baseReports = {
     chapter_index: relative(params.root, join(params.bookDir, "chapters", "index.json")),
     publish_ready: relative(params.root, join(params.bookDir, "reviews", "publish-ready", `${prefix}.publish-report.json`)),
+    plot_auto_fix: relative(params.root, plotFixReportPath),
     continuity: relative(params.root, join(params.bookDir, "reviews", "continuity", `${prefix}.final-report.json`)),
     fanqie_quality: relative(params.root, join(params.bookDir, "reviews", "fanqie-quality", `${prefix}.final-quality-report.json`)),
     resource_consistency: relative(params.root, join(params.bookDir, "reviews", "resource-consistency", `${prefix}.report.json`)),
@@ -4418,7 +5157,7 @@ async function diagnoseChapterRepair(params: {
     plans.push(makeQualityRepairPlan(params, publishReport, qualityReport, finalCandidateFile));
   }
 
-  const plotPlan = makePlotRepairPlanIfNeeded(params, publishReport, exportReportText, finalCandidateFile);
+  const plotPlan = makePlotRepairPlanIfNeeded(params, publishReport, exportReportText, finalCandidateFile, plotFixReport, plotFixNewerThanPublishReady);
   if (plotPlan) plans.push(plotPlan);
 
   const exportPlan = makeExportRepairPlanIfNeeded(params, exportReportText, finalCandidateFile);
@@ -4461,6 +5200,39 @@ async function diagnoseChapterRepair(params: {
     });
   }
 
+  if (
+    !plans.some((plan) => plan.severity === "blocker")
+    && chapterStatus === "ready-for-review"
+    && !publishReport
+  ) {
+    plans.push({
+      id: "ready-for-publish-ready",
+      severity: plans.length ? "warning" : "info",
+      kind: "review",
+      title: plans.length
+        ? "章节已 ready-for-review；可先处理 warning，也可以直接跑 publish-ready。"
+        : "章节已 ready-for-review；下一步是跑 publish-ready。",
+      evidence: [
+        "chapter_status=ready-for-review",
+        "publish_status=missing",
+        resourceReport ? `resource status=${resourceReport.status ?? "unknown"} closureStatus=${resourceReport.closureStatus ?? "unknown"}` : "",
+      ].filter(Boolean),
+      inspectFiles: existingFiles(params.root, [
+        baseReports.chapter_index,
+        baseReports.resource_consistency,
+      ]),
+      editFiles: [],
+      search: [],
+      change: [
+        "不需要为了这条诊断再跑 write sync。",
+        "只有在你跑 diagnose 后又手动改了正文，或 current_state/hooks 明显和正文不一致时，才需要 write sync 或 repair-state。",
+      ],
+      nextCommands: [
+        `node packages/cli/dist/index.js review publish-ready --book ${params.bookId} --chapter ${params.chapter}`,
+      ],
+    });
+  }
+
   if (!plans.length) {
     plans.push({
       id: "unknown",
@@ -4474,7 +5246,7 @@ async function diagnoseChapterRepair(params: {
       inspectFiles: existingFiles(params.root, Object.values(baseReports)),
       editFiles: [],
       search: [],
-      change: ["先阅读 inspect files 中最新报告；如果已人工修正文，执行 write sync；如果只是状态文件漂移，执行 write repair-state。"],
+      change: ["先阅读 inspect files 中最新报告；只有在正文或状态文件确实刚被手动改过且报告未同步时，才执行 write sync 或 repair-state。"],
       nextCommands: [
         `node packages/cli/dist/index.js review publish-ready --book ${params.bookId} --chapter ${params.chapter}`,
       ],
@@ -4537,7 +5309,7 @@ function renderDiagnoseChapterRepair(result: DiagnoseChapterResult): string[] {
     if (plan.search.length) {
       lines.push("- locate:");
       const target = plan.editFiles[0] ?? ".";
-      lines.push(`  - rg -n "${plan.search.slice(0, 4).join("|")}" ${target}`);
+      lines.push(`  - grep -nE "${plan.search.slice(0, 4).join("|")}" ${target}`);
     }
     if (plan.change.length) {
       lines.push("- change:");
@@ -4733,23 +5505,40 @@ function makePlotRepairPlanIfNeeded(
   publishReport: Partial<PublishReadyResult> | null,
   exportReportText: string,
   finalCandidateFile: string | null,
+  plotFixReport: Partial<PlotAutoFixResult> | null,
+  plotFixNewerThanPublishReady: boolean,
 ): DiagnoseRepairPlan | null {
   const weakExportScore = findExportSixPartScore(exportReportText, params.chapter);
   const sixStepStatus = publishReport?.six_step_plot?.status;
-  if ((weakExportScore === null || weakExportScore >= 4) && sixStepStatus !== "FAIL_STRUCTURAL") return null;
+  const hasStructureBlocker = hasPublishReadyStructureBlocker(publishReport);
+  if ((weakExportScore === null || weakExportScore >= 4) && !hasStructureBlocker) return null;
+  const isExportLocalWeak = weakExportScore !== null && weakExportScore < 4;
+  const isPublishReadyStructural = !isExportLocalWeak && hasStructureBlocker;
+  const structuralReasons = publishReadyStructureBlockerSummaries(publishReport);
+  const hasFreshPlotFix = isPublishReadyStructural && plotFixReport?.status === "FIXED" && plotFixNewerThanPublishReady;
+  const hasFailedAfterPlotFix = isPublishReadyStructural && plotFixReport?.status === "FIXED" && !plotFixNewerThanPublishReady;
 
   return {
     id: "plot-six-part",
     severity: "warning",
     kind: "plot",
-    title: "六段/追读结构偏弱；修 Hook / Pressure / Attempt / Twist / Payoff / Pull 的缺口。",
+    title: hasFreshPlotFix
+      ? "plot-auto-fix 已执行；当前 publish-ready 报告是旧结论，下一步重跑 publish-ready 验收。"
+      : hasFailedAfterPlotFix
+        ? "上次 plot-auto-fix 后复检仍未通过；可再自动修一次，或按新报告人工补强结构缺口。"
+      : isPublishReadyStructural
+      ? "publish-ready 结构审核未通过；可让 publish-ready 自动跑一次 plot-auto-fix 后复检。"
+      : "export-fanqie 6段检查偏弱；可用 repair-fanqie 修 Hook / Pressure / Attempt / Twist / Payoff / Pull。",
     evidence: [
       weakExportScore !== null ? `export-fanqie 6段检查=${weakExportScore}/6` : "",
+      ...structuralReasons,
       sixStepStatus ? `six_step_plot=${sixStepStatus} score=${publishReport?.six_step_plot?.score ?? "n/a"}` : "",
+      plotFixReport?.status === "FIXED" ? `plot_auto_fix=${plotFixReport.status} output=${plotFixReport.output_file ?? "n/a"}` : "",
       publishReport?.six_step_plot?.summary ?? "",
     ].filter(Boolean),
     inspectFiles: existingFiles(params.root, [
       relative(params.root, join(params.root, "publish", params.bookId, "fanqie", "report.md")),
+      relative(params.root, join(params.bookDir, "reviews", "plot-auto-fix", `${chapterNumberPrefix(params.chapter)}.plot-fix-report.json`)),
       relative(params.root, join(params.bookDir, "reviews", "six-step-plot", `${chapterNumberPrefix(params.chapter)}.six-step-plot.report.json`)),
       relative(params.root, join(params.bookDir, "reviews", "publish-ready", `${chapterNumberPrefix(params.chapter)}.publish-report.json`)),
     ]),
@@ -4758,16 +5547,43 @@ function makePlotRepairPlanIfNeeded(
       relative(params.root, join(params.root, "publish", params.bookId, "fanqie", "chapters", `${chapterNumberPrefix(params.chapter)}.txt`)),
     ]),
     search: ["开头", "倒计时|压力|濒死|危险", "却|反而|不对|没想到", "那一刻|门，被|发现", "下一|还有|真正|门后"],
-    change: [
-      "开头补明确事件/危机 Hook；中段保留主角主动尝试；中后段增加预期反转。",
-      "补一个清晰 payoff moment 句；结尾留下下一章拉力。",
-      "不要整章重写，优先在 final 候选里做 3-6 处定点补强。",
-    ],
-    nextCommands: [
-      `node scripts/fanqie/export-fanqie.mjs ${params.bookId} --from ${params.chapter} --to ${params.chapter} --use-reviewed --dry-run`,
-      `node scripts/fanqie/repair-fanqie.mjs ${params.bookId} --chapter ${params.chapter} --apply`,
-      `node packages/cli/dist/index.js review publish-ready --book ${params.bookId} --chapter ${params.chapter}`,
-    ],
+    change: hasFreshPlotFix
+      ? [
+          "不要重复跑 plot-auto-fix；先重跑 publish-ready 生成新的 six_step_plot 和 publish-ready 报告。",
+          "如果复检仍然 FAIL_STRUCTURAL，再看新报告决定是否第二次 plot-auto-fix 或人工修 final。",
+        ]
+      : hasFailedAfterPlotFix
+        ? [
+            "上一次 plot-auto-fix 已经被 publish-ready 复检过，但新的结构审核仍是 MANUAL_REVIEW。",
+            "优先补强报告中的结构缺口：主角目标、开头冲突、阻碍升级、章末钩子。",
+            "可以再跑一次带 --max-plot-fix-attempts 1 的 publish-ready；如果仍失败，就人工改 final 候选开头后再验收。",
+          ]
+      : [
+          isPublishReadyStructural
+            ? "这是 publish-ready 的结构审核，不是 export-fanqie 本地 6段检查；可用 --max-plot-fix-attempts 让 publish-ready 调 LLM 定点修。"
+            : "这是 export-fanqie 本地 6段检查低于 4/6，repair-fanqie 可以读取导出报告并定点修。",
+          "优先修改 final 候选里的开头情绪事件、主角目标、主动尝试、阶段反馈和章尾拉力。",
+          "不要整章重写，优先做 3-6 处定点补强。",
+        ],
+    nextCommands: hasFreshPlotFix
+      ? [
+          `node packages/cli/dist/index.js review publish-ready --book ${params.bookId} --chapter ${params.chapter}`,
+          `node packages/cli/dist/index.js review diagnose --book ${params.bookId} --chapter ${params.chapter}`,
+        ]
+      : hasFailedAfterPlotFix
+        ? [
+            `node packages/cli/dist/index.js review publish-ready --book ${params.bookId} --chapter ${params.chapter} --max-plot-fix-attempts 1`,
+            `node packages/cli/dist/index.js review diagnose --book ${params.bookId} --chapter ${params.chapter}`,
+          ]
+      : isExportLocalWeak
+      ? [
+          `node scripts/fanqie/repair-fanqie.mjs ${params.bookId} --chapter ${params.chapter} --apply`,
+          `node packages/cli/dist/index.js review publish-ready --book ${params.bookId} --chapter ${params.chapter}`,
+        ]
+      : [
+          `node packages/cli/dist/index.js review publish-ready --book ${params.bookId} --chapter ${params.chapter} --max-plot-fix-attempts 1`,
+          `node packages/cli/dist/index.js review diagnose --book ${params.bookId} --chapter ${params.chapter}`,
+        ],
   };
 }
 

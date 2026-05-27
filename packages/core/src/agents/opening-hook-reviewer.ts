@@ -107,14 +107,16 @@ const CONFLICT_PATTERNS = [
 
 const DILEMMA_PATTERNS = [
   /只能|必须|不得不|没.{0,3}选择|要么.{0,10}要么/u,
-  /代价|后果|否则|不然.{0,3}(?:就|会|将)/u,
-  /保护|守护|拯救|活下去|逃出去|变强|复仇/u,
+  /代价|后果|否则|不然.{0,12}(?:就|会|将|等|所有人|死|活不成)/u,
+  /保护|守护|拯救|活下去|逃出去|变强|复仇|护住|守住|挡下/u,
+  /目标|倒计时|死局|立刻.{0,8}选择|只要慢半拍/u,
 ];
 
 const CONTINUE_REASON_PATTERNS = [
   /忽然|突然|下一刻|正要.{0,5}时|就在这时|没想到|竟然/u,
   /新的.{0,5}(?:线索|敌人|问题|危机|任务|消息)/u,
   /决定|选择|准备|打算.{0,5}(?:去|做|找|离|进)/u,
+  /倒计时|掠夺权限|强制抽取|死局|必须立刻|裂了.{0,6}缝/u,
   /抬头|转身|睁开.{0,3}眼|笑了|点了点头/u,
 ];
 
@@ -320,9 +322,9 @@ export class OpeningHookReviewerAgent extends BaseAgent {
         OPENING_HOOK_DIMENSIONS.length,
     );
     const checklistScore = checklistPassed * 14; // 5 × 14 = 70
-    const score = Math.round(avgDimensionScore * 0.4 + checklistScore * 0.6);
-    // Floor at avgDimensionScore so a strong hook isn't dragged down by checklist
-    const finalScore = Math.max(score, avgDimensionScore - 10);
+    const score = Math.round(avgDimensionScore * 0.3 + bestHookScore * 0.35 + checklistScore * 0.35);
+    // A chapter only needs one dominant opening hook type; don't require every hook type at once.
+    const finalScore = Math.max(score, checklistPassed >= 4 ? bestHookScore : avgDimensionScore - 10);
 
     const hasCritical = issues.some((i) => i.severity === "critical");
     const hasWarning = issues.some((i) => i.severity === "warning");

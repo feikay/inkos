@@ -70,6 +70,9 @@ node packages/cli/dist/index.js write next <书名>
 # 3. 连续性检测与自动修复
 node packages/cli/dist/index.js review continuity-auto --book <书名> --chapter <章节号> --max-fix-attempts 2
 
+# 3. 六步剧情修复
+node packages/cli/dist/index.js review plot-auto-fix --book <书名> --chapter <章节 --max-plot-fix-attempts 1
+
 # 4. 发布前闭环检查
 node packages/cli/dist/index.js review publish-ready --book <书名> --chapter <章节号>
 
@@ -79,8 +82,14 @@ node packages/cli/dist/index.js review fanqie-polish --book <书名> --chapter <
 # 6. 六段节奏修复
 node scripts/fanqie/repair-fanqie.mjs <书名> --chapter <章节号> --apply
 
-# 7. 导出番茄版
+# 7. approve
+node packages/cli/dist/index.js review approve <书名> <章节号>
+
+# 8. 导出番茄版
 node scripts/fanqie/export-fanqie.mjs <书名> --incremental --use-reviewed --title "<书名或发布标题>"
+
+# 9. 有问题的时候查询处理方法
+node packages/cli/dist/index.js review diagnose --book <书名> --chapter <章节号>
 ```
 
 分工原则：
@@ -217,6 +226,7 @@ node packages/cli/dist/index.js review publish-ready --book 葬渊魔经 \
   --from 2 --to 200 \
   --max-fix-attempts 2 \
   --max-polish-attempts 1 \
+  --max-plot-fix-attempts 1 \ # 六步剧情修复
   --max-quality-fix-attempts 1 \
   --quality-pass-threshold 85 \
   --quality-accept-threshold 75 \

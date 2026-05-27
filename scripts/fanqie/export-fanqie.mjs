@@ -251,6 +251,11 @@ function isExportablePublishStatus(status) {
 }
 
 function hasBlockingReviewedStatus(no, reports) {
+  const publishStatus = statusOf(reports.publishReadyReport, "publish_status");
+  if (publishStatus && !isExportablePublishStatus(publishStatus)) {
+    return `Chapter ${formatChapterIndex(no)} blocked: publish_status=${publishStatus}. Please fix before export.`;
+  }
+
   const continuityDecisionReport = reports.finalReport || reports.report;
   const status = statusOf(continuityDecisionReport, "final_status");
   if (status && status !== "PASS") {

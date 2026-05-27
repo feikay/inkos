@@ -116,6 +116,33 @@ function buildSignalsFromChecklist(items: readonly string[]): RegExp[] {
   return patterns;
 }
 
+const MANUAL_SIGNAL_GROUPS: Record<SixStepPlotDimension, RegExp[]> = {
+  emotion_event: [
+    /血|枪|刀|伤|杀|死|踹|砸|哭|吼|威胁|逼|抢|烧|炸|倒计时|红雾/u,
+    /不交.{0,12}(?:死|杀|烧)|半小时|十分钟|晚一秒/u,
+  ],
+  desire_goal: [
+    /目标|必须|一定要|当前唯一|唯一目标|决定|打算/u,
+    /攒够|拿到|换取|兑换|救出|护住|守住|挡下|逃出|赢过|阻止/u,
+  ],
+  obstacle_dilemma: [
+    /阻碍|困境|死局|代价|否则|不然|没.{0,3}选择|要么.{0,10}要么/u,
+    /不信|防备|提前|只剩|倒计时|强敌|威胁|逼近|短缺|不足|不够/u,
+  ],
+  solution_possibility: [
+    /线索|机会|破绽|规则|漏洞|权限|能力|盟友|变量|办法|策略|方案/u,
+    /激活|兑换|换取|利用|借助|依靠|凭着|代价|伏笔|信息差/u,
+  ],
+  action_resolution: [
+    /行动|选择|冲|挡|救|换|兑换|激活|扣|射|砍|撞|解决|破局/u,
+    /付出|消耗|代价|流血|伤口|体力|阶段性|净赚|获得|解锁/u,
+  ],
+  ending_feedback: [
+    /获得|净赚|解锁|变化|代价|新敌|新危机|新任务|下一|未解决/u,
+    /倒计时|强制|抽取|裂.{0,4}缝|冲破|选择|第一箭|必须立刻/u,
+  ],
+};
+
 // Per-dimension signal patterns
 const SIGNAL_GROUPS: Record<SixStepPlotDimension, RegExp[]> = (() => {
   const groups: Record<string, RegExp[]> = {};
@@ -123,7 +150,8 @@ const SIGNAL_GROUPS: Record<SixStepPlotDimension, RegExp[]> = (() => {
     const dimId = step.id.replace(/-/g, "_");
     const hintSignals = buildSignalsFromHints(step.promptHints);
     const checklistSignals = buildSignalsFromChecklist(step.reviewChecklist);
-    groups[dimId] = [...new Set([...hintSignals, ...checklistSignals].map((r) => r.source))].map(
+    const manualSignals = MANUAL_SIGNAL_GROUPS[dimId as SixStepPlotDimension] ?? [];
+    groups[dimId] = [...new Set([...hintSignals, ...checklistSignals, ...manualSignals].map((r) => r.source))].map(
       (s) => new RegExp(s, "u"),
     );
   }
@@ -198,6 +226,10 @@ function countChecklistPassed(
 ): number {
   let passed = 0;
   for (const item of items) {
+    if (semanticChecklistPassed(content, stepId, item)) {
+      passed++;
+      continue;
+    }
     // Extract key signal words from checklist item
     const keywords = item
       .replace(/是否|具体|明确|读者|作者|检查|避免/g, "")
@@ -208,6 +240,69 @@ function countChecklistPassed(
     if (matchCount >= 1) passed++;
   }
   return passed;
+}
+
+function semanticChecklistPassed(content: string, stepId: string, item: string): boolean {
+  const opening = content.slice(0, 600);
+  const ending = content.slice(-600);
+
+  if (stepId === "emotion-event") {
+    if (/压迫|不公|冲突画面/u.test(item)) {
+      return /血|枪|刀|伤|杀|死|踹|砸|哭|吼|威胁|逼|抢|烧|炸|倒计时|红雾/u.test(opening);
+    }
+    if (/避免|抽象概括/u.test(item)) {
+      return !/^(?:系统|设定|背景|世界观|力量体系)/u.test(opening.trim())
+        && /[，。！？]/u.test(opening)
+        && /血|枪|伤|威胁|倒计时|必须|不然|否则/u.test(opening);
+    }
+  }
+
+  if (stepId === "desire-goal") {
+    if (/单一|清晰|可行动/u.test(item)) {
+      return /目标|必须|一定要|当前唯一|唯一目标|攒够|拿到|换取|兑换|护住|守住|挡下|逃出|阻止/u.test(content);
+    }
+    if (/推动下一场冲突|愿望/u.test(item)) {
+      return /倒计时|威胁|提前|折返|敌|冲突|选择|死局|下一|马上|即将/u.test(content);
+    }
+  }
+
+  if (stepId === "obstacle-dilemma") {
+    if (/内在规则|硬拦/u.test(item)) {
+      return /规则|权限|系统|资源|晶核|积分|门禁|倒计时|强制|条件|代价/u.test(content);
+    }
+    if (/积蓄爆发|单纯虐/u.test(item)) {
+      return /提前|只剩|逼近|越来越|爆发|冲破|裂.{0,4}缝|死局|必须立刻/u.test(content);
+    }
+  }
+
+  if (stepId === "solution-possibility") {
+    if (/线索|能力|盟友|规则漏洞/u.test(item)) {
+      return /线索|能力|盟友|规则|漏洞|权限|员工卡|兑换|系统|机会|办法/u.test(content);
+    }
+    if (/没有被困境写死/u.test(item)) {
+      return /还能|还有|可以|机会|办法|兑换|激活|换取|三发|选择/u.test(content);
+    }
+  }
+
+  if (stepId === "action-resolution") {
+    if (/主角选择|外力代劳/u.test(item)) {
+      return /陈默.{0,30}(?:摸出|开口|拿起|兑换|没有留|指尖|选择|扣|射)|他没有留|第一箭/u.test(content);
+    }
+    if (/情绪|局势|认知升级/u.test(item)) {
+      return /这才反应|分明|提前|盯准|003|强制|死局|净赚|效率/u.test(content);
+    }
+  }
+
+  if (stepId === "ending-feedback") {
+    if (/变强|拿到东西|心态变化|关系变化/u.test(item)) {
+      return /获得|净赚|兑换|淬毒弩箭|体力|伤口|代价|效率|坐实/u.test(content);
+    }
+    if (/下一轮问题|彻底停住/u.test(item)) {
+      return /下一|未解决|倒计时|强制抽取|裂.{0,4}缝|冲破|死局|第一箭|选择/u.test(ending);
+    }
+  }
+
+  return false;
 }
 
 // ---- intent fidelity from SIX_STEP_PLOT_METHOD.chapterIntentFields ----

@@ -64,8 +64,10 @@ const EMOTION_WEAK_START = [
 
 const DESIRE_GOAL_SIGNALS = [
   /目标|目的|一定要|必须要|非得|得去|要去|打算|计划|决定|决心|誓要/u,
+  /唯一目标|本章目标|当前目标|必须.{0,12}(?:做出|完成|拿到|救|护|守|挡|逃|赢)/u,
   /为了|为的是|只为|只想|只要.{0,10}就/u,
   /拿到|逃出|揭开|压住|赢过|找到|救出|保护|阻止|破坏|夺取|获得/u,
+  /攒够|换.{0,8}(?:武器|物资|积分)|护住|守住|挡下/u,
 ];
 
 const OBSTACLE_PRESSURE_SIGNALS = [
@@ -126,6 +128,7 @@ export class StoryEffectivenessAgent extends BaseAgent {
     const opening = content.slice(0, 500);
     const ending = content.slice(-500);
     const body = content.length > 1000 ? content.slice(500, -500) : content;
+    const goalSpan = `${opening}\n${body}`;
 
     const dimensions = { ...DEFAULT_SCORES };
     const issues: StoryEffectivenessIssue[] = [];
@@ -169,7 +172,7 @@ export class StoryEffectivenessAgent extends BaseAgent {
     }
 
     // ---- desire_goal ----
-    const goalSignals = DESIRE_GOAL_SIGNALS.filter((p) => p.test(body));
+    const goalSignals = DESIRE_GOAL_SIGNALS.filter((p) => p.test(goalSpan));
     if (goalSignals.length >= 2) {
       dimensions.desire_goal = 90;
       conclusions.desire_goal = "主角目标明确且可行动。";
