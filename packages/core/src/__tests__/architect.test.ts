@@ -1416,5 +1416,56 @@ describe("ArchitectAgent", () => {
         await rm(root, { recursive: true, force: true });
       }
     });
+
+    it("uses documentMeta.id over staging directory basename for bookId", async () => {
+      const root = await mkdtemp(join(tmpdir(), "inkos-architect-sig-gate-"));
+      const agent = new ArchitectAgent({
+        client: {
+          provider: "openai",
+          apiFormat: "chat",
+          stream: false,
+          defaults: {
+            temperature: 0.7,
+            maxTokens: 4096,
+            thinkingBudget: 0, maxTokensCap: null,
+            extra: {},
+          },
+        },
+        model: "test-model",
+        projectRoot: process.cwd(),
+      });
+
+      try {
+        // Simulate staging directory used by PipelineRunner.initBook
+        const stagingDir = join(root, ".tmp-book-create-测试书-mr3abcde");
+
+        await agent.writeFoundationFiles(
+          stagingDir,
+          {
+            storyBible: "# Story Bible",
+            volumeOutline: "# Volume Outline",
+            bookRules: "# Book Rules",
+            currentState: "# Current State",
+            pendingHooks: "# Pending Hooks",
+            structureSignals: validStructureSignalsSection(),
+          },
+          false,
+          "zh",
+          undefined,
+          { id: "测试书" },
+        );
+
+        const written = await readFile(
+          join(stagingDir, "story", "structure_signals.json"),
+          "utf-8",
+        );
+        const parsed = JSON.parse(written);
+
+        // bookId must be the formal id, not the staging directory basename
+        expect(parsed.bookId).toBe("测试书");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
   });
 });

@@ -2,6 +2,7 @@ import type { ArchitectOutput } from "./architect.js";
 import type { BookConfig } from "../models/book.js";
 
 export interface FoundationDocumentMeta {
+  readonly id?: string;
   readonly title?: string;
   readonly genre?: BookConfig["genre"] | string;
   readonly platform?: BookConfig["platform"] | string;

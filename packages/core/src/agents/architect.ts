@@ -825,7 +825,7 @@ ${finalRequirementsPrompt}`;
       );
     }
 
-    const parseResult = parseArchitectStructureSignals(output.structureSignals, basename(bookDir));
+    const parseResult = parseArchitectStructureSignals(output.structureSignals, documentMeta.id ?? basename(bookDir));
     if (parseResult.status === "parse_error") {
       throw new Error(
         `[architect] structure_signals 解析失败：${parseResult.error}。` +
