@@ -109,9 +109,32 @@ export type ParseArchitectStructureSignalsResult =
 export const MIN_PHRASES_PER_DIMENSION = 3;
 export const MIN_TOTAL_PHRASES = 12;
 
+function extractJsonObjectText(content: string): string {
+  const trimmed = content.trim();
+
+  const fenceMatch = trimmed.match(/```\s*(?:json|JSON)?\s*\n?([\s\S]*?)\n?```/);
+  if (fenceMatch?.[1]?.trim()) {
+    return fenceMatch[1].trim();
+  }
+
+  const withoutOpeningFence = trimmed.replace(/^```\s*(?:json|JSON)?\s*\n?/i, "").trim();
+  const withoutFences = withoutOpeningFence.replace(/\n?```\s*$/i, "").trim();
+  if (withoutFences.startsWith("{") && withoutFences.endsWith("}")) {
+    return withoutFences;
+  }
+
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    return trimmed.slice(firstBrace, lastBrace + 1).trim();
+  }
+
+  return trimmed;
+}
+
 /**
  * Parse structure_signals section from architect LLM output into a StructureSignals object.
- * The LLM returns JSON wrapped in a markdown code block.
+ * The LLM should return JSON, but may wrap it in a markdown code block or add short prose.
  * Returns a discriminated union: { status: "ok", signals } on success,
  * or { status: "parse_error", error, signals } on parse failure (with an empty signals fallback).
  */
@@ -119,8 +142,7 @@ export function parseArchitectStructureSignals(
   sectionContent: string,
   bookId: string,
 ): ParseArchitectStructureSignalsResult {
-  const jsonMatch = sectionContent.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-  const raw = jsonMatch ? jsonMatch[1]!.trim() : sectionContent.trim();
+  const raw = extractJsonObjectText(sectionContent);
 
   // Empty section content: valid edge case (architect produced no structure_signals section).
   // Return an explicit parse_error so callers can distinguish "no output" from "good output".

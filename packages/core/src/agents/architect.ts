@@ -1371,9 +1371,8 @@ Then synthesize with this book's story outline, world-building, protagonist goal
 to produce phrases UNIQUE to THIS book. DO NOT copy generic genre-level descriptions as final signals.
 Every phrase must contain this book's specific character names, location names, system terms, or unique concepts.
 
-Output ONLY valid JSON in a code block:
+Output ONLY valid JSON. Do NOT wrap it in markdown code fences. Do NOT add explanations before or after it:
 
-\`\`\`json
 {
   "signals": {
     "opening_hook": ["phrase1", "phrase2", ...],
@@ -1390,7 +1389,6 @@ Output ONLY valid JSON in a code block:
     "forbidden_false_positive": ["phrase1", "phrase2", ...]
   }
 }
-\`\`\`
 
 Rules:
 - Each array MUST contain 3-8 concrete phrases specific to THIS book's world, characters, and conflict.
@@ -1421,9 +1419,8 @@ Rules:
 生成只属于"本书"的专属短语。禁止直接复制题材 profile 中的泛化描述作为最终信号。
 每个短语必须包含本书具体的人物名、地名、系统术语或独特概念。
 
-只输出 JSON，包裹在代码块中：
+只输出合法 JSON。不要使用 markdown 代码块，不要在 JSON 前后添加解释文字：
 
-\`\`\`json
 {
   "signals": {
     "opening_hook": ["短语1", "短语2", ...],
@@ -1440,7 +1437,6 @@ Rules:
     "forbidden_false_positive": ["短语1", "短语2", ...]
   }
 }
-\`\`\`
 
 规则：
 - 每个数组必须包含 3-8 个具体短语，专属于本书的世界观、角色和冲突。

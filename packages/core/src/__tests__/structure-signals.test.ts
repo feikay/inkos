@@ -108,6 +108,43 @@ describe("createEmptyStructureSignals", () => {
   });
 });
 
+describe("parseArchitectStructureSignals", () => {
+  const section = JSON.stringify({
+    signals: makeValidSignals("ignored").signals,
+  });
+
+  it("parses plain JSON", () => {
+    const result = parseArchitectStructureSignals(section, "book-a");
+    expect(result.status).toBe("ok");
+    expect(result.signals.bookId).toBe("book-a");
+    expect(result.signals.signals.opening_hook).toEqual(["冲突", "恐惧", "威胁"]);
+  });
+
+  it("parses JSON from a markdown code block with a spaced language tag", () => {
+    const result = parseArchitectStructureSignals(`\`\`\` json\n${section}\n\`\`\``, "book-b");
+    expect(result.status).toBe("ok");
+    expect(result.signals.bookId).toBe("book-b");
+  });
+
+  it("parses JSON from a markdown code block with an uppercase language tag", () => {
+    const result = parseArchitectStructureSignals(`\`\`\`JSON\n${section}\n\`\`\``, "book-c");
+    expect(result.status).toBe("ok");
+    expect(result.signals.bookId).toBe("book-c");
+  });
+
+  it("parses JSON when short prose surrounds the object", () => {
+    const result = parseArchitectStructureSignals(`下面是结构信号：\n${section}\n以上。`, "book-d");
+    expect(result.status).toBe("ok");
+    expect(result.signals.bookId).toBe("book-d");
+  });
+
+  it("still returns parse_error for unrecoverable content", () => {
+    const result = parseArchitectStructureSignals("not json", "book-e");
+    expect(result.status).toBe("parse_error");
+    expect(result.signals.bookId).toBe("book-e");
+  });
+});
+
 // ---- Read / Write ----
 
 describe("readStructureSignals / writeStructureSignals", () => {
