@@ -1976,8 +1976,43 @@ ${trimmed}\n`;
       antagonistMap: parsedSections.get(this.normalizeSectionName("antagonist_map")),
       motivationMatrix: parsedSections.get(this.normalizeSectionName("motivation_matrix")),
       first10ChapterPlan: parsedSections.get(this.normalizeSectionName("first_10_chapter_plan")),
-      structureSignals: parsedSections.get(this.normalizeSectionName("structure_signals")),
+      structureSignals: this.extractStructureSignalsSection(content, parsedSections),
     };
+  }
+
+  private extractStructureSignalsSection(content: string, parsedSections: Map<string, string>): string | undefined {
+    const direct = parsedSections.get(this.normalizeSectionName("structure_signals"));
+    if (direct) {
+      return direct;
+    }
+
+    for (const [name, section] of parsedSections) {
+      if (
+        name === "structure_signal" ||
+        name === "structure_signals_json" ||
+        name === "signals" ||
+        (name.includes("structure") && name.includes("signal"))
+      ) {
+        return section;
+      }
+    }
+
+    for (const section of parsedSections.values()) {
+      if (!section.includes("signals")) continue;
+      const probe = parseArchitectStructureSignals(section, "__probe__");
+      if (probe.status === "ok") {
+        return section;
+      }
+    }
+
+    if (content.includes("signals")) {
+      const probe = parseArchitectStructureSignals(content, "__probe__");
+      if (probe.status === "ok") {
+        return content;
+      }
+    }
+
+    return undefined;
   }
 
   private normalizeSectionName(name: string): string {

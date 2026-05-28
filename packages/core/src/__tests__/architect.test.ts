@@ -40,6 +40,78 @@ describe("ArchitectAgent", () => {
     vi.restoreAllMocks();
   });
 
+  it("recovers structure signals from a non-standard Chinese heading", async () => {
+    const agent = new ArchitectAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+
+    const parseSections = (agent as unknown as { parseSections(content: string): { structureSignals?: string } }).parseSections.bind(agent);
+    const output = parseSections([
+      "=== SECTION: story_bible ===",
+      "# Story Bible",
+      "=== SECTION: volume_outline ===",
+      "# Volume Outline",
+      "=== SECTION: book_rules ===",
+      "# Book Rules",
+      "=== SECTION: current_state ===",
+      "# Current State",
+      "=== SECTION: pending_hooks ===",
+      "# Pending Hooks",
+      "## 书级结构信号",
+      validStructureSignalsSection(),
+    ].join("\n"));
+
+    expect(output.structureSignals).toContain("\"signals\"");
+  });
+
+  it("recovers structure signals from an alternate English section name", async () => {
+    const agent = new ArchitectAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+
+    const parseSections = (agent as unknown as { parseSections(content: string): { structureSignals?: string } }).parseSections.bind(agent);
+    const output = parseSections([
+      "=== SECTION: story_bible ===",
+      "# Story Bible",
+      "=== SECTION: volume_outline ===",
+      "# Volume Outline",
+      "=== SECTION: book_rules ===",
+      "# Book Rules",
+      "=== SECTION: current_state ===",
+      "# Current State",
+      "=== SECTION: pending_hooks ===",
+      "# Pending Hooks",
+      "=== SECTION: structure signals json ===",
+      validStructureSignalsSection(),
+    ].join("\n"));
+
+    expect(output.structureSignals).toContain("\"signals\"");
+  });
+
   it("uses English prompts when generating foundation from imported English chapters", async () => {
     const agent = new ArchitectAgent({
       client: {
