@@ -232,12 +232,13 @@ export class PlannerAgent extends BaseAgent {
       volumeOutline,
       outlineLooksStale,
     );
-    const planningAnchor = conflicts.length > 0 ? undefined : outlineNode;
+    const resolvedOutlineNode = conflicts.length > 0 ? undefined : outlineNode;
+    const resolvedMatchedAnchor = resolvedOutlineNode ? matchedOutlineAnchor : false;
     const memorySelection = await retrieveMemorySelection({
       bookDir: input.bookDir,
       chapterNumber: input.chapterNumber,
       goal,
-      outlineNode: planningAnchor,
+      outlineNode: resolvedOutlineNode,
       mustKeep: mustKeepBase,
     });
     const activeHookCount = memorySelection.activeHooks.filter(
@@ -279,8 +280,8 @@ export class PlannerAgent extends BaseAgent {
       chapterNumber: input.chapterNumber,
       language: input.book.language,
       volumeOutline,
-      outlineNode,
-      matchedOutlineAnchor,
+      outlineNode: resolvedOutlineNode,
+      matchedOutlineAnchor: resolvedMatchedAnchor,
       cadence,
       arcMapDirective: arcMap.arcDirective,
       hookEmergence,
@@ -318,7 +319,7 @@ export class PlannerAgent extends BaseAgent {
       language,
       chapterNumber: input.chapterNumber,
       goal,
-      outlineNode,
+      outlineNode: resolvedOutlineNode,
       currentFocus,
       currentState,
       chapterSummaries,
@@ -349,6 +350,7 @@ export class PlannerAgent extends BaseAgent {
       chapterGoal: singlePayoffGovernance.chapterGoal,
       language,
       currentState,
+      parsedRules,
     });
     const revealExecutablePayoffGovernance = this.enforceExecutableRevealPayoff({
       chapterGoal: concreteEventPayoffGovernance.chapterGoal,
@@ -1746,6 +1748,7 @@ export class PlannerAgent extends BaseAgent {
     readonly chapterGoal: ChapterGoal;
     readonly language: "zh" | "en";
     readonly currentState: string;
+    readonly parsedRules?: ReturnType<typeof parseBookRules>;
   }): {
     readonly chapterGoal: ChapterGoal;
     readonly directiveNote?: string;
@@ -1762,6 +1765,7 @@ export class PlannerAgent extends BaseAgent {
       chapterGoal: input.chapterGoal,
       currentState: input.currentState,
       language: input.language,
+      parsedRules: input.parsedRules,
     });
     if (!rewrittenPayoff || rewrittenPayoff === payoff) {
       return {
@@ -2065,6 +2069,7 @@ export class PlannerAgent extends BaseAgent {
     readonly chapterGoal: ChapterGoal;
     readonly currentState: string;
     readonly language: "zh" | "en";
+    readonly parsedRules?: ReturnType<typeof parseBookRules>;
   }): string {
     const source = [
       input.chapterGoal.protagonistGoal,
@@ -2105,10 +2110,18 @@ export class PlannerAgent extends BaseAgent {
     }
 
     const inferredType = input.chapterGoal.payoffDirective?.payoffType;
+    const customResources = input.parsedRules?.rules?.numericalSystemOverrides?.resourceTypes || [];
+    const systemResourceName = customResources.find(res => /(积分|点数|能量|试用期|权限)/.test(res));
+
     switch (inferredType) {
       case "reveal":
         return input.language === "zh" ? "一条关键线索被当场揭开" : "a key clue is revealed on the spot";
       case "resource":
+        if (systemResourceName) {
+          return input.language === "zh"
+            ? `获得一份可立刻结算的${systemResourceName}奖励`
+            : `a usable ${systemResourceName} reward is secured`;
+        }
         return input.language === "zh" ? "一份可立刻使用的关键资源被拿到" : "a usable key resource is secured";
       case "breakthrough":
         return input.language === "zh" ? "第一次觉醒被当场触发" : "the first awakening is triggered on the spot";
@@ -3285,7 +3298,9 @@ export class PlannerAgent extends BaseAgent {
       `- goalIntensity: ${intent.goalIntensity}`,
       "",
       "## Outline Node",
-      intent.outlineNode ?? "(not found)",
+      intent.conflicts?.some((c) => c.type === "outline_vs_recent_state" || c.type === "outline_vs_request" || c.type === "outline_vs_current_focus")
+        ? "(not found)"
+        : (intent.outlineNode ?? "(not found)"),
       "",
       "## Must Keep",
       mustKeep,

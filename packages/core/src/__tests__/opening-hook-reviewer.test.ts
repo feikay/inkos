@@ -413,7 +413,7 @@ describe("OpeningHookReviewerAgent", () => {
       expect(report.skippedReason).toBe("测试跳过原因。");
       expect(report.summary).toContain("跳过");
       for (const dim of OPENING_HOOK_DIMENSIONS) {
-        expect(report.dimensions[dim]).toBe(55);
+        expect(report.dimensions[dim]).toBe(30);
       }
     });
   });

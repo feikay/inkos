@@ -517,7 +517,7 @@ describe("validateTextAgainstChapterResourcePlanFinal", () => {
     expect(result.expectedClosingBalances["震惊值"]).toBe(-10);
   });
 
-  it("T7: system_bootstrap with no events keeps opening balance = closing (regression)", () => {
+  it("T7: system_bootstrap with no events can infer unused zero resources", () => {
     const text = "系统激活了。林默看着面板，上面显示着各种数值。但他还没有任何操作。";
 
     const result = validateTextAgainstChapterResourcePlanFinal({
@@ -525,10 +525,23 @@ describe("validateTextAgainstChapterResourcePlanFinal", () => {
       plan: bootstrapPlan,
     });
 
-    // Without events, should still require balance claims matching opening balances
+    expect(result.passed).toBe(true);
+    expect(result.violations).toEqual([]);
+    expect(result.actualClosingBalances["震惊值"]).toBe(0);
+    expect(result.actualClosingBalances["爱慕值"]).toBe(0);
+  });
+
+  it("T7b: system_bootstrap still requires a zero balance for mentioned resources", () => {
+    const text = "系统激活了。林默看见震惊值栏亮起，但没有写出期末余额。";
+
+    const result = validateTextAgainstChapterResourcePlanFinal({
+      text,
+      plan: bootstrapPlan,
+    });
+
     expect(result.passed).toBe(false);
     expect(result.violations).toContain("缺少期末 震惊值=0");
-    expect(result.violations).toContain("缺少期末 爱慕值=0");
+    expect(result.violations).not.toContain("缺少期末 爱慕值=0");
   });
 
   it("T8: system_bootstrap with gain+consume computes net closing balance", () => {
@@ -930,12 +943,12 @@ initialResources:
       closureRequirement: "explicit_balance_required",
     };
 
-    it("T22: system_bootstrap preScan catches missing balance_claim", () => {
-      const text = "系统激活！宿主获得了灵力。但没有写期末余额。";
+    it("T22: system_bootstrap preScan catches missing balance_claim for mentioned resources", () => {
+      const text = "系统激活！宿主看见灵力值栏亮起。但没有写期末余额。";
       const result = preScanTextAgainstResourcePlan(text, sbPlan);
       expect(result.ok).toBe(false);
       expect(result.violations).toContain('缺少期末声明：请在正文中写出"当前灵力值：0"');
-      expect(result.violations).toContain('缺少期末声明：请在正文中写出"当前气血值：0"');
+      expect(result.violations).not.toContain('缺少期末声明：请在正文中写出"当前气血值：0"');
     });
 
     it("T23: system_bootstrap preScan passes when balance declarations present", () => {
@@ -1030,23 +1043,25 @@ initialResources:
       closureRequirement: "explicit_balance_required",
     };
 
-    it("T29: writer prompt uses explicit writing instruction instead of ambiguous 期末确认", () => {
+    it("T29: writer prompt explains zero bootstrap balances without ambiguous 期末确认", () => {
       const output = renderResourcePlanForPrompt(planWithClaims, "writer");
-      expect(output).toContain("在正文中明确写出期末余额声明");
+      expect(output).toContain("初始余额记录：当前灵力值：0");
+      expect(output).toContain("未出场可省略");
       expect(output).not.toContain("期末确认 灵力值=0");
     });
 
     it("T30: writer prompt includes balance claim format guidance", () => {
       const output = renderResourcePlanForPrompt(planWithClaims, "writer");
       expect(output).toContain("【期末余额声明要求】");
-      expect(output).toContain("必须在正文末尾写出");
+      expect(output).toContain("正文未提到、未使用的资源，可由程序推断为 0");
+      expect(output).toContain("只要正文提到或使用某个资源");
       expect(output).toContain("当前资源名：数值");
-      expect(output).toContain("如果期末余额为 0，也必须写出");
+      expect(output).toContain("对已出场资源，即使期末余额为 0");
     });
 
     it("T31: chapter_intent prompt also uses explicit writing instruction", () => {
       const output = renderResourcePlanForPrompt(planWithClaims, "chapter_intent");
-      expect(output).toContain("在正文中明确写出期末余额声明");
+      expect(output).toContain("初始余额记录：当前灵力值：0");
       expect(output).not.toContain("期末确认 灵力值=0");
     });
 

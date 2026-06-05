@@ -27,8 +27,8 @@ export interface NarrativeMemorySeed {
   readonly hooks: ReadonlyArray<StoredHook>;
 }
 
-export async function loadRuntimeStateSnapshot(bookDir: string): Promise<RuntimeStateSnapshot> {
-  await bootstrapStructuredStateFromMarkdown({ bookDir });
+export async function loadRuntimeStateSnapshot(bookDir: string, fallbackChapter?: number): Promise<RuntimeStateSnapshot> {
+  await bootstrapStructuredStateFromMarkdown({ bookDir, fallbackChapter });
   const stateDir = join(bookDir, "story", "state");
 
   const [manifest, currentState, hooks, chapterSummaries] = await Promise.all([
@@ -62,7 +62,7 @@ export async function buildRuntimeStateArtifacts(params: {
   readonly language: "zh" | "en";
   readonly allowReapply?: boolean;
 }): Promise<RuntimeStateArtifacts> {
-  const snapshot = await loadRuntimeStateSnapshot(params.bookDir);
+  const snapshot = await loadRuntimeStateSnapshot(params.bookDir, params.delta.chapter - 1);
   const { resolvedDelta } = arbitrateRuntimeStateDeltaHooks({
     hooks: snapshot.hooks.hooks,
     delta: params.delta,
@@ -97,8 +97,8 @@ export async function saveRuntimeStateSnapshot(
   ]);
 }
 
-export async function loadNarrativeMemorySeed(bookDir: string): Promise<NarrativeMemorySeed> {
-  const snapshot = await loadRuntimeStateSnapshot(bookDir);
+export async function loadNarrativeMemorySeed(bookDir: string, fallbackChapter?: number): Promise<NarrativeMemorySeed> {
+  const snapshot = await loadRuntimeStateSnapshot(bookDir, fallbackChapter);
 
   return {
     summaries: snapshot.chapterSummaries.rows.map((row) => ({

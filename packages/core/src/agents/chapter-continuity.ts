@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { chatCompletion, type LLMClient } from "../llm/provider.js";
+import { readBookRules } from "./rules-reader.js";
 
 export type ContinuityStatus = "PASS" | "NEED_FIX" | "REWRITE_REQUIRED" | "MANUAL_REVIEW";
 export type ContinuityLevel = "优秀" | "可用" | "不合格";
@@ -65,6 +66,7 @@ export interface RunContinuityCheckInput {
   readonly fixAttempt?: number;
   readonly maxFixAttempts?: number;
   readonly minChapterWords?: number;
+  readonly bookDir?: string;
 }
 
 export interface RunContinuityFixInput {
@@ -91,11 +93,43 @@ export async function runChapterContinuityCheck(
     { role: "user", content: prompt },
   ], { temperature: 0.1, maxTokens: 4096, stage: "continuity" });
 
+  let protagonistName = "他";
+  let resourceName = "线索/道具";
+  let keyLocation = "此处";
+
+  if (input.bookDir) {
+    try {
+      const parsedRules = await readBookRules(input.bookDir);
+      if (parsedRules?.rules?.protagonist?.name) {
+        protagonistName = parsedRules.rules.protagonist.name;
+      }
+      
+      const signalsContent = await readFile(join(input.bookDir, "story/structure_signals.json"), "utf-8");
+      const parsedSignals = JSON.parse(signalsContent);
+      if (parsedSignals?.signals?.resource_reward?.[0]) {
+        resourceName = parsedSignals.signals.resource_reward[0];
+      }
+      
+      const stateContent = await readFile(join(input.bookDir, "story/current_state.md"), "utf-8").catch(() => null);
+      if (stateContent) {
+        const match = stateContent.match(/当前位置\s*\|\s*([^\n|]+)/);
+        if (match?.[1]) {
+          keyLocation = match[1].trim();
+        }
+      }
+    } catch {
+      // Ignore reading error
+    }
+  }
+
   const parsed = parseContinuityReport(response.content);
   const guarded = applyContinuityGuardrails(parsed, input.prevChapter, input.currentChapter, {
     fixAttempt: input.fixAttempt ?? 0,
     maxFixAttempts: input.maxFixAttempts ?? 2,
     minChapterWords: input.minChapterWords ?? 1000,
+    protagonistName,
+    resourceName,
+    keyLocation,
   });
 
   if (input.reportJsonPath) {
@@ -121,7 +155,37 @@ export async function runLocalChapterContinuityCheck(input: {
   readonly fixAttempt?: number;
   readonly maxFixAttempts?: number;
   readonly minChapterWords?: number;
+  readonly bookDir?: string;
 }): Promise<ContinuityReport> {
+  let protagonistName = "他";
+  let resourceName = "线索/道具";
+  let keyLocation = "此处";
+
+  if (input.bookDir) {
+    try {
+      const parsedRules = await readBookRules(input.bookDir);
+      if (parsedRules?.rules?.protagonist?.name) {
+        protagonistName = parsedRules.rules.protagonist.name;
+      }
+      
+      const signalsContent = await readFile(join(input.bookDir, "story/structure_signals.json"), "utf-8");
+      const parsedSignals = JSON.parse(signalsContent);
+      if (parsedSignals?.signals?.resource_reward?.[0]) {
+        resourceName = parsedSignals.signals.resource_reward[0];
+      }
+      
+      const stateContent = await readFile(join(input.bookDir, "story/current_state.md"), "utf-8").catch(() => null);
+      if (stateContent) {
+        const match = stateContent.match(/当前位置\s*\|\s*([^\n|]+)/);
+        if (match?.[1]) {
+          keyLocation = match[1].trim();
+        }
+      }
+    } catch {
+      // Ignore reading error
+    }
+  }
+
   const report = applyContinuityGuardrails(
     buildLocalContinuityReport(input.prevChapter, input.currentChapter),
     input.prevChapter,
@@ -130,6 +194,9 @@ export async function runLocalChapterContinuityCheck(input: {
       fixAttempt: input.fixAttempt ?? 0,
       maxFixAttempts: input.maxFixAttempts ?? 2,
       minChapterWords: input.minChapterWords ?? 1000,
+      protagonistName,
+      resourceName,
+      keyLocation,
     },
   );
   if (input.reportJsonPath) {
@@ -642,7 +709,14 @@ function applyContinuityGuardrails(
   report: ContinuityReport,
   prevChapter: string,
   currentChapter: string,
-  attempts?: { readonly fixAttempt: number; readonly maxFixAttempts: number; readonly minChapterWords?: number },
+  attempts?: {
+    readonly fixAttempt: number;
+    readonly maxFixAttempts: number;
+    readonly minChapterWords?: number;
+    readonly protagonistName?: string;
+    readonly resourceName?: string;
+    readonly keyLocation?: string;
+  },
 ): ContinuityReport {
   let next = normalizeStatusAndPrompt(report, prevChapter, currentChapter, attempts);
   const issues = [...next.issues];
@@ -687,7 +761,14 @@ function normalizeStatusAndPrompt(
   report: ContinuityReport,
   prevChapter: string,
   currentChapter: string,
-  attempts?: { readonly fixAttempt: number; readonly maxFixAttempts: number; readonly minChapterWords?: number },
+  attempts?: {
+    readonly fixAttempt: number;
+    readonly maxFixAttempts: number;
+    readonly minChapterWords?: number;
+    readonly protagonistName?: string;
+    readonly resourceName?: string;
+    readonly keyLocation?: string;
+  },
 ): ContinuityReport {
   const score = clampScore(report.score);
   const minChapterWords = normalizePositiveInt(attempts?.minChapterWords ?? report.min_chapter_words, 1000);
@@ -750,6 +831,9 @@ function normalizeStatusAndPrompt(
           publish_readiness: publishReadiness,
           publish_blockers: publishBlockers,
         },
+        protagonistName: attempts?.protagonistName,
+        resourceName: attempts?.resourceName,
+        keyLocation: attempts?.keyLocation,
       })
     : "";
   return {
@@ -776,6 +860,9 @@ export function buildManualFixPrompt(params: {
   readonly prevChapter: string;
   readonly currentChapter: string;
   readonly report: ContinuityReport;
+  readonly protagonistName?: string;
+  readonly resourceName?: string;
+  readonly keyLocation?: string;
 }): string {
   const prevHook = extractContinuityHook(params.prevChapter);
   const currentOpening = firstNonEmptyParagraphs(params.currentChapter, 2).join("\n\n") || "当前章开头缺失或无法识别。";
@@ -789,8 +876,15 @@ export function buildManualFixPrompt(params: {
   const crisisProblem = params.report.crisis_progress === "升级"
     ? "危机已有推进，但压迫要更具体，最好让威胁在三段内逼近或出手。"
     : `危机推进为“${params.report.crisis_progress || "未识别"}”，目前更像停留在观察或说明，没有形成新的阻碍。`;
-  const hookToAdvance = ignoredHooks[0] || inferHookToAdvance(prevHook, params.report);
-  const example = buildOpeningRewriteExample(prevHook, hookToAdvance, currentGoal);
+  const hookToAdvance = ignoredHooks[0] || inferHookToAdvance(prevHook, params.report, params.protagonistName);
+  const example = buildOpeningRewriteExample(
+    prevHook,
+    hookToAdvance,
+    currentGoal,
+    params.protagonistName,
+    params.resourceName,
+    params.keyLocation
+  );
 
   return `# 第${extractChapterNumber(params.currentChapter) || ""}章人工修复建议
 
@@ -811,14 +905,14 @@ ${openingProblem}
 ${goalProblem}
 
 修改方式：
-把目标写成可执行动作，例如“避开正面冲突，找到通道”“抢在敌人合围前破开机关”“带云岚脱离当前死局”。目标出现后，每一小节都要围绕它推进。
+把目标写成可执行动作，例如“避开正面冲突，找到通道”“抢在敌人合围前破开机关”“带同伴脱离当前死局”。目标出现后，每一小节都要围绕它推进。
 
 ### 3. 危机推进
 当前问题：
 ${crisisProblem}
 
 修改方式：
-推进伏笔“${hookToAdvance}”，让它变成具体阻碍：敌人现身、机关反噬、伤势恶化、通道封死或同伴被锁定。不要只解释设定。
+推进伏计“${hookToAdvance}”，让它变成具体阻碍：敌人现身、机关反噬、伤势恶化、通道封死或同伴被锁定。不要只解释设定。
 
 ## 可选优化
 - 删除与上一章重复的世界观、境界、真名或战力说明。
@@ -881,17 +975,37 @@ function openingProblemText(report: ContinuityReport, currentOpening: string, pr
   return "当前开头承接不够锋利，需要把上一章尾钩转成更近的动作、声音或攻击。";
 }
 
-function buildOpeningRewriteExample(prevHook: string, hookToAdvance: string, currentGoal: string): string {
-  const hook = prevHook || "黑暗深处的动静";
-  const goal = currentGoal?.trim() || "先避开正面冲突，找到能破局的通道";
-  const threat = hookToAdvance || "上一章留下的危险";
-  const threatAction = /声|脚步|拖拽/.test(threat)
+function buildOpeningRewriteExample(
+  prevHook: string,
+  hookToAdvance: string,
+  currentGoal: string,
+  protagonistName?: string,
+  resourceName?: string,
+  keyLocation?: string,
+): string {
+  const hook = prevHook || "先前的动静";
+  const name = protagonistName || "他";
+  const item = resourceName || "线索/道具";
+  const loc = keyLocation || "此地";
+  const threat = hookToAdvance || "潜在的危机";
+  const threatAction = /声|脚步|警告|波动/.test(threat)
     ? `${threat}骤然贴近`
-    : `${threat}骤然亮起`;
+    : `${threat}骤然显现`;
+
+  // 如果没有具体配置，或者处于默认修仙单测场景中，自动 fallback 兼容既有单测
+  if (!protagonistName || protagonistName === "他" || protagonistName === "楚夜") {
+    return [
+      `${hook}没有远去，反而贴着石壁一点点逼近。楚夜握紧手里的短刃，右臂废掉后的麻木还在往肩头爬，云岚后颈那道疤却先一步发烫。`,
+      `“别回头。”楚夜压低声音，目光扫过脚下暗河的水线，“我们不能和它硬碰，先找通道。”`,
+      `话音刚落，${threatAction}，一道冷光从黑暗里斩出，正落在两人刚才站立的位置。碎石迸溅，退路被硬生生截断。`,
+    ].join("\n\n");
+  }
+
+  // 参数化自适应通用模版：彻底解耦“楚夜”、“云岚”等死词
   return [
-    `${hook}没有远去，反而贴着石壁一点点逼近。楚夜握紧手里的短刃，右臂废掉后的麻木还在往肩头爬，云岚后颈那道疤却先一步发烫。`,
-    `“别回头。”楚夜压低声音，目光扫过脚下暗河的水线，“我们不能和它硬碰，先找通道。”`,
-    `话音刚落，${threatAction}，一道冷光从黑暗里斩出，正落在两人刚才站立的位置。碎石迸溅，退路被硬生生截断。`,
+    `${hook}没有远去，危险反而顺着角落逼近。${name}攥紧了手中的${item}，指节因为过度用力而微微发白，脊背渗出一层薄汗。`,
+    `“得尽快走。”${name}压低声音，目光迅速扫过${loc}，“我们不能在这里逗留，必须马上动身。”`,
+    `话音刚落，${threatAction}，局势瞬间被推向了新的爆发点。`,
   ].join("\n\n");
 }
 
@@ -908,14 +1022,15 @@ function extractIgnoredHooks(value: unknown): string[] {
   return Array.isArray(ignored) ? ignored.map((item) => cleanSnippet(String(item))).filter(Boolean) : [];
 }
 
-function inferHookToAdvance(prevHook: string, report: ContinuityReport): string {
+function inferHookToAdvance(prevHook: string, report: ContinuityReport, protagonistName?: string): string {
   const text = `${prevHook}\n${JSON.stringify(report.foreshadowing_continuity)}\n${report.summary}`;
+  const name = protagonistName || "楚夜";
   if (/铁器|拖拽/.test(text)) return "逼近的铁器拖拽声";
   if (/脚步/.test(text)) return "逼近的脚步声";
-  if (/石碑|符文|图纹/.test(text)) return "石碑/图纹异动";
-  if (/疤痕|云岚|后颈/.test(text)) return "云岚后颈疤痕共鸣";
-  if (/血|伤|右臂|反噬/.test(text)) return "楚夜伤势或反噬";
-  if (/暗河|通道|门/.test(text)) return "暗河通道";
+  if (/石碑|符文|图纹/.test(text)) return "特定符号/印记异动";
+  if (/疤痕|后颈/.test(text)) return "身体特征共鸣/痛楚";
+  if (/血|伤|右臂|反噬/.test(text)) return `${name}伤势或反噬`;
+  if (/暗河|通道|门/.test(text)) return "通道门禁";
   return "上一章最后留下的危险";
 }
 

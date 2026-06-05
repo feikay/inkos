@@ -112,6 +112,54 @@ describe("ArchitectAgent", () => {
     expect(output.structureSignals).toContain("\"signals\"");
   });
 
+  it("generates missing structure signals from an existing foundation", async () => {
+    const agent = new ArchitectAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+
+    const book: BookConfig = {
+      id: "missing-structure-signals",
+      title: "缺信号测试书",
+      platform: "tomato",
+      genre: "system",
+      status: "outlining",
+      targetChapters: 100,
+      chapterWordCount: 2000,
+      language: "zh",
+      createdAt: "2026-05-28T00:00:00.000Z",
+      updatedAt: "2026-05-28T00:00:00.000Z",
+    };
+
+    const chat = vi.spyOn(agent as unknown as { chat: (...args: unknown[]) => Promise<unknown> }, "chat")
+      .mockResolvedValue({
+        content: validStructureSignalsSection(),
+        usage: ZERO_USAGE,
+      });
+
+    const completed = await agent.completeStructureSignals(book, {
+      storyBible: "# Story Bible\n主角绑定系统。",
+      volumeOutline: "# Volume Outline\n第一卷。",
+      bookRules: "# Book Rules\n规则。",
+      currentState: "# Current State\n初始。",
+      pendingHooks: "# Pending Hooks\n伏笔。",
+    });
+
+    expect(completed.structureSignals).toContain("\"signals\"");
+    expect(chat).toHaveBeenCalledOnce();
+  });
+
   it("uses English prompts when generating foundation from imported English chapters", async () => {
     const agent = new ArchitectAgent({
       client: {

@@ -25,10 +25,18 @@ const bookName = argv[0];
 const DEFAULTS = {
   stopOnFail: true,
   useReviewed: true,
-  maxPolish: 2,
+  maxPolish: 3,
   maxRepair: 2,
-  maxContinuityFix: 1,
+  maxContinuityFix: 2,
   maxNumericFix: 1,
+  maxQualityFixAttempts: 3,
+  maxPlotFixAttempts: 3,
+  qualityPassThreshold: 85,
+  qualityAcceptThreshold: 85,
+  qualityFixThreshold: 75,
+  structurePassThreshold: 85,
+  structureAcceptThreshold: 75,
+  minChapterWords: 1000,
 };
 
 const FINAL_STATUS = {
@@ -69,6 +77,14 @@ Options:
   --max-repair <n>
   --max-continuity-fix <n>
   --max-numeric-fix <n>
+  --max-quality-fix-attempts <n>
+  --max-plot-fix-attempts <n>
+  --quality-pass-threshold <n>
+  --quality-accept-threshold <n>
+  --quality-fix-threshold <n>
+  --structure-pass-threshold <n>
+  --structure-accept-threshold <n>
+  --min-chapter-words <n>
   --disable-numeric-fix
   --dry-run
   --mock-run`);
@@ -539,11 +555,25 @@ function publishReadyArgs(cli, bookName, chapter, opts, continuityOverridePass =
     "--chapter",
     String(chapter),
     "--max-fix-attempts",
-    "0",
+    String(opts.maxContinuityFix),
     "--max-polish-attempts",
     String(Math.max(1, opts.maxPolish)),
     "--max-quality-fix-attempts",
-    "0",
+    String(opts.maxQualityFixAttempts),
+    "--max-plot-fix-attempts",
+    String(opts.maxPlotFixAttempts),
+    "--quality-pass-threshold",
+    String(opts.qualityPassThreshold),
+    "--quality-accept-threshold",
+    String(opts.qualityAcceptThreshold),
+    "--quality-fix-threshold",
+    String(opts.qualityFixThreshold),
+    "--structure-pass-threshold",
+    String(opts.structurePassThreshold),
+    "--structure-accept-threshold",
+    String(opts.structureAcceptThreshold),
+    "--min-chapter-words",
+    String(opts.minChapterWords),
   ];
   if (continuityOverridePass) args.push("--continuity-override-pass");
   return args;
@@ -865,6 +895,14 @@ function parseOptions() {
     maxRepair: intOpt("max-repair", DEFAULTS.maxRepair),
     maxContinuityFix: intOpt("max-continuity-fix", DEFAULTS.maxContinuityFix),
     maxNumericFix: intOpt("max-numeric-fix", DEFAULTS.maxNumericFix),
+    maxQualityFixAttempts: intOpt("max-quality-fix-attempts", DEFAULTS.maxQualityFixAttempts),
+    maxPlotFixAttempts: intOpt("max-plot-fix-attempts", DEFAULTS.maxPlotFixAttempts),
+    qualityPassThreshold: intOpt("quality-pass-threshold", DEFAULTS.qualityPassThreshold),
+    qualityAcceptThreshold: intOpt("quality-accept-threshold", DEFAULTS.qualityAcceptThreshold),
+    qualityFixThreshold: intOpt("quality-fix-threshold", DEFAULTS.qualityFixThreshold),
+    structurePassThreshold: intOpt("structure-pass-threshold", DEFAULTS.structurePassThreshold),
+    structureAcceptThreshold: intOpt("structure-accept-threshold", DEFAULTS.structureAcceptThreshold),
+    minChapterWords: intOpt("min-chapter-words", DEFAULTS.minChapterWords),
     disableNumericFix: hasFlag("disable-numeric-fix"),
     dryRun: hasFlag("dry-run") || hasFlag("mock-run"),
     mockRun: hasFlag("mock-run"),
@@ -973,6 +1011,14 @@ async function main() {
       maxRepair: opts.maxRepair,
       maxContinuityFix: opts.maxContinuityFix,
       maxNumericFix: opts.maxNumericFix,
+      maxQualityFixAttempts: opts.maxQualityFixAttempts,
+      maxPlotFixAttempts: opts.maxPlotFixAttempts,
+      qualityPassThreshold: opts.qualityPassThreshold,
+      qualityAcceptThreshold: opts.qualityAcceptThreshold,
+      qualityFixThreshold: opts.qualityFixThreshold,
+      structurePassThreshold: opts.structurePassThreshold,
+      structureAcceptThreshold: opts.structureAcceptThreshold,
+      minChapterWords: opts.minChapterWords,
       disableNumericFix: opts.disableNumericFix,
       dryRun: opts.dryRun,
     },

@@ -60,6 +60,9 @@ node scripts/fanqie/write-publish-export.mjs <书名> --resume-last
 一步一步操作时使用这条链路：
 
 ```bash
+# 0. 创建意图卡（可选，需要手工干预本章走势的话）
+node packages/cli/dist/index.js plan chapter <书名>
+
 # 1. 写下一章
 node packages/cli/dist/index.js write next <书名>
 
@@ -71,7 +74,7 @@ node packages/cli/dist/index.js write next <书名>
 node packages/cli/dist/index.js review continuity-auto --book <书名> --chapter <章节号> --max-fix-attempts 2
 
 # 3. 六步剧情修复
-node packages/cli/dist/index.js review plot-auto-fix --book <书名> --chapter <章节 --max-plot-fix-attempts 1
+node packages/cli/dist/index.js review plot-auto-fix --book <书名> --chapter <章节号> --max-plot-fix-attempts 1
 
 # 4. 发布前闭环检查
 node packages/cli/dist/index.js review publish-ready --book <书名> --chapter <章节号>
@@ -85,11 +88,23 @@ node scripts/fanqie/repair-fanqie.mjs <书名> --chapter <章节号> --apply
 # 7. approve
 node packages/cli/dist/index.js review approve <书名> <章节号>
 
-# 8. 导出番茄版
+# 8. 重新更新细纲和设定
+node packages/cli/dist/index.js write sync <书名> <章节号>
+
+# 9. 导出番茄版
 node scripts/fanqie/export-fanqie.mjs <书名> --incremental --use-reviewed --title "<书名或发布标题>"
 
-# 9. 有问题的时候查询处理方法
+# 10. 有问题的时候查询处理方法
 node packages/cli/dist/index.js review diagnose --book <书名> --chapter <章节号>
+
+# 11. 黄金3章审查
+# 在跑完第3章后执行，执行完再跑一次publish-ready
+node scripts/fanqie/run-golden-review.mjs <书名>
+
+# 12. 一键重建状态
+# 清空当前缓存，根据 index.json 中记录的最新通过章节列表，自适应从第 1 章开始逐章重新进行 LLM 深度分析
+# 重新生成完美的 current_state.md、伏笔注册表以及用于关联嵌入的向量数据库（memory.db），让系统的“记忆”与大纲完美归一
+node packages/cli/dist/index.js review rebuild-state <书名>
 ```
 
 分工原则：
@@ -223,15 +238,29 @@ node packages/cli/dist/index.js review fanqie-polish --book 葬渊魔经 --from 
 node packages/cli/dist/index.js review publish-ready --book 葬渊魔经 --chapter 84
 # 综合输出（批量） 包含 continuity-auto -> fanqie-quality -> fanqie-polish -> continuity-auto
 node packages/cli/dist/index.js review publish-ready --book 葬渊魔经 \
-  --from 2 --to 200 \
+  --chapter 84 \
+  #--from 2 --to 200 \
+  # 连续性自动检测+自动修复
   --max-fix-attempts 2 \
+  # 番茄质量检测：爽点 / 节奏 / 钩子 最大风格润色尝试次数
   --max-polish-attempts 1 \
-  --max-plot-fix-attempts 1 \ # 六步剧情修复
+  # 最大定向质量修复次数
   --max-quality-fix-attempts 1 \
+  # 质量审核通过门限
   --quality-pass-threshold 85 \
+  # 质量勉强接受门限
   --quality-accept-threshold 75 \
+  # 质量重写门限
   --quality-fix-threshold 75 \
-  --accept-manual-continuity \ # 如果接受人工
+   # 结构审核通过门限
+  --structure-pass-threshold 85 \
+   # 结构审核接受门限
+  --structure-accept-threshold 75 \
+   # 六步剧情（结构）修复
+  --max-plot-fix-attempts 1 \
+   # 如果接受人工
+  --accept-manual-continuity \
+  # 最小章节字数
   --min-chapter-words 1000
 
 # 

@@ -69,6 +69,7 @@ const DIM_TO_STRUCTURE_SIGNALS: Partial<Record<StoryEffectivenessDimension, (typ
 const EMOTION_EVENT_SIGNALS = [
   /冲突|压迫|不公|羞辱|威胁|危险|紧张|恐惧|愤怒|绝望|痛苦|挣扎|逼迫|围堵|追杀|袭击|闯入|爆发|炸裂|坍塌|坠毁/u,
   /画面|场景|镜头|只见|看见|听到|感到|闻到了|触到/u,
+  /变故|意外|噩耗|打击|毁灭|崩塌|失控/u,
 ];
 
 const EMOTION_WEAK_START = [
@@ -102,6 +103,8 @@ const CLIMAX_PAYOFF_SIGNALS = [
   /赢了|成功|做到了|达成了|实现了|拿到了|获得了|解锁|开启|激活/u,
   /付出了|牺牲|失去|消耗|用了|花了|代价|换来了/u,
   /升级|晋升|突破|蜕变|进化|觉醒|强化|变强|提升/u,
+  /峰回路转|绝地反击|关键时刻|千钧一发|决定性|终于|紧急|危急/u,
+  /压制|反击|碾压|吞噬|冲破束缚|挣脱/u,
 ];
 
 const ENDING_PULL_SIGNALS = [
@@ -109,6 +112,8 @@ const ENDING_PULL_SIGNALS = [
   /突然|忽然|却见|只见|还没|尚未|未知|不知道|没想到|竟然|居然/u,
   /门外|身后|响起|弹出|面板|提示|下一刻|接下来|下一章|下一卷/u,
   /留下|埋下|新的|更大的|更深|更危险/u,
+  /如果|否则|一旦|万一|来不及|再不|还有|另外/u,
+  /等待|期待|即将|马上|下一步|选择/u,
 ];
 
 const STRENGTH_PATTERNS: Array<{ readonly pattern: RegExp; readonly dimension: StoryEffectivenessDimension; readonly label: string }> = [

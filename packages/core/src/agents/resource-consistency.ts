@@ -1757,7 +1757,10 @@ function canonicalResourceName(value: string, rules: ResourceRules): string | un
 }
 
 function isAllowedResource(resource: string, rules?: ResourceRules): boolean {
-  return CANONICAL_RESOURCE_WHITELIST.has(resource) || (rules !== undefined && resource in rules.resources);
+  if (rules !== undefined && Object.keys(rules.resources).length > 0) {
+    return resource in rules.resources;
+  }
+  return CANONICAL_RESOURCE_WHITELIST.has(resource);
 }
 
 function isCoreResource(resource: string): boolean {
@@ -1813,7 +1816,7 @@ function detectUnauthorizedResourceRules(
 function detectResourceRuleConflicts(chapterIntent: string, rules: ResourceRules): ResourceMathIssue[] {
   if (!chapterIntent.trim()) return [];
   const aliases = rules.aliases;
-  const intentRates = parseExchangeRatesFromText(chapterIntent, aliases, "chapter_intent", false);
+  const intentRates = parseExchangeRatesFromText(chapterIntent, aliases, "chapter_intent", false, rules);
   if (intentRates.length === 0) return [];
   const issues: ResourceMathIssue[] = [];
   for (const intentRate of intentRates) {

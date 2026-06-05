@@ -71,9 +71,9 @@ const OPENING_HOOK_SIGNAL_GROUPS: Record<string, ReadonlyArray<RegExp>> = {
     /刀架|抵在|指着|对准|瞄准.{0,5}(?:脖子|喉咙|头|心口|背)/u,
   ],
   "worldview-bomb": [
-    /世界|规则|法则|天道|系统|面板|属性|等级|境界|修为|灵力|魔力/u,
-    /必须|只能|不得|禁止|不允许|没有.{0,5}(?:敢|能|会)/u,
-    /纳税|交税|代价|寿命|支付|消耗.{0,5}(?:影子|记忆|情感|灵魂|时间)/u,
+    /世界|规则|法则|天道|系统|面板|属性|等级|境界|修为|灵力|魔力|绑定|提示音/u,
+    /必须|只能|不得|禁止|不允许|没有.{0,5}(?:敢|能|会)|积分|到账|绩效|奖金/u,
+    /纳税|交税|代价|寿命|支付|消耗.{0,5}(?:影子|记忆|情感|灵魂|时间)|买断|回收/u,
   ],
   "extreme-emotion": [
     /不公|委屈|屈辱|羞辱|愤怒|恨|仇|怨|跪|求|哭|泪|践踏|被夺|被抢/u,
@@ -92,7 +92,6 @@ const CORE_DIFFERENTIATOR_SIGNALS = [
   /核心|本源|法则|奥义|真意|道.{0,5}(?:领悟|掌握|突破)/u,
 ];
 
-// long_term_goal_established: Check ch3 for clear long-term goal
 const LONG_TERM_GOAL_SIGNALS = [
   /目标|目地|方向.{0,5}(?:明确|清晰|确定)/u,
   /一定要|必须要|非要|非得|誓要|决心|决定|立志/u,
@@ -100,6 +99,14 @@ const LONG_TERM_GOAL_SIGNALS = [
   /变强|成长|修炼|升级|进化.{0,5}(?:到底|到顶|至极|巅峰)/u,
   /保护|守护|拯救|解放.{0,5}(?:家人|朋友|宗门|国家|世界|所有人)/u,
   /查出|揭开|找出|找到.{0,5}(?:真相|秘密|凶手|答案)/u,
+  // Organic/high-quality family goals (sister saving, medicine, medical fees)
+  /治.{0,5}(?:妹妹|病|心脏病)|保.{0,5}(?:妹妹|家人).{0,3}的命|救.{0,5}(?:妹妹|家人|命)/u,
+  // Puzzle-solving & revenge indicators (clues, case files, evidence, dragging enemy out)
+  /查.{0,5}(?:线索|卷宗|证据|车祸)|拿.{0,3}证据|(?:仇人|凶手).{0,10}揪出/u,
+  // Revenge expressions (avenge parents, make them pay the price)
+  /报.{0,3}仇|父母的仇|付出.{0,5}的?代价/u,
+  // Direct survival goals (finding a way out, staying alive, race against opponents)
+  /生路|活下去|拼命|跑赢|抢在.{0,10}前面/u,
 ];
 
 // three_chapter_arc: Content signals for arc progression
@@ -352,7 +359,7 @@ export class Golden3ChapterAgent extends BaseAgent {
     // ---- setup_ratio_safe ----
     const allContent = ch1 + ch2 + ch3;
     const totalChars = allContent.replace(/\s/g, "").length;
-    const paragraphs = allContent.split(/\n\n+/).filter((p) => p.trim());
+    const paragraphs = allContent.split(/\r?\n+/).map((p) => p.trim()).filter(Boolean);
     const setupParagraphs = paragraphs.filter((p) =>
       SETUP_INDICATOR_PATTERNS.some((pat) => pat.test(p.trim()))
     ).length;

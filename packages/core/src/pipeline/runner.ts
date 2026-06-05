@@ -660,6 +660,7 @@ export class PipelineRunner {
       language: resolvedLanguage,
       stageLanguage,
     });
+    const completedFoundation = await architect.completeStructureSignals(book, foundation);
     try {
       this.logStage(stageLanguage, { zh: "保存书籍配置", en: "saving book config" });
       await this.state.saveBookConfigAt(stagingBookDir, book);
@@ -667,7 +668,7 @@ export class PipelineRunner {
       this.logStage(stageLanguage, { zh: "写入基础设定文件", en: "writing foundation files" });
       await architect.writeFoundationFiles(
         stagingBookDir,
-        foundation,
+        completedFoundation,
         gp.numericalSystem,
         book.language ?? gp.language,
         book.webnovelTemplate,
@@ -771,10 +772,11 @@ export class PipelineRunner {
       language: resolvedLanguage,
       stageLanguage,
     });
+    const completedFoundation = await architect.completeStructureSignals(book, foundation);
     this.logStage(stageLanguage, { zh: "写入基础设定文件", en: "writing foundation files" });
     await architect.writeFoundationFiles(
       bookDir,
-      foundation,
+      completedFoundation,
       gp.numericalSystem,
       book.language ?? gp.language,
       book.webnovelTemplate,
@@ -883,7 +885,7 @@ export class PipelineRunner {
       await writer.saveChapter(bookDir, draftOutput, gp.numericalSystem, resolvedLang);
       await writer.saveNewTruthFiles(bookDir, draftOutput, resolvedLang);
       await this.syncLegacyStructuredStateFromMarkdown(bookDir, chapterNumber, draftOutput);
-      await this.syncNarrativeMemoryIndex(bookId);
+      await this.syncNarrativeMemoryIndex(bookId, chapterNumber);
 
       // Update index
       const existingIndex = await this.state.loadChapterIndex(bookId);
@@ -1285,7 +1287,7 @@ export class PipelineRunner {
         en: `updating chapter index and snapshots for chapter ${targetChapter}`,
       });
       await this.state.snapshotState(bookId, targetChapter);
-      await this.syncNarrativeMemoryIndex(bookId);
+      await this.syncNarrativeMemoryIndex(bookId, targetChapter);
       await this.syncCurrentStateFactHistory(bookId, targetChapter);
 
       await this.emitWebhook("revision-complete", bookId, targetChapter, {
@@ -2252,7 +2254,7 @@ export class PipelineRunner {
         await writer.saveNewTruthFiles(bookDir, frozenPersistenceOutput, pipelineLang);
         await this.syncLegacyStructuredStateFromMarkdown(bookDir, chapterNumber, frozenPersistenceOutput);
         this.logStage(stageLanguage, { zh: "同步记忆索引", en: "syncing memory indexes" });
-        await this.syncNarrativeMemoryIndex(bookId);
+        await this.syncNarrativeMemoryIndex(bookId, chapterNumber);
       },
       saveChapterIndex: (index) => this.state.saveChapterIndex(bookId, index),
       markBookActiveIfNeeded: () => this.markBookActiveIfNeeded(bookId),
@@ -2399,7 +2401,7 @@ export class PipelineRunner {
     await writer.saveChapter(bookDir, repairedOutput, gp.numericalSystem, pipelineLang);
     await writer.saveNewTruthFiles(bookDir, repairedOutput, pipelineLang);
     await this.syncLegacyStructuredStateFromMarkdown(bookDir, targetChapter, repairedOutput);
-    await this.syncNarrativeMemoryIndex(bookId);
+    await this.syncNarrativeMemoryIndex(bookId, targetChapter);
     await this.state.snapshotState(bookId, targetChapter);
     await this.syncCurrentStateFactHistory(bookId, targetChapter);
 
@@ -2537,7 +2539,7 @@ export class PipelineRunner {
     await writer.saveChapter(bookDir, syncedOutput, gp.numericalSystem, pipelineLang);
     await writer.saveNewTruthFiles(bookDir, syncedOutput, pipelineLang);
     await this.syncLegacyStructuredStateFromMarkdown(bookDir, targetChapter, syncedOutput);
-    await this.syncNarrativeMemoryIndex(bookId);
+    await this.syncNarrativeMemoryIndex(bookId, targetChapter);
     await this.state.snapshotState(bookId, targetChapter);
     await this.syncCurrentStateFactHistory(bookId, targetChapter);
 
@@ -2855,9 +2857,10 @@ ${matrix}`,
               stageLanguage: resolvedLanguage,
             })
           : await architect.generateFoundationFromImport(book, allText);
+        const completedFoundation = await architect.completeStructureSignals(book, foundation);
         await architect.writeFoundationFiles(
           bookDir,
-          foundation,
+          completedFoundation,
           gp.numericalSystem,
           resolvedLanguage,
           undefined,
@@ -2929,7 +2932,7 @@ ${matrix}`,
           postWriteWarnings: [],
         }, resolvedLanguage);
         await this.syncLegacyStructuredStateFromMarkdown(bookDir, chapterNumber, output);
-        await this.syncNarrativeMemoryIndex(input.bookId);
+        await this.syncNarrativeMemoryIndex(input.bookId, chapterNumber);
 
         // Update chapter index
         const existingIndex = await this.state.loadChapterIndex(input.bookId);
@@ -2976,6 +2979,104 @@ ${matrix}`,
         totalWords,
         nextChapter,
       };
+    } finally {
+      await releaseLock();
+    }
+  }
+
+  async rebuildStoryState(bookId: string): Promise<void> {
+    const releaseLock = await this.state.acquireBookLock(bookId);
+    try {
+      const book = await this.state.loadBookConfig(bookId);
+      const bookDir = this.state.bookDir(bookId);
+      const { profile: gp } = await this.loadGenreProfile(book.genre);
+      const resolvedLanguage = book.language ?? gp.language;
+
+      const index = await this.state.loadChapterIndex(bookId);
+      const activeChapters = index.filter((ch) => ch.status !== "rejected");
+
+      if (activeChapters.length === 0) {
+        throw new Error(`Book "${bookId}" has no approved or active chapters to rebuild state from.`);
+      }
+
+      const log = this.config.logger?.child("rebuild-state");
+      log?.info(this.localize(resolvedLanguage, {
+        zh: `开始重建书籍 "${book.title}" 的故事状态，共 ${activeChapters.length} 章...`,
+        en: `Rebuilding story state for "${book.title}" from ${activeChapters.length} chapters...`,
+      }));
+
+      // 1. Reset all truth files to chapter 0 seeds
+      await this.resetImportReplayTruthFiles(bookDir, resolvedLanguage);
+      await this.state.saveChapterIndex(bookId, []);
+      await this.state.snapshotState(bookId, 0);
+
+      // 2. Sequential replay and analyze each chapter
+      const analyzer = new ChapterAnalyzerAgent(this.agentCtxFor("chapter-analyzer", bookId));
+      const writer = new WriterAgent(this.agentCtxFor("writer", bookId));
+      const countingMode = resolveLengthCountingMode(book.language ?? gp.language);
+
+      const rebuiltIndex: ChapterMeta[] = [];
+
+      for (const chMeta of activeChapters) {
+        const chapterNumber = chMeta.number;
+
+        log?.info(this.localize(resolvedLanguage, {
+          zh: `分析章节 ${chapterNumber}/${activeChapters.length}：${chMeta.title}...`,
+          en: `Analyzing chapter ${chapterNumber}/${activeChapters.length}: ${chMeta.title}...`,
+        }));
+
+        const content = await this.readChapterContent(bookDir, chapterNumber);
+        const governedInput = await this.prepareWriteInput(book, bookDir, chapterNumber);
+
+        // Analyze chapter to get truth file updates
+        const output = await analyzer.analyzeChapter({
+          book,
+          bookDir,
+          chapterNumber,
+          chapterContent: content,
+          chapterTitle: chMeta.title,
+          chapterIntent: governedInput.chapterIntent,
+          contextPackage: governedInput.contextPackage,
+          ruleStack: governedInput.ruleStack,
+        });
+
+        // Save core truth files (state, ledger, hooks)
+        await writer.saveChapter(bookDir, {
+          ...output,
+          postWriteErrors: [],
+          postWriteWarnings: [],
+        }, gp.numericalSystem, resolvedLanguage);
+
+        // Save extended truth files (summaries, subplots, emotional arcs, character matrix)
+        await writer.saveNewTruthFiles(bookDir, {
+          ...output,
+          postWriteErrors: [],
+          postWriteWarnings: [],
+        }, resolvedLanguage);
+
+        await this.syncLegacyStructuredStateFromMarkdown(bookDir, chapterNumber, output);
+        await this.syncNarrativeMemoryIndex(bookId, chapterNumber);
+
+        // Save entry in index
+        const now = new Date().toISOString();
+        const wordCount = countChapterLength(content, countingMode);
+        const entry: ChapterMeta = {
+          ...chMeta,
+          wordCount,
+          updatedAt: now,
+        };
+        rebuiltIndex.push(entry);
+        await this.state.saveChapterIndex(bookId, rebuiltIndex);
+
+        // Snapshot state + fact history
+        await this.state.snapshotState(bookId, chapterNumber);
+        await this.syncCurrentStateFactHistory(bookId, chapterNumber);
+      }
+
+      log?.info(this.localize(resolvedLanguage, {
+        zh: `完成。已重建 ${rebuiltIndex.length} 章的故事状态。`,
+        en: `Done. Rebuilt story state for ${rebuiltIndex.length} chapters.`,
+      }));
     } finally {
       await releaseLock();
     }
@@ -4678,15 +4779,15 @@ ${matrix}`,
     });
   }
 
-  private async syncNarrativeMemoryIndex(bookId: string): Promise<void> {
+  private async syncNarrativeMemoryIndex(bookId: string, fallbackChapter?: number): Promise<void> {
     const bookDir = this.state.bookDir(bookId);
     try {
-      await this.rebuildNarrativeMemoryIndex(bookDir);
+      await this.rebuildNarrativeMemoryIndex(bookDir, fallbackChapter);
     } catch (error) {
       if (this.isMemoryIndexUnavailableError(error)) {
         if (this.canOpenMemoryIndex(bookDir)) {
           try {
-            await this.rebuildNarrativeMemoryIndex(bookDir);
+            await this.rebuildNarrativeMemoryIndex(bookDir, fallbackChapter);
             return;
           } catch (retryError) {
             error = retryError;
@@ -4763,8 +4864,8 @@ ${matrix}`,
     }
   }
 
-  private async rebuildNarrativeMemoryIndex(bookDir: string): Promise<void> {
-    const memorySeed = await loadNarrativeMemorySeed(bookDir);
+  private async rebuildNarrativeMemoryIndex(bookDir: string, fallbackChapter?: number): Promise<void> {
+    const memorySeed = await loadNarrativeMemorySeed(bookDir, fallbackChapter);
 
     const memoryDb = await this.withMemoryIndexRetry(() => {
       const db = new MemoryDB(bookDir);

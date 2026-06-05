@@ -478,23 +478,26 @@ async function resolveContiguousArtifactChapterProgress(bookDir: string): Promis
 async function loadDurableArtifactChapterNumbers(bookDir: string): Promise<number[]> {
   const chaptersDir = join(bookDir, "chapters");
   const indexPath = join(chaptersDir, "index.json");
-  const [indexChapters, fileChapters] = await Promise.all([
-    readFile(indexPath, "utf-8")
-      .then((raw) => {
-        const parsed = JSON.parse(raw) as Array<{ number?: unknown }>;
-        return parsed
-          .map((entry) => entry?.number)
-          .filter((entry): entry is number => typeof entry === "number" && Number.isInteger(entry) && entry > 0);
-      })
-      .catch(() => [] as number[]),
-    readdir(chaptersDir)
-      .then((entries) => entries.flatMap((entry) => {
-        const match = entry.match(/^(\d+)_/);
-        return match ? [parseInt(match[1]!, 10)] : [];
-      }))
-      .catch(() => [] as number[]),
-  ]);
-  return [...indexChapters, ...fileChapters];
+  try {
+    const raw = await readFile(indexPath, "utf-8");
+    const parsed = JSON.parse(raw) as Array<{ number?: unknown; status?: unknown }>;
+    return parsed
+      .filter((entry) => entry?.status !== "rejected")
+      .map((entry) => entry?.number)
+      .filter((entry): entry is number => typeof entry === "number" && Number.isInteger(entry) && entry > 0);
+  } catch {
+    // ignore and fallback
+  }
+
+  try {
+    const entries = await readdir(chaptersDir);
+    return entries.flatMap((entry) => {
+      const match = entry.match(/^(\d+)_/);
+      return match ? [parseInt(match[1]!, 10)] : [];
+    });
+  } catch {
+    return [];
+  }
 }
 
 async function pathExists(path: string): Promise<boolean> {

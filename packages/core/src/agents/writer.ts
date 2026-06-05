@@ -500,6 +500,21 @@ export class WriterAgent extends BaseAgent {
     const bookRules = parsedBookRules?.rules ?? null;
     const bookRulesBody = parsedBookRules?.body ?? "";
 
+    let bookResourceRewards: string[] = [];
+    let bookActiveAttempts: string[] = [];
+    let bookPayoffRewards: string[] = [];
+    try {
+      const signalsContent = await this.readFileOrDefault(join(bookDir, "story/structure_signals.json"));
+      if (signalsContent && signalsContent.trim() !== "(文件尚未创建)") {
+        const parsed = JSON.parse(signalsContent);
+        if (parsed?.signals?.resource_reward) bookResourceRewards = parsed.signals.resource_reward;
+        if (parsed?.signals?.active_attempt) bookActiveAttempts = parsed.signals.active_attempt;
+        if (parsed?.signals?.payoff_reward) bookPayoffRewards = parsed.signals.payoff_reward;
+      }
+    } catch {
+      // Ignore
+    }
+
     const styleFingerprint = this.buildStyleFingerprint(styleProfileRaw);
 
     const dialogueFingerprints = this.extractDialogueFingerprints(fingerprintChapters, storyBible);
@@ -823,7 +838,13 @@ export class WriterAgent extends BaseAgent {
       .map((chapter) => chapter.trim())
       .filter(Boolean);
     const initialStyleGuard = resolvedLanguage === "zh"
-      ? validateStyleGuard(creative.content, { previousChapters: styleGuardPreviousChapters })
+      ? validateStyleGuard(creative.content, {
+          previousChapters: styleGuardPreviousChapters,
+          genre: book.genre,
+          bookResourceRewards,
+          bookActiveAttempts,
+          bookPayoffRewards,
+        })
       : undefined;
     let consistencyGuardManualIssues: ReadonlyArray<string> = [];
     if (initialStyleGuard && !initialStyleGuard.pass) {
@@ -1085,6 +1106,10 @@ export class WriterAgent extends BaseAgent {
     const styleGuardWarnings = resolvedLanguage === "zh"
       ? this.toStyleGuardPostWriteViolations(validateStyleGuard(creative.content, {
           previousChapters: styleGuardPreviousChapters,
+          genre: book.genre,
+          bookResourceRewards,
+          bookActiveAttempts,
+          bookPayoffRewards,
         }))
       : [];
     const consistencyGuardWarnings = this.toConsistencyGuardPostWriteViolations(consistencyGuardManualIssues);

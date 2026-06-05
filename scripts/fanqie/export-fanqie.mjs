@@ -48,6 +48,71 @@ const bookConfig = readJsonIfExists(path.join(bookDir, "book.json")) || {};
 const publishTitle = publishTitleArg || bookConfig.title || bookName;
 const chapterIndex = readJsonIfExists(path.join(bookDir, "chapters", "index.json")) || [];
 
+// --- 6段检查智能自适应信号加载 ---
+const signalsFile = path.join(bookDir, "story", "structure_signals.json");
+const signalsData = readJsonIfExists(signalsFile) || {};
+const structureSignals = signalsData.signals || {};
+
+const BASELINE_PATTERNS = {
+  Hook: /危机|紧急|警报|异常|出事|不对|变了|倒计时|突破|崩溃|出现|爆了|响了|来了|坏了|死|伤|痛|冷|热|颤|发烫|惊/,
+  Pressure: /倒计时|死线|最后|不能|必须|来不及|时间|压力|威胁|后果|代价|失去|崩溃|警告|封锁|失控|逼迫|绝望|压抑|痛|难受|极限/,
+  Attempt: /伸手|咬牙|站起|冲|抓住|尝试|握住|按下|输入|跑|跳|推|拉|操作|调动|催动|运转|决定|开始|深吸|开口|叫出|寻找/,
+  Twist: /却|反而|但|下一瞬|忽然|骤然|突然|没想到|不对|并非|不是|意外|偏偏|反倒|竟然|出乎意料/,
+  Payoff: /终于|成功|成了|搞定|完成|结束|破了|开了|通了|拿到|做到|那一刻|此刻|瞬间.*(明白|懂|清晰)|豁然开朗|总算|释怀|松了口气/,
+  Pull: /但|还有|更|下一步|没完|新的|又|继续|等待|悬着|未解|还没|问题|危机|发现|其实|接下来|悄然|悄悄|隐约|到底/
+};
+
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildSmartRegex(baseRegex, customWords = []) {
+  if (!customWords || customWords.length === 0) return baseRegex;
+  const escaped = customWords
+    .filter((w) => w && w.trim().length > 0)
+    .map(escapeRegExp);
+  if (escaped.length === 0) return baseRegex;
+  return new RegExp(`${baseRegex.source}|${escaped.join("|")}`, baseRegex.flags);
+}
+
+const customHookWords = structureSignals.opening_hook || [];
+const customPressureWords = [
+  ...(structureSignals.pressure_source || []),
+  ...(structureSignals.antagonist_pressure || []),
+];
+const customAttemptWords = [
+  ...(structureSignals.active_attempt || []),
+  ...(structureSignals.protagonist_goal || []),
+];
+const customTwistWords = structureSignals.obstacle_dilemma || [];
+const customPayoffWords = [
+  ...(structureSignals.payoff_reward || []),
+  ...(structureSignals.resource_reward || []),
+];
+const customPullWords = structureSignals.ending_pull || [];
+
+const activePatterns = {
+  Hook: buildSmartRegex(BASELINE_PATTERNS.Hook, customHookWords),
+  Pressure: buildSmartRegex(BASELINE_PATTERNS.Pressure, customPressureWords),
+  Attempt: buildSmartRegex(BASELINE_PATTERNS.Attempt, customAttemptWords),
+  Twist: buildSmartRegex(BASELINE_PATTERNS.Twist, customTwistWords),
+  Payoff: buildSmartRegex(BASELINE_PATTERNS.Payoff, customPayoffWords),
+  Pull: buildSmartRegex(BASELINE_PATTERNS.Pull, customPullWords),
+};
+
+let totalSignalWords = 0;
+for (const key of Object.keys(structureSignals)) {
+  if (Array.isArray(structureSignals[key])) {
+    totalSignalWords += structureSignals[key].length;
+  }
+}
+if (totalSignalWords > 0) {
+  console.log(`[sixPartCheck] 已自适应加载 story/structure_signals.json，共包含 ${totalSignalWords} 个专属设定信号词。`);
+} else {
+  console.log(`[sixPartCheck] 未检测到专属故事设定信号词，将使用通用语法基线规则评判。`);
+}
+// ----------------------------------
+
 if (!dryRun) fs.mkdirSync(chapterOutDir, { recursive: true });
 if (reset && fs.existsSync(markerFile)) fs.rmSync(markerFile);
 
@@ -1050,12 +1115,12 @@ function sixPartCheck(text) {
   const tail = text.slice(-220);
 
   const checks = [
-    ["Hook", /死|血|契约|规则|异常|裂|黑暗|阵纹|真名|吞噬|反噬|门|葬渊/.test(first)],
-    ["Pressure", /压|痛|死|气血|倒计时|规则|反噬|濒死|耗尽|崩解|封死|失控/.test(text)],
-    ["Attempt", /伸手|催动|咬牙|站起|冲|抓住|压下|尝试|握住|抬手|撕开|推开|吞下|运转/.test(text)],
-    ["Twist", /却|反而|下一瞬|忽然|骤然|突然|没想到|不对|并非|不是/.test(text)],
-    ["Payoff", /门，被强行打开|石门，轰然裂开|那一刻，他看懂|所有线索，在这一刻拼合|契约的全部内容|真名.*崩解|漏洞.*代价|发现.*漏洞|看懂.*契约/.test(text)],
-    ["Pull", /更深|下一|远处|黑暗|裂开|苏醒|逼近|还有|真正|门后|深处|声音|棺椁|真名|葬渊/.test(tail)],
+    ["Hook", activePatterns.Hook.test(first)],
+    ["Pressure", activePatterns.Pressure.test(text)],
+    ["Attempt", activePatterns.Attempt.test(text)],
+    ["Twist", activePatterns.Twist.test(text)],
+    ["Payoff", activePatterns.Payoff.test(text)],
+    ["Pull", activePatterns.Pull.test(tail)],
   ];
 
   const score = checks.filter(([, ok]) => ok).length;

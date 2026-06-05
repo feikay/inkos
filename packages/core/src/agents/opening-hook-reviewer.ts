@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { BaseAgent } from "./base.js";
 import { OPENING_HOOK_METHODS } from "../story-methods/opening-hooks.js";
 import type { StructureSignals, StructureSignalReport } from "../utils/structure-signals.js";
-import { buildStructureSignalReport, STRUCTURE_SIGNAL_DIMENSIONS } from "../utils/structure-signals.js";
+import { buildStructureSignalReport, STRUCTURE_SIGNAL_DIMENSIONS, matchPhraseFuzzy } from "../utils/structure-signals.js";
 
 export const OPENING_HOOK_DIMENSIONS = [
   "suspense_gap",
@@ -59,12 +59,14 @@ export interface OpeningHookReviewInput {
   readonly structureSignals?: StructureSignals | null;
 }
 
-const DIMENSION_LABELS: Record<OpeningHookDimension, string> = {
+const DIMENSION_LABELS: Record<OpeningHookDimension | "checklist" | "resource_consistency", string> = {
   suspense_gap: "悬念留白",
   extreme_contrast: "极度反差",
   conflict_first: "矛盾前置",
   worldview_bomb: "世界观炸弹",
   extreme_emotion: "极致情绪",
+  checklist: "黄金开篇清单",
+  resource_consistency: "资源一致性",
 };
 
 // Map opening hook dimensions to structure signal dimensions for book-level phrase matching
@@ -82,6 +84,7 @@ const HOOK_SIGNAL_GROUPS: Record<string, ReadonlyArray<RegExp>> = {
     /疑问|为什么|怎么回事|不知道|秘密|真相|隐藏|掩盖|不为人知|莫名|奇怪|诡异|反常|异常/u,
     /遗书|尸体|失踪|消失|不见.{0,5}了|没.{0,3}回来|再也没/u,
     /谁.{0,5}(?:杀|害|死|做|干|偷|拿|来)了/u,
+    /不该(?:看见|知道|出现)|不肯说|字迹.{0,12}(?:死了|不对)|亲眼看见/u,
   ],
   extreme_contrast: [
     /反差|竟然|居然|却.{0,5}(?:是|在|坐|站|拿|穿|说)|明明是.{0,10}却/u,
@@ -204,32 +207,41 @@ export class OpeningHookReviewerAgent extends BaseAgent {
     let bestHookScore = 0;
     let bestHookType = "";
     let totalMatches = 0;
+    let totalBookMatches = 0;
 
     for (const [hookId, patterns] of Object.entries(HOOK_SIGNAL_GROUPS)) {
       const dim = hookId as OpeningHookDimension;
+      // Hardcoded regex: lower base (25) + lower per-match (20) — fallback signals
       const matchCount = patterns.filter((p) => p.test(opening)).length;
+      const regexScore = Math.min(100, matchCount * 20 + 25);
 
-      // Count book-level structure signal phrase matches
+      // Book-level structure signal phrase matches: higher per-match (30) — primary signals
       let bookMatches = 0;
       if (input.structureSignals) {
         const signalDims = DIM_TO_STRUCTURE_SIGNALS[dim] ?? [];
         for (const signalDim of signalDims) {
           const phrases = input.structureSignals.signals[signalDim] ?? [];
           for (const phrase of phrases) {
-            if (opening.includes(phrase)) bookMatches++;
+            if (matchPhraseFuzzy(opening, phrase)) bookMatches++;
           }
         }
       }
+      const bookScore = Math.min(100, bookMatches * 30 + (bookMatches > 0 ? 25 : 0));
+      totalBookMatches += bookMatches;
 
-      const totalMatchCount = matchCount + bookMatches;
-      totalMatches += totalMatchCount;
-      const score = Math.min(100, totalMatchCount * 25 + 40);
-      if (totalMatchCount > 0 && score > bestHookScore) {
+      // Combined score: take the higher of regex-only vs book-only, plus a blend bonus
+      const combinedCount = matchCount + bookMatches;
+      totalMatches += combinedCount;
+      const score = Math.max(regexScore, bookScore, Math.min(100, combinedCount * 20 + 25));
+      if (combinedCount > 0 && score > bestHookScore) {
         bestHookScore = score;
         bestHookType = hookId;
       }
       dimensions[dim] = score;
     }
+
+    // Compute separate book signal aggregate score for final formula
+    const bookSignalScore = Math.min(100, totalBookMatches * 20 + (totalBookMatches > 0 ? 30 : 0));
 
     let hookStrength: HookStrength;
     if (bestHookScore >= 85) {
@@ -290,10 +302,19 @@ export class OpeningHookReviewerAgent extends BaseAgent {
     const first500 = content.slice(0, 500);
     const ending = content.slice(-500);
 
-    const abnormalImage100 = ABNORMAL_IMAGE_PATTERNS.some((p) => p.test(first100));
-    const conflict300 = CONFLICT_PATTERNS.some((p) => p.test(first300));
-    const dilemma500 = DILEMMA_PATTERNS.some((p) => p.test(first500));
-    const continueReason = CONTINUE_REASON_PATTERNS.some((p) => p.test(ending));
+    // Checklist also checks book-level signals in addition to hardcoded regex
+    const bookOpeningPhrases = this.getBookSignalPhrases(input, ["opening_hook", "pressure_source"]);
+    const bookEndingPhrases = this.getBookSignalPhrases(input, ["ending_pull"]);
+    const bookDilemmaPhrases = this.getBookSignalPhrases(input, ["obstacle_dilemma"]);
+
+    const abnormalImage100 = ABNORMAL_IMAGE_PATTERNS.some((p) => p.test(first100))
+      || bookOpeningPhrases.some((phrase) => matchPhraseFuzzy(first100, phrase));
+    const conflict300 = CONFLICT_PATTERNS.some((p) => p.test(first300))
+      || bookOpeningPhrases.some((phrase) => matchPhraseFuzzy(first300, phrase));
+    const dilemma500 = DILEMMA_PATTERNS.some((p) => p.test(first500))
+      || bookDilemmaPhrases.some((phrase) => matchPhraseFuzzy(first500, phrase));
+    const continueReason = CONTINUE_REASON_PATTERNS.some((p) => p.test(ending))
+      || bookEndingPhrases.some((phrase) => matchPhraseFuzzy(ending, phrase));
     const hookTypeMatched = bestHookType !== "";
 
     const checklist: OpeningHookChecklist = {
@@ -350,7 +371,14 @@ export class OpeningHookReviewerAgent extends BaseAgent {
         OPENING_HOOK_DIMENSIONS.length,
     );
     const checklistScore = checklistPassed * 14; // 5 × 14 = 70
-    const score = Math.round(avgDimensionScore * 0.3 + bestHookScore * 0.35 + checklistScore * 0.35);
+    // New formula: bookSignalScore gets 40% weight as primary driver;
+    // bestHookScore (regex+book combined) 25%; checklist 20%; avgDimension 15%
+    const score = Math.round(
+      avgDimensionScore * 0.15 +
+      bestHookScore * 0.25 +
+      bookSignalScore * 0.40 +
+      checklistScore * 0.20,
+    );
     // A chapter only needs one dominant opening hook type; don't require every hook type at once.
     const finalScore = Math.max(score, checklistPassed >= 4 ? bestHookScore : avgDimensionScore - 10);
 
@@ -411,6 +439,20 @@ export class OpeningHookReviewerAgent extends BaseAgent {
       structureSignalReport,
     };
   }
+
+  /** Extract all book-level signal phrases for the given signal dimensions. */
+  private getBookSignalPhrases(
+    input: OpeningHookReviewInput,
+    signalDims: readonly string[],
+  ): string[] {
+    if (!input.structureSignals) return [];
+    const phrases: string[] = [];
+    for (const dim of signalDims) {
+      const dimPhrases = input.structureSignals.signals[dim as keyof typeof input.structureSignals.signals] ?? [];
+      phrases.push(...dimPhrases);
+    }
+    return phrases;
+  }
 }
 
 // ---- helpers ----
@@ -422,11 +464,11 @@ function defaultHookConclusions(value: string): Record<OpeningHookDimension, str
 }
 
 const DEFAULT_HOOK_SCORES: Record<OpeningHookDimension, number> = {
-  suspense_gap: 55,
-  extreme_contrast: 55,
-  conflict_first: 55,
-  worldview_bomb: 55,
-  extreme_emotion: 55,
+  suspense_gap: 30,
+  extreme_contrast: 30,
+  conflict_first: 30,
+  worldview_bomb: 30,
+  extreme_emotion: 30,
 };
 
 // ---- file I/O ----
@@ -464,7 +506,7 @@ export function renderOpeningHookMarkdown(report: OpeningHookReviewReport): stri
     ? report.issues
         .map(
           (i) =>
-            `- [${i.severity}] ${i.dimension}: ${i.message}${i.suggestion ? ` 建议：${i.suggestion}` : ""}`,
+            `- [${i.severity}] ${DIMENSION_LABELS[i.dimension]}: ${i.message}${i.suggestion ? ` 建议：${i.suggestion}` : ""}`,
         )
         .join("\n")
     : "- 无";

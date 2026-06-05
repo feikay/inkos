@@ -209,6 +209,19 @@ export function parseArchitectStructureSignals(
  * Match content against structure signal phrases for a set of dimensions.
  * Returns the signal match results.
  */
+/** Check if a phrase is matched in a text, with fallback to sub-phrase (fuzzy) matching for Chinese terms. */
+export function matchPhraseFuzzy(text: string, phrase: string): boolean {
+  if (text.includes(phrase)) return true;
+  // Fallback to 2-character bi-gram matching for Chinese concepts if length >= 3
+  if (phrase.length >= 3) {
+    for (let i = 0; i <= phrase.length - 2; i++) {
+      const sub = phrase.slice(i, i + 2);
+      if (text.includes(sub)) return true;
+    }
+  }
+  return false;
+}
+
 export function matchStructureSignals(
   content: string,
   signals: StructureSignals,
@@ -220,7 +233,7 @@ export function matchStructureSignals(
     const missing: string[] = [];
 
     for (const phrase of phrases) {
-      if (content.includes(phrase)) {
+      if (matchPhraseFuzzy(content, phrase)) {
         matched.push(phrase);
       } else {
         missing.push(phrase);

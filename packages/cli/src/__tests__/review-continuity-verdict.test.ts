@@ -169,11 +169,18 @@ describe("continuity-auto verdict helpers", () => {
     });
   });
 
-  it("maps publish-ready quality scores to pass, warning, and blocked decisions", () => {
+  it("maps publish-ready quality scores to pass, warning, manual-review, and rewrite decisions", () => {
     expect(decidePublishQuality(85, 85, 75)).toBe("QUALITY_PASS");
     expect(decidePublishQuality(84, 85, 75)).toBe("QUALITY_WARN_POLISH_OPTIONAL");
     expect(decidePublishQuality(80, 85, 75)).toBe("QUALITY_WARN_POLISH_OPTIONAL");
-    expect(decidePublishQuality(79, 85, 75)).toBe("NEED_REWRITE");
+    // Scores >= 75 (hard floor) are QUALITY_MANUAL_REVIEW, not NEED_REWRITE
+    expect(decidePublishQuality(79, 85, 75)).toBe("QUALITY_MANUAL_REVIEW");
+    expect(decidePublishQuality(75, 85, 75)).toBe("QUALITY_MANUAL_REVIEW");
+    // Scores below 75 are truly NEED_REWRITE
+    expect(decidePublishQuality(74, 85, 75)).toBe("NEED_REWRITE");
+    // With high accept threshold (85), scores between 75-84 are QUALITY_MANUAL_REVIEW
+    expect(decidePublishQuality(82, 85, 85)).toBe("QUALITY_MANUAL_REVIEW");
+    expect(decidePublishQuality(84, 85, 85)).toBe("QUALITY_MANUAL_REVIEW");
   });
 
   it("prefers chapters-reviewed final as publish-ready starting candidate when manual continuity is accepted", async () => {

@@ -376,7 +376,15 @@ export class ChapterIntentAgent extends BaseAgent {
 - 本章转场策略：
 - 本章语言风格：
 - 平台/题材安全提醒：
-- 禁止事项：`;
+- 禁止事项：
+
+## 12. 本章结构信号关键词
+从 story/structure_signals.json 中选择本章应命中的关键词，或补充本章新增的信号词（2-4字为佳）。
+- opening_hook（本章开头应命中）：
+- pressure_source（本章压力来源词）：
+- obstacle_dilemma（本章困境词）：
+- ending_pull（本章结尾追读词）：
+- 本章新增长期信号词（如有）：`;
   }
 
   private buildFallbackIntent(params: {

@@ -312,17 +312,15 @@ function buildZhFallbackTitles(
   ctx: ZhTitleContext,
   bannedAnchors: ReadonlySet<string>,
 ): ReadonlyArray<string> {
-  const object = ctx.payoffObject ?? "线索";
-  const conflict = ctx.conflictFocus ?? "压制";
-  const place = ctx.placeSeed ?? "暗河尽头";
+  const object = ctx.payoffObject ?? "转机";
+  const conflict = ctx.conflictFocus ?? "危机";
+  const place = ctx.placeSeed ?? "开局";
   const pool = [
     `${place}的${object}`,
     `${object}背后的代价`,
     `${conflict}下的${object}`,
     `${object}之后的反扑`,
     `${conflict}逼近之时`,
-    `黑袍人的第二张脸`,
-    `石碑裂开的代价`,
   ];
   return pool.filter((title) => !hasBannedTitleAnchor(title, bannedAnchors, "zh"));
 }
@@ -336,7 +334,7 @@ function extractZhObjectPhrase(text: string | undefined): string | undefined {
     return compactZhObjectFragment(trimZhFragment(verbMatch[1]));
   }
 
-  const phraseMatch = cleaned.match(/([\u4e00-\u9fff]{2,8}(?:果实|腰牌|残卷|卷轴|刻痕|古碑|真相|入口|线索|追兵|追杀|反噬|封锁))/u);
+  const phraseMatch = cleaned.match(/([\u4e00-\u9fff]{2,8}(?:果实|腰牌|残卷|卷轴|刻痕|古碑|真相|入口|线索|追兵|追杀|反噬|封锁|学费|货源|资金|合约|危机|契机|转机|秘密))/u);
   return phraseMatch ? compactZhObjectFragment(trimZhFragment(phraseMatch[1])) : undefined;
 }
 
@@ -363,7 +361,7 @@ function extractZhPlaceSeed(events: ReadonlyArray<string | undefined> | undefine
   if (!events) return undefined;
   const patterns = [
     /(暗河尽头|黑市入口|山门外|岩窟深处|裂谷尽头|山洞深处|洞口|营地|尸坑)/gu,
-    /([\u4e00-\u9fff]{2,6}(?:尽头|入口|洞口|深处))/gu,
+    /([\u4e00-\u9fff]{2,6}(?:尽头|入口|洞口|深处|教室|课堂|学校|市场|老街|街头|现场|商场|厂房|办公室))/gu,
   ];
   for (const event of events) {
     const cleaned = sanitizeCandidateTitle(event, "zh");

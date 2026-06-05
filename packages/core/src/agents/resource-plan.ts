@@ -864,6 +864,9 @@ export function renderResourcePlanForPrompt(plan: ChapterResourcePlan, target: "
     if (event.kind === "unlock") return `- 解锁 ${event.skill ?? event.resource}：${event.reason}`;
     if (event.kind === "use_skill") return `- 使用已解锁技能 ${event.skill ?? event.resource}：${event.reason}`;
     if (event.kind === "discover") return `- 探索/发现 ${event.resource}：${event.reason}`;
+    if (event.kind === "balance_claim" && plan.mode === "system_bootstrap" && event.amount === 0) {
+      return `- 初始余额记录：当前${event.resource}：0（若正文提到或使用该资源，则必须写出；未出场可省略）`;
+    }
     if (event.kind === "balance_claim") return `- 在正文中明确写出期末余额声明：当前${event.resource}：${event.amount}`;
     if (event.kind === "spend") return `- ${event.resource}-${event.amount}：${event.reason}`;
     return `- ${event.resource}+${event.amount}：${event.reason}`;
@@ -905,10 +908,12 @@ export function renderResourcePlanForPrompt(plan: ChapterResourcePlan, target: "
     ? [
         "【期末余额声明要求】",
         "- 必须在正文末尾写出所有带「在正文中明确写出期末余额声明」标记的资源余额。",
+        "- system_bootstrap 中期末为 0 且正文未提到、未使用的资源，可由程序推断为 0，不需要逐项写出。",
+        "- 只要正文提到或使用某个资源，就必须写出该资源的期末余额。",
         "- 格式：在正文中自然写出「当前资源名：数值」，多个资源可用顿号或逗号分隔。",
         "- 示例格式（资源名仅为示意）：「【当前灵力值：100，气血值：50】」",
         "- 数值必须与 Resource Plan 的期末余额一致。",
-        "- 如果期末余额为 0，也必须写出「当前资源名：0」。",
+        "- 对已出场资源，即使期末余额为 0，也必须写出「当前资源名：0」。",
       ]
     : [];
   const writerPayoff = target === "writer"
@@ -1055,7 +1060,7 @@ export function validateTextAgainstChapterResourcePlanFinal(params: {
     };
   }
 
-  const validation = params.validation ?? buildValidationFromText(params.text, plan);
+  const validation = (params.validation ?? buildValidationFromText(params.text, plan)) as ResourceValidationResult;
   const expectedClosingBalances = plan.expectedClosingBalances;
   const explicitBalanceClaims = extractExplicitBalanceClaims(params.text, Object.keys(expectedClosingBalances));
   const closureRequirement = getClosureRequirement(plan);
@@ -1244,13 +1249,15 @@ function balancesEqual(left: Readonly<Record<string, number>>, right: Readonly<R
 
 function findBalanceMutationEvents(events: ReadonlyArray<ResourceEvent>): string[] {
   return events
-    .filter((event) =>
-      event.kind === "gain"
-      || event.kind === "consume"
-      || event.kind === "balance_jump" && isActualBalanceJumpMutation(event)
-      || isActualUnlockMutation(event)
-    )
+    .filter(isBalanceMutationResourceEvent)
     .map((event) => `${event.kind} ${event.resource}${event.amount !== undefined ? ` ${event.amount}` : ""}${event.label ? ` ${event.label}` : ""}: ${event.evidence}`);
+}
+
+function isBalanceMutationResourceEvent(event: ResourceEvent): boolean {
+  return event.kind === "gain"
+    || event.kind === "consume"
+    || event.kind === "balance_jump" && isActualBalanceJumpMutation(event)
+    || isActualUnlockMutation(event);
 }
 
 function isActualBalanceJumpMutation(event: ResourceEvent): boolean {
@@ -1316,6 +1323,7 @@ function scanTextAgainstResourcePlan(text: string, plan: ChapterResourcePlan, ta
     return { ok: true, violations: [] };
   }
   const violations = findResourcePlanViolations(text, plan);
+  const validation = plan.mode === "system_bootstrap" ? buildValidationFromText(text, plan) : undefined;
 
   // system_bootstrap / resource_rule_reveal: check required balance_claim events.
   // These modes require explicit closing balance declarations in the text;
@@ -1323,6 +1331,10 @@ function scanTextAgainstResourcePlan(text: string, plan: ChapterResourcePlan, ta
   if (plan.mode === "system_bootstrap" || plan.mode === "resource_rule_reveal") {
     for (const event of plan.allowedEvents) {
       if (event.kind === "balance_claim" && event.requiredInText) {
+        const validationEvents = validation ? validation.events : [];
+        if (isIgnorableZeroBootstrapBalanceClaim(text, validationEvents, plan, event)) {
+          continue;
+        }
         if (!hasBalanceClaim(text, event.resource, event.amount ?? Number.NaN)) {
           violations.push(`缺少期末声明：请在正文中写出"当前${event.resource}：${event.amount}"`);
         }
@@ -1403,6 +1415,9 @@ function findMissingRequiredEvents(
 ): string[] {
   const missing: string[] = [];
   for (const event of plan.allowedEvents.filter((candidate) => candidate.requiredInText)) {
+    if (isIgnorableZeroBootstrapBalanceClaim(text, events, plan, event)) {
+      continue;
+    }
     if (event.kind === "gain" && !events.some((candidate) => candidate.kind === "gain" && candidate.resource === event.resource && candidate.amount === event.amount)) {
       missing.push(`缺少 ${event.resource}+${event.amount}: ${event.reason}`);
     } else if (event.kind === "spend" && !events.some((candidate) => candidate.kind === "consume" && candidate.resource === event.resource && candidate.amount === event.amount)) {
@@ -1414,6 +1429,20 @@ function findMissingRequiredEvents(
     }
   }
   return missing;
+}
+
+function isIgnorableZeroBootstrapBalanceClaim(
+  text: string,
+  events: any,
+  plan: ChapterResourcePlan,
+  event: any,
+): boolean {
+  if (plan.mode !== "system_bootstrap") return false;
+  if (event.kind !== "balance_claim" || !event.requiredInText) return false;
+  if ((event.amount ?? Number.NaN) !== 0) return false;
+  if (hasBalanceClaim(text, event.resource, 0)) return false;
+  if (text.includes(event.resource)) return false;
+  return !events.some((candidate: any) => candidate.resource === event.resource && isBalanceMutationResourceEvent(candidate));
 }
 
 function hasBalanceClaim(text: string, resource: string, amount: number): boolean {

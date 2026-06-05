@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   ChapterSummariesStateSchema,
@@ -99,7 +99,22 @@ export async function retrieveMemorySelection(params: {
   const memoryDb = openMemoryDB(params.bookDir);
   if (memoryDb) {
     try {
-      if (memoryDb.getChapterCount() === 0) {
+      let needsSync = false;
+      try {
+        const dbStat = await stat(join(storyDir, "memory.db"));
+        const mdSummariesStat = await stat(join(storyDir, "chapter_summaries.md")).catch(() => null);
+        const mdHooksStat = await stat(join(storyDir, "pending_hooks.md")).catch(() => null);
+        const mdStateStat = await stat(join(storyDir, "current_state.md")).catch(() => null);
+
+        const dbTime = dbStat.mtimeMs;
+        if (mdSummariesStat && mdSummariesStat.mtimeMs > dbTime) needsSync = true;
+        if (mdHooksStat && mdHooksStat.mtimeMs > dbTime) needsSync = true;
+        if (mdStateStat && mdStateStat.mtimeMs > dbTime) needsSync = true;
+      } catch {
+        // Fallback to default check if stat fails
+      }
+
+      if (needsSync || memoryDb.getChapterCount() === 0) {
         const summaries = structuredSummaries?.rows ?? parseChapterSummariesMarkdown(
           await readFile(join(storyDir, "chapter_summaries.md"), "utf-8").catch(() => ""),
         );
@@ -107,7 +122,7 @@ export async function retrieveMemorySelection(params: {
           memoryDb.replaceSummaries(summaries);
         }
       }
-      if (memoryDb.getActiveHooks().length === 0) {
+      if (needsSync || memoryDb.getActiveHooks().length === 0) {
         const hooks = structuredHooks?.hooks ?? parsePendingHooksMarkdown(
           await readFile(join(storyDir, "pending_hooks.md"), "utf-8").catch(() => ""),
         );
@@ -115,7 +130,7 @@ export async function retrieveMemorySelection(params: {
           memoryDb.replaceHooks(hooks);
         }
       }
-      if (memoryDb.getCurrentFacts().length === 0 && facts.length > 0) {
+      if ((needsSync || memoryDb.getCurrentFacts().length === 0) && facts.length > 0) {
         memoryDb.replaceCurrentFacts(facts);
       }
 

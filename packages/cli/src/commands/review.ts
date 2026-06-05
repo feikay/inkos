@@ -49,11 +49,12 @@ import {
   SixStepPlotReviewerAgent,
   writeSixStepPlotReportFiles,
   type AgentContext,
+  PipelineRunner,
 } from "@actalk/inkos-core";
 import { existsSync, readdirSync, type Dirent } from "node:fs";
 import { mkdir, readdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { createClient, findProjectRoot, loadConfig, resolveBookId, log, logError, loadReviewPresentation, GLOBAL_ENV_PATH } from "../utils.js";
+import { createClient, findProjectRoot, loadConfig, resolveBookId, log, logError, loadReviewPresentation, GLOBAL_ENV_PATH, buildPipelineConfig } from "../utils.js";
 
 const DUMMY_CTX = {} as unknown as AgentContext;
 const DEFAULT_STRUCTURE_PASS_THRESHOLD = 85;
@@ -806,6 +807,7 @@ reviewCommand
   .option("--accept-manual-continuity", "Allow explicit publish-ready processing for MANUAL_REVIEW continuity")
   .option("--continuity-override-pass", "Trust a PASS final continuity report and skip repeated continuity recheck")
   .option("--json", "Output JSON")
+  .option("--reset", "Reset chapter review progress, delete existing reports and force re-evaluation")
   .action(async (opts) => {
     try {
       const root = findProjectRoot();
@@ -822,6 +824,7 @@ reviewCommand
       const structurePassThreshold = parsePositiveInt(opts.structurePassThreshold, "--structure-pass-threshold");
       const structureAcceptThreshold = parsePositiveInt(opts.structureAcceptThreshold, "--structure-accept-threshold");
       const minChapterWords = parsePositiveInt(opts.minChapterWords, "--min-chapter-words");
+      const reset = Boolean(opts.reset);
       if (structureAcceptThreshold > structurePassThreshold) {
         throw new Error("--structure-accept-threshold must be <= --structure-pass-threshold");
       }
@@ -853,6 +856,7 @@ reviewCommand
           acceptManualContinuity: Boolean(opts.acceptManualContinuity),
           continuityOverridePass: Boolean(opts.continuityOverridePass),
           json: Boolean(opts.json),
+          reset,
         });
         results.push(result);
 
@@ -1286,7 +1290,55 @@ async function runPublishReadyChapter(params: {
   readonly acceptManualContinuity: boolean;
   readonly continuityOverridePass: boolean;
   readonly json: boolean;
+  readonly reset?: boolean;
 }): Promise<PublishReadyResult> {
+  if (params.reset) {
+    const prefix = chapterNumberPrefix(params.chapter);
+    const deleteFilesWithPrefix = async (dir: string, filePrefix: string) => {
+      if (!existsSync(dir)) return;
+      try {
+        const files = await readdir(dir);
+        for (const file of files) {
+          if (file.startsWith(filePrefix)) {
+            const p = join(dir, file);
+            if (existsSync(p)) {
+              await unlink(p);
+            }
+          }
+        }
+      } catch (e) {
+        // Ignore errors
+      }
+    };
+
+    if (!params.json) {
+      log(`[reset] clearing cached files for chapter ${prefix}...`);
+    }
+
+    // Delete intermediate chapter files
+    await deleteFilesWithPrefix(join(params.bookDir, "chapters-reviewed"), `${prefix}_`);
+    await deleteFilesWithPrefix(join(params.bookDir, "chapters-reviewed"), `${prefix}.`);
+    await deleteFilesWithPrefix(join(params.bookDir, "chapters-fixed"), `${prefix}_`);
+    await deleteFilesWithPrefix(join(params.bookDir, "chapters-polished"), `${prefix}_`);
+    await deleteFilesWithPrefix(join(params.bookDir, "chapters-quality-fixed"), `${prefix}_`);
+    await deleteFilesWithPrefix(join(params.bookDir, "chapters-plot-fixed"), `${prefix}_`);
+    await deleteFilesWithPrefix(join(params.bookDir, "chapters-salvaged"), `${prefix}_`);
+
+    // Delete review reports
+    await deleteFilesWithPrefix(join(params.bookDir, "reviews", "publish-ready"), prefix);
+    await deleteFilesWithPrefix(join(params.bookDir, "reviews", "continuity"), prefix);
+    await deleteFilesWithPrefix(join(params.bookDir, "reviews", "fanqie-quality"), prefix);
+    await deleteFilesWithPrefix(join(params.bookDir, "reviews", "six-step-plot"), prefix);
+    await deleteFilesWithPrefix(join(params.bookDir, "reviews", "plot-auto-fix"), prefix);
+    await deleteFilesWithPrefix(join(params.bookDir, "reviews", "antagonist-intelligence"), prefix);
+    await deleteFilesWithPrefix(join(params.bookDir, "reviews", "clean-narrative"), prefix);
+    await deleteFilesWithPrefix(join(params.bookDir, "reviews", "opening-hook"), prefix);
+    await deleteFilesWithPrefix(join(params.bookDir, "reviews", "transition-quality"), prefix);
+    await deleteFilesWithPrefix(join(params.bookDir, "reviews", "intent-alignment"), prefix);
+    await deleteFilesWithPrefix(join(params.bookDir, "reviews", "story-effectiveness"), prefix);
+    await deleteFilesWithPrefix(join(params.bookDir, "reviews", "resource-consistency"), prefix);
+  }
+
   const first = await runPublishReadyChapterOnce(params);
   if (!shouldRunPublishReadyPlotAutoFix(first, params.maxPlotFixAttempts)) return first;
 
@@ -1300,6 +1352,19 @@ async function runPublishReadyChapter(params: {
     const reasons = publishReadyStructureBlockerSummaries(first);
     log(`reason: ${reasons[0] ?? `publish_status=${first.publish_status}`}`);
   }
+
+  // Backup the reviewed-final file before plot-auto-fix overwrites it.
+  // plot-auto-fix calls writeReviewedFinalChapter which overwrites the polished
+  // version with the plot-fixed version. If the recheck is worse, we need to
+  // restore the original polished content.
+  const reviewedFinalPath = join(params.bookDir, "chapters-reviewed", `${chapterNumberPrefix(params.chapter)}_final.md`);
+  let reviewedFinalBackup: string | undefined;
+  try {
+    reviewedFinalBackup = await readFile(reviewedFinalPath, "utf-8");
+  } catch {
+    // File may not exist; that's fine.
+  }
+
   const fixed = await runPlotAutoFixChapter({
     bookId: params.bookId,
     bookDir: params.bookDir,
@@ -1321,10 +1386,39 @@ async function runPublishReadyChapter(params: {
     log("");
     log("plot recheck publish-ready:");
   }
-  return runPublishReadyChapterOnce(params, {
+  const recheck = await runPublishReadyChapterOnce(params, {
     preferReviewedFinal: true,
     skipAcceptedExistingCandidate: true,
   });
+
+  // Compare recheck vs first round. If plot-fix caused continuity or quality
+  // regression, roll back to the first round result and restore the reviewed-final file.
+  const firstContinuityScore = first.continuity?.score ?? 0;
+  const recheckContinuityScore = recheck.continuity?.score ?? 0;
+  const firstQualityScore = first.quality?.score ?? 0;
+  const recheckQualityScore = recheck.quality?.score ?? 0;
+  const continuityRegressed = first.continuity?.final_status === "PASS" && recheck.continuity?.final_status !== "PASS";
+  const scoreRegressed = recheckContinuityScore < firstContinuityScore && recheckQualityScore <= firstQualityScore;
+
+  if (continuityRegressed || scoreRegressed) {
+    if (!params.json) {
+      log("");
+      log("[plot-auto-fix rollback]");
+      log(`reason: plot-fix caused regression (continuity ${firstContinuityScore}→${recheckContinuityScore}, quality ${firstQualityScore}→${recheckQualityScore})`);
+      log("restoring pre-plot-fix result");
+    }
+    // Restore the backed-up reviewed-final file so the polished version is preserved.
+    if (reviewedFinalBackup !== undefined) {
+      await mkdir(join(params.bookDir, "chapters-reviewed"), { recursive: true });
+      await writeFile(reviewedFinalPath, reviewedFinalBackup, "utf-8");
+    }
+    // Re-write the publish-ready report with the first-round result so the
+    // on-disk report matches the returned value.
+    await writePublishReadyReport(params.bookDir, first);
+    return first;
+  }
+
+  return recheck;
 }
 
 function shouldRunPublishReadyPlotAutoFix(report: PublishReadyResult, maxPlotFixAttempts: number): boolean {
@@ -1441,13 +1535,16 @@ async function runPublishReadyChapterOnce(params: {
   const preferReviewedFinal = Boolean(options.preferReviewedFinal || hasFreshPlotFix);
   const skipAcceptedExistingCandidate = Boolean(options.skipAcceptedExistingCandidate || hasFreshPlotFix);
 
-  // Resource hard gate: check resource consistency report before continuity/quality
+  // Resource hard gate: check resource consistency report before continuity/quality.
+  // If the chapter index has already advanced to ready/approved, old resource
+  // reports can be stale leftovers from a repaired write/sync run.
+  const chapterStatus = await readChapterIndexStatus(params.bookDir, params.chapter);
   const resourceReport = await readResourceConsistencyReportIfExists(params.bookDir, params.chapter);
-  const resourceBlocked = resourceReport?.blocking === true || resourceReport?.closureStatus === "resource_failed";
-  const chapterBlocked = resourceReport?.status && ["BLOCKED_BY_RESOURCE_PLAN", "BLOCKED"].includes(String(resourceReport.status));
+  const ignoreStaleResourceReport = chapterStatus === "ready-for-review" || chapterStatus === "approved";
+  const resourceBlocked = !ignoreStaleResourceReport && (resourceReport?.blocking === true || resourceReport?.closureStatus === "resource_failed");
+  const chapterBlocked = !ignoreStaleResourceReport && resourceReport?.status && ["BLOCKED_BY_RESOURCE_PLAN", "BLOCKED"].includes(String(resourceReport.status));
 
   // Also check chapter index status: state-degraded / blocked-resource-plan block even if resource report is missing or non-blocking
-  const chapterStatus = await readChapterIndexStatus(params.bookDir, params.chapter);
   const chapterIndexBlocked = chapterStatus === "state-degraded" || chapterStatus === "blocked-resource-plan";
 
   if (resourceBlocked || chapterBlocked || chapterIndexBlocked) {
@@ -1511,6 +1608,7 @@ async function runPublishReadyChapterOnce(params: {
   let continuityReport: ContinuityReport | undefined;
   let quality: FanqieQualityCommandResult | undefined;
   let qualityStatus: "QUALITY_PASS" | "QUALITY_WARN_POLISH_OPTIONAL" | "QUALITY_MANUAL_REVIEW" | undefined;
+  let qualityCandidate: string | undefined;
   let manualContinuityAcceptance: PublishReadyManualContinuityAcceptance | undefined;
 
   for (let loop = 1; loop <= 2; loop += 1) {
@@ -1558,6 +1656,7 @@ async function runPublishReadyChapterOnce(params: {
     if (!params.json) {
       log("");
       log(loop === 1 ? "step 2 quality:" : `loop ${loop} quality:`);
+      log(`input: ${relative(params.bookDir, continuity.sourceFile)}`);
     }
     quality = await checkFanqieQualityChapter({
       bookId: params.bookId,
@@ -1573,10 +1672,167 @@ async function runPublishReadyChapterOnce(params: {
       log(`status: ${quality.report.status}`);
     }
 
-    let qualityCandidate = quality.sourceFile;
+    qualityCandidate = quality.sourceFile;
     const immediateQualityDecision = decidePublishQuality(quality.report.quality_score, params.qualityPassThreshold, params.qualityAcceptThreshold);
     qualityStatus = qualityFinalStatusFromDecision(immediateQualityDecision);
-    if (immediateQualityDecision === "QUALITY_PASS" || immediateQualityDecision === "QUALITY_WARN_POLISH_OPTIONAL") {
+
+    // Step 2.5: Structure Precheck
+    let structurePlotFixed = false;
+    let plotFixedFile = "";
+
+    if (loop === 1) {
+      if (!params.json) {
+        log("");
+        log("step 2.5 structure precheck:");
+      }
+
+      // Load book-level structure signals for structure review
+      const signalsResult = await readStructureSignals(params.bookDir);
+      let activeSignals: StructureSignals | undefined =
+        signalsResult.status === "ok" ? signalsResult.signals : undefined;
+
+      if (activeSignals) {
+        const intentPrefix = chapterNumberPrefix(params.chapter);
+        try {
+          const intentPath = join(params.bookDir, "story", "runtime", "chapter-intents", `${intentPrefix}.md`);
+          const intentContent = await readFile(intentPath, "utf-8").catch(() => "");
+          if (intentContent) {
+            const merged = mergeIntentSignals(activeSignals, intentContent);
+            if (merged) activeSignals = merged;
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      if (!params.json) {
+        log(`input: ${relative(params.bookDir, quality.sourceFile)}`);
+      }
+      const currentText = await readFile(quality.sourceFile, "utf-8");
+      
+      // Run static scans to generate/update story-effectiveness and six-step-plot reports on disk
+      await generateStoryEffectivenessReport(
+        params.bookDir,
+        params.chapter,
+        currentText,
+        activeSignals
+      );
+      await generateSixStepPlotReport(
+        params.bookDir,
+        params.chapter,
+        currentText,
+        undefined,
+        activeSignals
+      );
+
+      // Read reports to get the score
+      const seReport = await readStoryEffectivenessReportIfExists(params.bookDir, params.chapter);
+      const sixStepReport = await readSixStepPlotReportIfExists(params.bookDir, params.chapter);
+
+      const seScore = seReport?.score ?? 100;
+      const ssScore = typeof sixStepReport?.score === "number" ? sixStepReport.score : 100;
+      const structureMinScore = Math.min(seScore, ssScore);
+      if (!params.json) {
+        log(`story_effectiveness score: ${seScore} (status: ${seReport?.status ?? "PASS"})`);
+        log(`six_step_plot score: ${sixStepReport?.score ?? "n/a"} (status: ${sixStepReport?.status ?? "PASS"})`);
+        log(`structure min score: ${structureMinScore}`);
+      }
+
+      // If the lower of story_effectiveness / six_step_plot < structureAcceptThreshold, execute inner plot-fix
+      if (structureMinScore < params.structureAcceptThreshold) {
+        const failedDims: string[] = [];
+        if (seScore < params.structureAcceptThreshold) failedDims.push(`story_effectiveness=${seScore}`);
+        if (ssScore < params.structureAcceptThreshold) failedDims.push(`six_step_plot=${ssScore}`);
+        if (!params.json) {
+          log(`structure precheck: ${failedDims.join(", ")} < accept threshold ${params.structureAcceptThreshold}. Running inner plot-fix...`);
+        }
+
+        const plotFixedPath = await writePlotFixedChapter({
+          bookDir: params.bookDir,
+          chapter: params.chapter,
+          attempt: 1,
+          client: params.client,
+          model: params.model,
+          currentText,
+          publishReport: {
+            publish_status: "FAIL_STRUCTURAL",
+            six_step_plot: {
+              status: sixStepReport?.status || "FAIL_STRUCTURAL",
+              score: sixStepReport?.score ?? null
+            }
+          } as any,
+          sixStepReport: sixStepReport as any,
+          storyEffectivenessReport: seReport as any,
+        });
+
+        plotFixedFile = plotFixedPath;
+        structurePlotFixed = true;
+        
+        if (!params.json) {
+          log(`inner plot-fix input: ${relative(params.bookDir, quality.sourceFile)}`);
+          log(`inner plot-fix output: ${relative(params.bookDir, plotFixedPath)}`);
+        }
+
+        // Set qualityCandidate and continuity to the fixed path
+        qualityCandidate = plotFixedPath;
+        if (continuity) {
+          continuity = {
+            ...continuity,
+            sourceFile: plotFixedPath,
+          };
+        }
+        sourceChain.add(relative(params.bookDir, plotFixedPath));
+
+        // Update final continuity report on disk to point to the plot-fixed file
+        if (continuityReport) {
+          const reportDir = join(params.bookDir, "reviews", "continuity");
+          const prefix = chapterNumberPrefix(params.chapter);
+          const reportJsonPath = join(reportDir, `${prefix}.final-report.json`);
+          const reportMarkdownPath = join(reportDir, `${prefix}.final-report.md`);
+          
+          const updatedReport = {
+            ...continuityReport,
+            used_file: relative(params.bookDir, plotFixedPath),
+            body_source: "plot_fixed",
+          };
+          await writeContinuityReportFiles(
+            updatedReport,
+            reportJsonPath,
+            reportMarkdownPath,
+            params.chapter,
+            continuity.chapterTitle
+          );
+          continuityReport = updatedReport;
+        }
+
+        // Delete the stale quality reports and structure reports so they get regenerated
+        const qaReportDir = join(params.bookDir, "reviews", "fanqie-quality");
+        const qaPrefix = chapterNumberPrefix(params.chapter);
+        const qaFiles = [
+          join(qaReportDir, `${qaPrefix}.quality-report.json`),
+          join(qaReportDir, `${qaPrefix}.quality-report.md`),
+          join(qaReportDir, `${qaPrefix}.final-quality-report.json`),
+          join(qaReportDir, `${qaPrefix}.final-quality-report.md`),
+        ];
+        await Promise.all(qaFiles.map((file) =>
+          unlink(file).catch((error: NodeJS.ErrnoException) => {
+            if (error.code !== "ENOENT") throw error;
+          })
+        ));
+        await deletePublishReadyStructureReportsIfExists(params.bookDir, params.chapter);
+      } else {
+        if (!params.json) {
+          log("story_effectiveness score satisfies threshold. Skipping plot-fix.");
+        }
+      }
+    }
+
+    const goldenReport = await readGolden3ChapterReportIfExists(params.bookDir);
+    const goldenScore = goldenReport?.score ?? 100;
+    const goldenNeedsFix = goldenScore < 85 && (params.chapter >= 1 && params.chapter <= 3);
+    const bypassEarlyReturn = Boolean(loop === 1 && (goldenNeedsFix || structurePlotFixed));
+
+    if (!bypassEarlyReturn && (immediateQualityDecision === "QUALITY_PASS" || immediateQualityDecision === "QUALITY_WARN_POLISH_OPTIONAL")) {
       const finalFile = await writeReviewedFinalChapter(params.bookDir, params.chapter, continuity.sourceFile);
       sourceChain.add(relative(params.bookDir, finalFile));
       const readyToExport = isReadyToExport(continuityReport, immediateQualityDecision, finalFile, params.minChapterWords, Boolean(manualContinuityAcceptance));
@@ -1604,10 +1860,11 @@ async function runPublishReadyChapterOnce(params: {
         report_markdown_path: "",
       });
     }
-    if (quality.report.quality_score < params.qualityPassThreshold) {
+    if (quality.report.quality_score < params.qualityPassThreshold || (loop === 1 && (goldenNeedsFix || structurePlotFixed))) {
       if (!params.json) {
         log("");
         log(loop === 1 ? "step 3 polish:" : `loop ${loop} polish:`);
+        log(`input: ${relative(params.bookDir, qualityCandidate)}`);
       }
       const polished = await polishFanqieQualityChapter({
         bookId: params.bookId,
@@ -1617,6 +1874,9 @@ async function runPublishReadyChapterOnce(params: {
         model: params.model,
         maxPolishAttempts: params.maxPolishAttempts,
         json: params.json,
+        currentOverridePath: qualityCandidate,
+        qualityPassThreshold: params.qualityPassThreshold,
+        qualityAcceptThreshold: params.qualityAcceptThreshold,
       });
       qualityStatus = polished.finalQualityStatus;
       if (polished.usedPolishedFile) {
@@ -1630,7 +1890,7 @@ async function runPublishReadyChapterOnce(params: {
         log(`status: ${polished.finalQualityStatus}`);
         if (polished.usedPolishedFile) log(`file: ${polished.usedPolishedFile}`);
       }
-      if (polished.finalQualityStatus !== "QUALITY_PASS") {
+      if (polished.finalQualityStatus !== "QUALITY_PASS" && polished.finalQualityStatus !== "QUALITY_WARN_POLISH_OPTIONAL") {
         const blocked = await writePublishReadyReport(params.bookDir, {
           book: params.bookId,
           chapter_index: params.chapter,
@@ -1640,6 +1900,7 @@ async function runPublishReadyChapterOnce(params: {
           continuity: { final_status: continuityReport.final_status, score: continuityReport.score },
           quality: { final_quality_status: polished.finalQualityStatus, score: polished.finalScore },
           ...manualContinuityAcceptance,
+          source_file: relative(params.bookDir, qualityCandidate),
           word_count: continuityReport.word_count,
           min_chapter_words: params.minChapterWords,
           report_json_path: "",
@@ -1696,6 +1957,7 @@ async function runPublishReadyChapterOnce(params: {
           if (!params.json) {
             if (fixed.input_file) log(`input: ${fixed.input_file}`);
             if (fixed.output_file) log(`output: ${fixed.output_file}`);
+            if (fixed.skipped_reason) log(`skipped: ${fixed.skipped_reason}`);
             log(`quality recheck: ${fixed.quality_score_after ?? "n/a"}`);
             log(`continuity recheck: ${fixed.continuity_score_after ?? "n/a"}`);
           }
@@ -1708,6 +1970,7 @@ async function runPublishReadyChapterOnce(params: {
     if (!params.json) {
       log("");
       log("step 4 continuity recheck:");
+      log(`input: ${relative(params.bookDir, qualityCandidate)}`);
     }
     const recheck = await runContinuityPublishPass(params, qualityCandidate, sourceChain);
     continuity = recheck.final;
@@ -1738,6 +2001,7 @@ async function runPublishReadyChapterOnce(params: {
           source_chain: [...sourceChain],
           continuity: { final_status: continuityReport.final_status, score: continuityReport.score },
           quality: { final_quality_status: qualityStatus, score: quality.report.quality_score },
+          source_file: relative(params.bookDir, continuity.sourceFile),
           word_count: continuityReport.word_count,
           min_chapter_words: params.minChapterWords,
           report_json_path: "",
@@ -1793,6 +2057,7 @@ async function runPublishReadyChapterOnce(params: {
     continuity: { final_status: continuityReport?.final_status, score: continuityReport?.score },
     quality: { final_quality_status: qualityStatus, score: quality?.report.quality_score },
     ...manualContinuityAcceptance,
+    source_file: relative(params.bookDir, continuity?.sourceFile ?? qualityCandidate ?? original.file),
     word_count: continuityReport?.word_count,
     min_chapter_words: params.minChapterWords,
     report_json_path: "",
@@ -2139,6 +2404,15 @@ async function writeReviewedFinalChapter(bookDir: string, chapter: number, sourc
   return outFile;
 }
 
+async function getFileMtime(file: string): Promise<number> {
+  try {
+    const s = await stat(file);
+    return s.mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
 export async function resolvePublishReadyStartingCandidate(
   bookDir: string,
   chapter: number,
@@ -2156,20 +2430,35 @@ export async function resolvePublishReadyStartingCandidate(
     if (reviewed) return reviewed;
   }
 
+  const candidates: string[] = [];
+
   const qualityFixed = await findLatestQualityFixedFile(bookDir, chapter);
-  if (qualityFixed) return qualityFixed;
+  if (qualityFixed) candidates.push(qualityFixed);
 
   const polished = await findLatestPolishedFile(bookDir, chapter);
-  if (polished) return polished;
+  if (polished) candidates.push(polished);
 
   const finalReport = await readContinuityReportIfExists(bookDir, chapter, "final-report");
   if (typeof finalReport?.used_file === "string") {
     const usedFile = resolveUsedFilePath(bookDir, finalReport.used_file);
-    if (usedFile) return usedFile;
+    if (usedFile) candidates.push(usedFile);
   }
 
-  return originalFile;
+  candidates.push(originalFile);
+
+  let bestFile = originalFile;
+  let maxTime = 0;
+  for (const file of candidates) {
+    const time = await getFileMtime(file);
+    if (time > maxTime) {
+      maxTime = time;
+      bestFile = file;
+    }
+  }
+
+  return bestFile;
 }
+
 
 export async function findReviewedFinalChapterFile(bookDir: string, chapter: number): Promise<string | null> {
   const reviewedFinal = join(bookDir, "chapters-reviewed", `${chapterNumberPrefix(chapter)}_final.md`);
@@ -2270,6 +2559,8 @@ function isReadyToExport(
 export function decidePublishQuality(score: number, passThreshold: number, acceptThreshold: number): PublishQualityDecision {
   if (score >= passThreshold) return "QUALITY_PASS";
   if (score >= Math.max(80, acceptThreshold)) return "QUALITY_WARN_POLISH_OPTIONAL";
+  // Scores above 75 (hard floor) but below acceptThreshold are review-able, not rewrite-worthy
+  if (score >= 75) return "QUALITY_MANUAL_REVIEW";
   return "NEED_REWRITE";
 }
 
@@ -2599,8 +2890,23 @@ async function writePublishReadyReport(bookDir: string, report: PublishReadyResu
   }
 
   // Extract signals for passing to generate functions
-  const activeSignals: StructureSignals | undefined =
+  let activeSignals: StructureSignals | undefined =
     signalsResult.status === "ok" ? signalsResult.signals : undefined;
+
+  // Merge chapter-intent signal keywords (§12) into activeSignals if available
+  if (activeSignals) {
+    const intentPrefix = chapterNumberPrefix(report.chapter_index);
+    try {
+      const intentPath = join(bookDir, "story", "runtime", "chapter-intents", `${intentPrefix}.md`);
+      const intentContent = await readFile(intentPath, "utf-8").catch(() => "");
+      if (intentContent) {
+        const merged = mergeIntentSignals(activeSignals, intentContent);
+        if (merged) activeSignals = merged;
+      }
+    } catch {
+      // chapter-intent not available; proceed with book-level signals only
+    }
+  }
 
   // Merge story-effectiveness summary if not already provided
   let seSummary = report.story_effectiveness ?? await readStoryEffectivenessSummary(bookDir, report.chapter_index);
@@ -2874,6 +3180,7 @@ async function runQualityAutoFixChapter(params: {
         quality_score: context.qualityScore,
         quality_pass_threshold: params.qualityPassThreshold,
         quality_accept_threshold: params.qualityAcceptThreshold,
+        source_file: context.inputFile ? relative(params.bookDir, context.inputFile) : "",
         word_count: context.publishReport?.word_count,
         min_chapter_words: params.minChapterWords,
         report_json_path: "",
@@ -2984,6 +3291,7 @@ async function runQualityAutoFixChapter(params: {
     source_chain: [...sourceChain],
     continuity: { final_status: continuityAfter?.report.final_status, score: continuityAfter?.report.score },
     quality: { final_quality_status: "QUALITY_MANUAL_REVIEW", score: qualityAfter?.report.quality_score },
+    source_file: relative(params.bookDir, continuityAfter?.final.sourceFile ?? context.inputFile),
     word_count: continuityAfter?.report.word_count ?? context.publishReport?.word_count,
     min_chapter_words: params.minChapterWords,
     report_json_path: "",
@@ -3038,27 +3346,30 @@ async function resolveQualityAutoFixContext(
       : findLastSourceChainCandidate(sourceChain);
   const inputFile = inputRef ? resolveUsedFilePath(bookDir, inputRef) ?? "" : "";
 
+  log(`[debug] resolveQualityAutoFixContext: qualityScore=${qualityScore}, continuityStatus=${continuityStatus}, qualityStatus=${qualityStatus}, publishStatus=${publishStatus}, wordCount=${wordCount}, minWords=${minWords}, inputFile=${inputFile ? relative(bookDir, inputFile) : "(none)"}, inputRef=${inputRef}`);
+
   if (continuityStatus !== "PASS") {
-    return { eligible: false, reason: "continuity final_status is not PASS", publishStatus: "BLOCKED_BY_CONTINUITY", inputFile, qualityScore, publishReport, qualityReport, sourceChain };
+    return { eligible: false, reason: `continuity final_status is not PASS (got: ${continuityStatus})`, publishStatus: "BLOCKED_BY_CONTINUITY", inputFile, qualityScore, publishReport, qualityReport, sourceChain };
   }
   if (!Number.isFinite(wordCount) || wordCount < minWords) {
     return { eligible: false, reason: `word_count ${wordCount} < ${minWords}`, publishStatus: "BLOCKED_BY_CONTINUITY", inputFile, qualityScore, publishReport, qualityReport, sourceChain };
   }
   if (qualityScore < qualityFixThreshold) {
-    return { eligible: false, reason: `quality_score ${qualityScore} < ${qualityFixThreshold}`, publishStatus: "NEED_REWRITE", inputFile, qualityScore, publishReport, qualityReport, sourceChain };
+    return { eligible: false, reason: `quality_score ${qualityScore} < qualityFixThreshold ${qualityFixThreshold}`, publishStatus: "NEED_REWRITE", inputFile, qualityScore, publishReport, qualityReport, sourceChain };
   }
   if (qualityScore >= qualityAcceptThreshold) {
-    return { eligible: false, reason: `quality_score ${qualityScore} already passes`, publishStatus: qualityScore >= 85 ? "READY_TO_EXPORT" : "READY_WITH_WARNINGS", inputFile, qualityScore, publishReport, qualityReport, sourceChain };
+    return { eligible: false, reason: `quality_score ${qualityScore} already passes (>= acceptThreshold ${qualityAcceptThreshold})`, publishStatus: qualityScore >= 85 ? "READY_TO_EXPORT" : "READY_WITH_WARNINGS", inputFile, qualityScore, publishReport, qualityReport, sourceChain };
   }
   if (publishStatus && publishStatus !== "BLOCKED_BY_QUALITY" && publishStatus !== "QUALITY_MANUAL_REVIEW") {
-    return { eligible: false, reason: `publish_status is ${publishStatus}`, publishStatus: publishStatus as PublishReadyStatus, inputFile, qualityScore, publishReport, qualityReport, sourceChain };
+    return { eligible: false, reason: `publish_status is ${publishStatus} (not BLOCKED_BY_QUALITY or QUALITY_MANUAL_REVIEW)`, publishStatus: publishStatus as PublishReadyStatus, inputFile, qualityScore, publishReport, qualityReport, sourceChain };
   }
   if (qualityStatus && !["QUALITY_MANUAL_REVIEW", "QUALITY_WARN_POLISH_OPTIONAL", "QUALITY_NEED_POLISH", "QUALITY_FAIL"].includes(String(qualityStatus))) {
-    return { eligible: false, reason: `quality status is ${qualityStatus}`, publishStatus: "MANUAL_REVIEW", inputFile, qualityScore, publishReport, qualityReport, sourceChain };
+    return { eligible: false, reason: `quality status is ${qualityStatus} (not in eligible list)`, publishStatus: "MANUAL_REVIEW", inputFile, qualityScore, publishReport, qualityReport, sourceChain };
   }
   if (!inputFile || !existsSync(inputFile)) {
-    return { eligible: false, reason: "quality source_file / used_polished_file not found", publishStatus: "MANUAL_REVIEW", inputFile, qualityScore, publishReport, qualityReport, sourceChain };
+    return { eligible: false, reason: `quality source_file / used_polished_file not found: inputRef=${inputRef}, resolved=${inputFile}`, publishStatus: "MANUAL_REVIEW", inputFile, qualityScore, publishReport, qualityReport, sourceChain };
   }
+  log(`[debug] resolveQualityAutoFixContext: eligible=true`);
   return { eligible: true, reason: "", publishStatus: "BLOCKED_BY_QUALITY", inputFile, qualityScore, publishReport, qualityReport, sourceChain };
 }
 
@@ -3238,6 +3549,7 @@ async function runPlotAutoFixChapter(params: {
       currentText: await readFile(inputFile, "utf-8"),
       publishReport: context.publishReport,
       sixStepReport: context.sixStepReport,
+      storyEffectivenessReport: context.storyEffectivenessReport,
     });
     inputFile = outputFile;
   }
@@ -3268,11 +3580,13 @@ async function resolvePlotAutoFixContext(
   readonly finalCandidateFile: string;
   readonly publishReport: Partial<PublishReadyResult> | null;
   readonly sixStepReport: Record<string, unknown> | null;
+  readonly storyEffectivenessReport: Record<string, unknown> | null;
   readonly sixStepStatus?: string;
   readonly sixStepScore?: number | null;
 }> {
   const publishReport = await readPublishReadyReportIfExists(bookDir, chapter);
   const sixStepReport = await readSixStepPlotReportIfExists(bookDir, chapter);
+  const storyEffectivenessReport = await readStoryEffectivenessReportIfExists(bookDir, chapter);
   const sixStepStatus = String(publishReport?.six_step_plot?.status ?? sixStepReport?.status ?? "");
   const rawScore = publishReport?.six_step_plot?.score ?? sixStepReport?.score;
   const sixStepScore = typeof rawScore === "number" ? rawScore : rawScore === null ? null : undefined;
@@ -3288,6 +3602,7 @@ async function resolvePlotAutoFixContext(
       finalCandidateFile,
       publishReport,
       sixStepReport,
+      storyEffectivenessReport,
       sixStepStatus: sixStepStatus || undefined,
       sixStepScore,
     };
@@ -3300,6 +3615,7 @@ async function resolvePlotAutoFixContext(
       finalCandidateFile,
       publishReport,
       sixStepReport,
+      storyEffectivenessReport,
       sixStepStatus,
       sixStepScore,
     };
@@ -3311,6 +3627,7 @@ async function resolvePlotAutoFixContext(
     finalCandidateFile,
     publishReport,
     sixStepReport,
+    storyEffectivenessReport,
     sixStepStatus,
     sixStepScore,
   };
@@ -3325,6 +3642,7 @@ async function writePlotFixedChapter(params: {
   readonly currentText: string;
   readonly publishReport: Partial<PublishReadyResult> | null;
   readonly sixStepReport: Record<string, unknown> | null;
+  readonly storyEffectivenessReport: Record<string, unknown> | null;
 }): Promise<string> {
   const numericExpressionGuidance = buildNumericExpressionGuidance(
     await readBookNumericExpressionMode(params.bookDir),
@@ -3341,7 +3659,7 @@ async function writePlotFixedChapter(params: {
         numericExpressionGuidance,
       ].join("\n"),
     },
-    { role: "user", content: buildPlotAutoFixPrompt(params.currentText, params.publishReport, params.sixStepReport) },
+    { role: "user", content: buildPlotAutoFixPrompt(params.currentText, params.publishReport, params.sixStepReport, params.storyEffectivenessReport) },
   ], { temperature: 0.3, maxTokens: 8192, stage: "six-step-plot-fix" });
   const fixed = stripMarkdownCodeFence(response.content).trim();
   if (!fixed) throw new Error("plot-auto-fix returned empty chapter content");
@@ -3356,6 +3674,7 @@ function buildPlotAutoFixPrompt(
   currentText: string,
   publishReport: Partial<PublishReadyResult> | null,
   sixStepReport: Record<string, unknown> | null,
+  storyEffectivenessReport: Record<string, unknown> | null,
 ): string {
   return `你正在修复一章 publish-ready 的 six_step_plot=FAIL_STRUCTURAL 问题。
 
@@ -3372,6 +3691,9 @@ ${JSON.stringify({
 
 【six-step-plot 报告】
 ${formatPlotReportForPrompt(sixStepReport)}
+
+【story-effectiveness 报告】
+${formatStoryEffectivenessReportForPrompt(storyEffectivenessReport)}
 
 【修复目标】
 1. 让章节具备清晰的 Hook / Pressure / Attempt / Twist / Payoff / Pull。
@@ -3396,7 +3718,7 @@ ${formatPlotReportForPrompt(sixStepReport)}
 1. 保留原剧情主线、人物关系、资源数值、物品、地点和章尾方向。
 2. 不改变已经通过连续性/资源检查的事实。
 3. 不整章重写，保留原文 70% 以上，只做 3-10 处定点补强。
-4. 不新增无来源的系统规则、战力设定、隐藏道具或重大角色关系。
+4. 不新增无来源 of 系统规则、战力设定、隐藏道具或重大角色关系。
 5. 输出完整章节正文。`;
 }
 
@@ -3409,6 +3731,20 @@ function formatPlotReportForPrompt(report: Record<string, unknown> | null): stri
     issues: report.issues,
     checklist: report.checklist,
     dimensions: report.dimensions,
+    suggestions: report.suggestions,
+  };
+  return JSON.stringify(compact, null, 2).slice(0, 9000);
+}
+
+function formatStoryEffectivenessReportForPrompt(report: Record<string, unknown> | null): string {
+  if (!report) return "未找到 story-effectiveness 详细报告；请按 publish-ready 摘要修复结构。";
+  const compact = {
+    status: report.status,
+    score: report.score,
+    dimensions: report.dimensions,
+    dimensionConclusions: report.dimensionConclusions,
+    strengths: report.strengths,
+    issues: report.issues,
     suggestions: report.suggestions,
   };
   return JSON.stringify(compact, null, 2).slice(0, 9000);
@@ -3617,6 +3953,7 @@ async function checkContinuityChapter(params: {
         fixAttempt: params.fixAttempt ?? 0,
         maxFixAttempts: params.maxFixAttempts ?? 2,
         minChapterWords: params.minChapterWords ?? 1000,
+        bookDir: params.bookDir,
       })
     : await runLocalChapterContinuityCheck({
         prevChapter,
@@ -3628,6 +3965,7 @@ async function checkContinuityChapter(params: {
         fixAttempt: params.fixAttempt ?? 0,
         maxFixAttempts: params.maxFixAttempts ?? 2,
         minChapterWords: params.minChapterWords ?? 1000,
+        bookDir: params.bookDir,
       });
 
   return {
@@ -3761,7 +4099,13 @@ async function polishFanqieQualityChapter(params: {
   readonly model: string;
   readonly maxPolishAttempts: number;
   readonly json: boolean;
+  readonly currentOverridePath?: string;
+  readonly qualityPassThreshold?: number;
+  readonly qualityAcceptThreshold?: number;
 }): Promise<FanqiePolishCommandResult> {
+  const passThreshold = params.qualityPassThreshold ?? 85;
+  const acceptThreshold = params.qualityAcceptThreshold ?? 80;
+
   let quality = await readFanqieQualityReport(params.bookDir, params.chapter);
   if (quality && !await hasUsableQualitySourceFile(params.bookDir, quality.report)) {
     if (!params.json) {
@@ -3769,12 +4113,26 @@ async function polishFanqieQualityChapter(params: {
     }
     quality = null;
   }
+  // If a currentOverridePath was provided (e.g. from plot-fix), always re-check quality on that file
+  if (params.currentOverridePath && quality) {
+    const overrideResolved = resolveUsedFilePath(params.bookDir, params.currentOverridePath) ?? params.currentOverridePath;
+    const qualitySource = quality.sourceFile ? resolveUsedFilePath(params.bookDir, quality.sourceFile) ?? quality.sourceFile : "";
+    if (overrideResolved !== qualitySource) {
+      if (!params.json) {
+        log(`[debug] polish: override path differs from quality source, rerunning quality check`);
+        log(`[debug]   override: ${relative(params.bookDir, overrideResolved)}`);
+        log(`[debug]   quality:  ${qualitySource ? relative(params.bookDir, qualitySource) : "(none)"}`);
+      }
+      quality = null;
+    }
+  }
   quality ??= await checkFanqieQualityChapter({
       bookId: params.bookId,
       bookDir: params.bookDir,
       chapter: params.chapter,
       client: params.client,
       model: params.model,
+      currentOverridePath: params.currentOverridePath,
     });
 
   const initialScore = quality.report.quality_score;
@@ -3782,7 +4140,11 @@ async function polishFanqieQualityChapter(params: {
   let attempts = 0;
   let usedPolishedFile = "";
   let finalScore = initialScore;
-  let finalStatus: FanqieFinalQualityStatus = initialScore >= 85 ? "QUALITY_PASS" : initialScore >= 80 ? "QUALITY_WARN_POLISH_OPTIONAL" : "QUALITY_MANUAL_REVIEW";
+  let finalStatus: FanqieFinalQualityStatus = initialScore >= passThreshold ? "QUALITY_PASS" : initialScore >= Math.max(80, acceptThreshold) ? "QUALITY_WARN_POLISH_OPTIONAL" : "QUALITY_MANUAL_REVIEW";
+
+  if (!params.json) {
+    log(`[debug] polish input file: ${relative(params.bookDir, inputFile)}`);
+  }
 
   if (quality.report.publish_blocked_by_continuity) {
     const finalReport = markFinalFanqieQualityReport(quality.report, {
@@ -3808,12 +4170,20 @@ async function polishFanqieQualityChapter(params: {
     };
   }
 
-  if (initialScore >= 85 || !quality.report.polish_prompt.trim()) {
+  const goldenInstructions = await getGolden3ChapterInstructions(params.bookDir, params.chapter);
+  const hasGoldenInstructions = goldenInstructions.length > 0;
+  const goldenReport = await readGolden3ChapterReportIfExists(params.bookDir);
+  const goldenScore = goldenReport?.score ?? 100;
+  const goldenNeedsFix = goldenScore < 85 && hasGoldenInstructions;
+
+  log(`[debug] polishFanqieQualityChapter Ch ${params.chapter}: initialScore=${initialScore}, goldenScore=${goldenScore}, hasGoldenInstructions=${hasGoldenInstructions}, goldenNeedsFix=${goldenNeedsFix}`);
+
+  if ((initialScore >= passThreshold && !goldenNeedsFix) || (!quality.report.polish_prompt.trim() && !hasGoldenInstructions)) {
     const finalReport = markFinalFanqieQualityReport(quality.report, {
       polishAttempt: 0,
       maxPolishAttempts: params.maxPolishAttempts,
       finalQualityScore: initialScore,
-      finalQualityStatus: initialScore >= 85 ? "QUALITY_PASS" : initialScore >= 80 ? "QUALITY_WARN_POLISH_OPTIONAL" : "QUALITY_MANUAL_REVIEW",
+      finalQualityStatus: initialScore >= passThreshold ? "QUALITY_PASS" : initialScore >= Math.max(80, acceptThreshold) ? "QUALITY_WARN_POLISH_OPTIONAL" : "QUALITY_MANUAL_REVIEW",
       usedPolishedFile: "",
     });
     const paths = fanqieFinalReportPaths(params.bookDir, params.chapter);
@@ -3832,9 +4202,9 @@ async function polishFanqieQualityChapter(params: {
     };
   }
 
-  while (finalScore < 85 && attempts < params.maxPolishAttempts) {
+  while ((finalScore < passThreshold || (goldenNeedsFix && attempts === 0)) && attempts < params.maxPolishAttempts) {
     const nextAttempt = attempts + 1;
-    if (!quality.report.polish_prompt.trim()) break;
+    if (!quality.report.polish_prompt.trim() && !hasGoldenInstructions) break;
     if (!params.json) {
       log(`attempt ${nextAttempt}/${params.maxPolishAttempts} -> score: ${finalScore} -> polishing...`);
     }
@@ -3845,6 +4215,7 @@ async function polishFanqieQualityChapter(params: {
       client: params.client,
       model: params.model,
       polishPrompt: quality.report.polish_prompt,
+      inputFile: quality.sourceFile,
     });
     usedPolishedFile = relative(params.bookDir, polishedPath);
     attempts = nextAttempt;
@@ -3861,12 +4232,12 @@ async function polishFanqieQualityChapter(params: {
       usedPolishedFile,
     });
     finalScore = quality.report.quality_score;
-    if (!params.json && finalScore >= 85) {
+    if (!params.json && finalScore >= passThreshold) {
       log(`attempt ${nextAttempt}/${params.maxPolishAttempts} -> final score: ${finalScore}`);
     }
   }
 
-  finalStatus = finalScore >= 85 ? "QUALITY_PASS" : finalScore >= 80 ? "QUALITY_WARN_POLISH_OPTIONAL" : "QUALITY_MANUAL_REVIEW";
+  finalStatus = finalScore >= passThreshold ? "QUALITY_PASS" : finalScore >= Math.max(80, acceptThreshold) ? "QUALITY_WARN_POLISH_OPTIONAL" : "QUALITY_MANUAL_REVIEW";
   const finalReport = markFinalFanqieQualityReport(quality.report, {
     polishAttempt: attempts,
     maxPolishAttempts: params.maxPolishAttempts,
@@ -3923,6 +4294,54 @@ async function hasUsableQualitySourceFile(bookDir: string, report: FanqieQuality
   return Boolean(sourceFile && await fileExists(sourceFile));
 }
 
+async function getGolden3ChapterInstructions(bookDir: string, chapter: number): Promise<string[]> {
+  if (chapter < 1 || chapter > 3) return [];
+  try {
+    const report = await readGolden3ChapterReportIfExists(bookDir);
+    log(`[debug] readGolden3ChapterReportIfExists: found=${Boolean(report)}, issues=${report?.issues?.length}`);
+    if (!report || !Array.isArray(report.issues)) return [];
+    
+    const instructions: string[] = [];
+    for (const issue of report.issues) {
+      if (!issue || typeof issue !== "object") continue;
+      const dim = String(issue.dimension || "");
+      const msg = String(issue.message || "");
+      const sug = String(issue.suggestion || "");
+      
+      let matched = false;
+      
+      // Global dimensions apply to all Ch 1-3
+      if (["setup_ratio_safe", "three_chapter_arc"].includes(dim)) {
+        matched = true;
+      }
+      
+      // Chapter 1 specific
+      if (chapter === 1 && (dim === "opening_hook_delivery" || msg.includes("第1章") || msg.includes("第一章"))) {
+        matched = true;
+      }
+      
+      // Chapter 2 specific
+      if (chapter === 2 && (dim === "core_differentiator_visible" || msg.includes("第2章") || msg.includes("第二章"))) {
+        matched = true;
+      }
+      
+      // Chapter 3 specific
+      if (chapter === 3 && (dim === "long_term_goal_established" || msg.includes("第3章") || msg.includes("第三章"))) {
+        matched = true;
+      }
+      
+      if (matched && sug) {
+        instructions.push(`【前三章黄金开篇优化要求 (${dim})】：${sug} （原诊断问题：${msg}）`);
+      }
+    }
+    log(`[debug] getGolden3ChapterInstructions for Ch ${chapter}: returning ${instructions.length} instructions`);
+    return instructions;
+  } catch (e) {
+    logError(`[debug] getGolden3ChapterInstructions error: ${e}`);
+    return [];
+  }
+}
+
 async function writeFanqiePolishedChapter(params: {
   readonly bookDir: string;
   readonly chapter: number;
@@ -3930,12 +4349,35 @@ async function writeFanqiePolishedChapter(params: {
   readonly client: ReturnType<typeof createClient>;
   readonly model: string;
   readonly polishPrompt: string;
+  readonly inputFile: string;
 }): Promise<string> {
   const numericExpressionGuidance = buildNumericExpressionGuidance(
     await readBookNumericExpressionMode(params.bookDir),
     "zh",
     "polish",
   );
+  
+  const goldenInstructions = await getGolden3ChapterInstructions(params.bookDir, params.chapter);
+  let finalPrompt = params.polishPrompt.trim();
+  if (goldenInstructions.length > 0) {
+    if (!finalPrompt) {
+      const chapterText = await readFile(params.inputFile, "utf-8");
+      finalPrompt = `你正在优化一章需要针对黄金前三章开篇进行专门优化和润色得番茄网文章节。
+
+【当前章节全文】
+${chapterText}
+
+【优化要求】
+1. 针对前三章黄金开篇的特殊质量要求，你必须在润色中严格落实以下优化改进，以提升开篇的节奏与吸引力：
+${goldenInstructions.map(line => `- ${line}`).join("\n")}
+2. 不改变剧情主线，不改变人物关系，不改变战力层级。
+3. 保留原文大部分核心事件，增强开篇冲突与中段节奏。
+4. 输出完整优化后的章节正文，禁止输出解释说明。`;
+    } else {
+      finalPrompt = `${finalPrompt}\n\n同时，针对前三章黄金开篇的特殊质量要求，你必须在润色中严格落实以下优化改进，以提升开篇的节奏与吸引力：\n${goldenInstructions.map(line => `- ${line}`).join("\n")}`;
+    }
+  }
+
   const response = await chatCompletion(params.client, params.model, [
     {
       role: "system",
@@ -3946,7 +4388,7 @@ async function writeFanqiePolishedChapter(params: {
         numericExpressionGuidance,
       ].join("\n"),
     },
-    { role: "user", content: params.polishPrompt },
+    { role: "user", content: finalPrompt },
   ], { temperature: 0.35, maxTokens: 8192, stage: "fanqie-polish" });
   const polished = stripMarkdownCodeFence(response.content).trim();
   if (!polished) throw new Error("fanqie-polish returned empty chapter content");
@@ -4783,6 +5225,65 @@ async function readOpeningHookSummaryLocal(
   return readOpeningHookSummary(bookDir, chapter);
 }
 
+/**
+ * Parse chapter intent §12 (本章结构信号关键词) and merge extracted keywords
+ * into the book-level StructureSignals. Returns a new StructureSignals with
+ * intent keywords unioned into the relevant dimensions, or null if no keywords found.
+ */
+function mergeIntentSignals(
+  baseSignals: StructureSignals,
+  intentContent: string,
+): StructureSignals | null {
+  // Extract §12 section content
+  const sectionMatch = intentContent.match(
+    /##\s*12[.\s]*本章结构信号关键词([\s\S]*?)(?=\n##\s|\n---|\n\*\*\*|$)/u,
+  );
+  if (!sectionMatch?.[1]?.trim()) return null;
+
+  const section = sectionMatch[1];
+  const dimensionMap: Record<string, keyof StructureSignals["signals"]> = {
+    opening_hook: "opening_hook",
+    pressure_source: "pressure_source",
+    obstacle_dilemma: "obstacle_dilemma",
+    ending_pull: "ending_pull",
+  };
+
+  let anyMerged = false;
+  const mergedSignals = { ...baseSignals.signals };
+
+  for (const [key, dim] of Object.entries(dimensionMap)) {
+    // Match lines like "- opening_hook（...）：扣分、死局、抹杀"
+    const lineMatch = section.match(
+      new RegExp(`-\\s*${key}[^：:]*[：:]\\s*(.+)`, "u"),
+    );
+    if (!lineMatch?.[1]?.trim()) continue;
+
+    // Split by Chinese/English comma, 、, or whitespace
+    const keywords = lineMatch[1]
+      .split(/[,，、\s]+/u)
+      .map((w) => w.trim())
+      .filter((w) => w.length >= 2 && w.length <= 8);
+
+    if (keywords.length === 0) continue;
+
+    const existing = new Set(mergedSignals[dim] ?? []);
+    for (const kw of keywords) {
+      if (!existing.has(kw)) {
+        existing.add(kw);
+        anyMerged = true;
+      }
+    }
+    mergedSignals[dim] = [...existing];
+  }
+
+  if (!anyMerged) return null;
+
+  return {
+    ...baseSignals,
+    signals: mergedSignals as StructureSignals["signals"],
+  };
+}
+
 export async function generateOpeningHookReport(
   bookDir: string,
   chapterIndex: number,
@@ -5148,6 +5649,10 @@ interface DiagnoseChapterResult {
   readonly chapterStatus: string | null;
   readonly publishStatus: string | null;
   readonly finalCandidateFile: string | null;
+  readonly continuityScore?: number | null;
+  readonly continuityStatus?: string | null;
+  readonly qualityScore?: number | null;
+  readonly qualityStatus?: string | null;
   readonly reports: Record<string, string>;
   readonly plans: ReadonlyArray<DiagnoseRepairPlan>;
 }
@@ -5219,12 +5724,13 @@ async function diagnoseChapterRepair(params: {
     plans.push(makeStateRepairPlan(params, auditIssues));
   }
 
-  if (chapterStatus === "blocked-resource-plan" || isResourceBlocked(resourceReport, auditIssues) || publishReport?.publish_status === "BLOCKED_BY_RESOURCE") {
+  if (isCurrentResourceBlocked(chapterStatus, resourceReport, auditIssues, publishReport?.publish_status)) {
     plans.push(makeResourceRepairPlan(params, resourceReport, auditIssues, finalCandidateFile));
   }
 
   const continuityStatus = publishReport?.continuity?.final_status ?? continuityReport?.final_status ?? continuityReport?.status;
-  if (publishReport?.publish_status === "BLOCKED_BY_CONTINUITY" || continuityStatus && continuityStatus !== "PASS") {
+  const hasActionableContinuityStatus = Boolean(continuityStatus && continuityStatus !== "UNKNOWN" && continuityStatus !== "SKIPPED");
+  if (publishReport?.publish_status === "BLOCKED_BY_CONTINUITY" || hasActionableContinuityStatus && continuityStatus !== "PASS") {
     plans.push(makeContinuityRepairPlan(params, continuityReport, publishReport));
   }
 
@@ -5284,19 +5790,22 @@ async function diagnoseChapterRepair(params: {
   if (
     !plans.some((plan) => plan.severity === "blocker")
     && chapterStatus === "ready-for-review"
-    && !publishReport
+    && (!publishReport || publishReport.publish_status === "BLOCKED_BY_RESOURCE")
   ) {
+    const staleResourcePublishBlock = publishReport?.publish_status === "BLOCKED_BY_RESOURCE";
     plans.push({
       id: "ready-for-publish-ready",
       severity: plans.length ? "warning" : "info",
       kind: "review",
-      title: plans.length
+      title: staleResourcePublishBlock
+        ? "章节已 ready-for-review；上次 publish-ready 是旧资源阻断，重跑 publish-ready。"
+        : plans.length
         ? "章节已 ready-for-review；可先处理 warning，也可以直接跑 publish-ready。"
         : "章节已 ready-for-review；下一步是跑 publish-ready。",
       evidence: [
         "chapter_status=ready-for-review",
-        "publish_status=missing",
-        resourceReport ? `resource status=${resourceReport.status ?? "unknown"} closureStatus=${resourceReport.closureStatus ?? "unknown"}` : "",
+        `publish_status=${publishReport?.publish_status ?? "missing"}`,
+        resourceReport ? `stale resource report ignored: status=${resourceReport.status ?? "unknown"} closureStatus=${resourceReport.closureStatus ?? "unknown"}` : "",
       ].filter(Boolean),
       inspectFiles: existingFiles(params.root, [
         baseReports.chapter_index,
@@ -5334,12 +5843,31 @@ async function diagnoseChapterRepair(params: {
     });
   }
 
+  const continuityScore = typeof publishReport?.continuity?.score === "number"
+    ? publishReport.continuity.score
+    : typeof continuityReport?.score === "number"
+      ? continuityReport.score
+      : null;
+  const qualityScore = typeof publishReport?.quality_score === "number"
+    ? publishReport.quality_score
+    : typeof publishReport?.quality?.score === "number"
+      ? publishReport.quality.score
+      : typeof qualityReport?.final_quality_score === "number"
+        ? qualityReport.final_quality_score
+        : typeof qualityReport?.quality_score === "number"
+          ? qualityReport.quality_score
+          : null;
+
   return {
     book: params.bookId,
     chapter: prefix,
     chapterStatus,
     publishStatus: publishReport?.publish_status ?? null,
     finalCandidateFile: finalCandidateFile ? relative(params.root, finalCandidateFile) : null,
+    continuityScore,
+    continuityStatus: continuityStatus ?? null,
+    qualityScore,
+    qualityStatus: qualityStatus ?? null,
     reports: Object.fromEntries(
       Object.entries(baseReports).filter(([, file]) => existsSync(join(params.root, file))),
     ),
@@ -5359,9 +5887,15 @@ function renderDiagnoseChapterRepair(result: DiagnoseChapterResult): string[] {
     `chapter: ${result.chapter}`,
     `chapter_status: ${result.chapterStatus ?? "unknown"}`,
     `publish_status: ${result.publishStatus ?? "missing"}`,
-    result.finalCandidateFile ? `final_candidate: ${result.finalCandidateFile}` : "final_candidate: n/a",
-    "",
   ];
+  if (result.continuityScore !== undefined && result.continuityScore !== null) {
+    lines.push(`continuity: ${result.continuityStatus ?? "unknown"} (${result.continuityScore})`);
+  }
+  if (result.qualityScore !== undefined && result.qualityScore !== null) {
+    lines.push(`quality: ${result.qualityStatus ?? "unknown"} (${result.qualityScore})`);
+  }
+  lines.push(result.finalCandidateFile ? `final_candidate: ${result.finalCandidateFile}` : "final_candidate: n/a");
+  lines.push("");
 
   if (primaryPlan) {
     lines.push("next:");
@@ -5731,16 +6265,28 @@ function readStringArrayField(source: unknown, field: string): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
-function isResourceBlocked(
+function isCurrentResourceBlocked(
+  chapterStatus: string | null,
   resourceReport: Partial<{ blocking: boolean; closureStatus: string; status: string }> | null,
   auditIssues: ReadonlyArray<string>,
+  publishStatus?: string,
 ): boolean {
+  if (chapterStatus === "ready-for-review" || chapterStatus === "approved") {
+    return false;
+  }
+  if (chapterStatus === "blocked-resource-plan" || publishStatus === "BLOCKED_BY_RESOURCE") return true;
+  const auditBlocked = hasResourceBlockingAuditIssue(auditIssues);
+  if (auditBlocked) return true;
   if (resourceReport) {
     return resourceReport.blocking === true
       || resourceReport.closureStatus === "resource_failed"
       || resourceReport.status === "BLOCKED_BY_RESOURCE_PLAN"
       || resourceReport.status === "BLOCKED";
   }
+  return false;
+}
+
+function hasResourceBlockingAuditIssue(auditIssues: ReadonlyArray<string>): boolean {
   return auditIssues.some((issue) => /RESOURCE_PLAN_NOT_CLOSED|RESOURCE_CONSISTENCY_NOT_CLOSED|resource-plan/u.test(issue));
 }
 
@@ -5877,10 +6423,19 @@ reviewCommand
       };
       await state.saveChapterIndex(bookId, index);
 
+      // Re-analyze and sync chapter state upon approval to guarantee
+      // that the final text is settled and snapshotted correctly.
+      if (!opts.json) {
+        log(`Syncing state and snapshot for approved chapter ${chapterNum}...`);
+      }
+      const config = await loadConfig({ requireApiKey: false });
+      const pipeline = new PipelineRunner(buildPipelineConfig(config, root));
+      await pipeline.resyncChapterArtifacts(bookId, chapterNum);
+
       if (opts.json) {
         log(JSON.stringify({ bookId, chapter: chapterNum, status: "approved" }));
       } else {
-        log(`Chapter ${chapterNum} approved (state committed).`);
+        log(`Chapter ${chapterNum} approved (state committed and synced).`);
         log("");
         log("next:");
         log(`node scripts/fanqie/export-fanqie.mjs ${bookId} --from ${chapterNum} --to ${chapterNum} --use-reviewed --dry-run`);
@@ -5935,6 +6490,68 @@ reviewCommand
     }
   });
 
+async function cleanupChapterFiles(bookDir: string, chapterNum: number): Promise<void> {
+  const prefix = chapterNumberPrefix(chapterNum);
+
+  // 1. Delete intent file: story/runtime/chapter-intents/XXXX.md
+  const intentPath = join(bookDir, "story", "runtime", "chapter-intents", `${prefix}.md`);
+  await unlink(intentPath).catch(() => {});
+
+  // 2. Delete files starting with prefix in chapter stages directories
+  const stageDirs = [
+    "chapters",
+    "chapters-reviewed",
+    "chapters-polished",
+    "chapters-plot-fixed",
+    "chapters-quality-fixed",
+    "chapters-fixed",
+    "chapters-salvaged",
+  ];
+  for (const dirName of stageDirs) {
+    const dirPath = join(bookDir, dirName);
+    if (!existsSync(dirPath)) continue;
+    try {
+      const files = await readdir(dirPath);
+      for (const file of files) {
+        if (file.startsWith(prefix)) {
+          await unlink(join(dirPath, file)).catch(() => {});
+        }
+      }
+    } catch {
+      // Ignore errors
+    }
+  }
+
+  // 3. Delete files starting with prefix in reviews subdirectories
+  const reviewsDir = join(bookDir, "reviews");
+  if (existsSync(reviewsDir)) {
+    try {
+      const subdirs = await readdir(reviewsDir);
+      for (const subdir of subdirs) {
+        const subPath = join(reviewsDir, subdir);
+        const st = await stat(subPath).catch(() => null);
+        if (st && st.isDirectory()) {
+          const files = await readdir(subPath);
+          for (const file of files) {
+            if (file.startsWith(prefix)) {
+              await unlink(join(subPath, file)).catch(() => {});
+            }
+          }
+        }
+      }
+    } catch {
+      // Ignore errors
+    }
+  }
+
+  // 4. Delete golden-3-chapter reports if chapter 1, 2 or 3 is rejected
+  if (chapterNum >= 1 && chapterNum <= 3) {
+    const goldenDir = join(bookDir, "reviews", "golden-3-chapter");
+    await unlink(join(goldenDir, "golden-3-chapter.report.json")).catch(() => {});
+    await unlink(join(goldenDir, "golden-3-chapter.report.md")).catch(() => {});
+  }
+}
+
 reviewCommand
   .command("reject")
   .description("Reject a chapter and roll back state: reject [book-id] <chapter>")
@@ -5979,6 +6596,12 @@ reviewCommand
       const rollbackTarget = chapterNum - 1;
       const discarded = await state.rollbackToChapter(bookId, rollbackTarget);
 
+      // Clean up physical files for all discarded chapters
+      const bookDir = state.bookDir(bookId);
+      for (const chNum of discarded) {
+        await cleanupChapterFiles(bookDir, chNum);
+      }
+
       if (opts.json) {
         log(JSON.stringify({
           bookId,
@@ -5998,6 +6621,39 @@ reviewCommand
         log(JSON.stringify({ error: String(e) }));
       } else {
         logError(`Failed to reject: ${e}`);
+      }
+      process.exit(1);
+    }
+  });
+
+reviewCommand
+  .command("rebuild-state")
+  .description("Rebuild the entire story state and snapshots from the approved chapters: rebuild-state [book-id]")
+  .argument("[book-id]", "Book ID (auto-detected if only one book)")
+  .option("--json", "Output JSON")
+  .action(async (bookIdArg: string | undefined, opts) => {
+    try {
+      const root = findProjectRoot();
+      const bookId = await resolveBookId(bookIdArg, root);
+      const config = await loadConfig({ requireApiKey: false });
+      const pipeline = new PipelineRunner(buildPipelineConfig(config, root));
+
+      if (!opts.json) {
+        log(`Rebuilding state for book "${bookId}"...`);
+      }
+
+      await pipeline.rebuildStoryState(bookId);
+
+      if (opts.json) {
+        log(JSON.stringify({ bookId, status: "success" }));
+      } else {
+        log(`Successfully rebuilt all state files and snapshots for book "${bookId}".`);
+      }
+    } catch (e) {
+      if (opts.json) {
+        log(JSON.stringify({ error: String(e) }));
+      } else {
+        logError(`Failed to rebuild state: ${e}`);
       }
       process.exit(1);
     }

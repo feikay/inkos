@@ -559,12 +559,13 @@ protagonist:
   behavioralConstraints: [(3-5 behavioral constraints)]
 genreLock:
   primary: ${book.genre}
-  forbidden: [(2-3 forbidden style intrusions)]
+  forbidden: [(2-3 forbidden style intrusions, e.g. ["Superpowers", "Cultivation", "Special Forces Combat"] for realistic urban books)]
 ${gp.numericalSystem ? `numericalSystemOverrides:
   hardCap: (decide from the setting)
   resourceTypes: [(core resource types)]` : ""}
 prohibitions:
   - (3-5 book-specific prohibitions)
+  - "Genre Contamination Prevention: (Strict, highly specific rule preventing common genre contamination, e.g. strictly banning combat/military/supernatural for realistic urban, or banning physical combat/magic for coding systems)"
 chapterTypesOverride: []
 fatigueWordsOverride: []
 additionalAuditDimensions: []
@@ -576,6 +577,9 @@ enableFullCastTracking: false
 
 ## Core Conflict Driver
 (Describe the book's core conflict and propulsion)
+
+## Genre Firewall & Strict Boundaries (题材防污染与风格硬边界)
+(Formulate highly rigid, specific rules to prevent other unrelated high-combat or high-fantasy web novel clichés from bleeding into this book. For example, if it is a realistic urban or business story, explicitly and completely ban any physical combat, martial arts, special forces, firearms, secret agents, explosions, or supernatural system elements. If it is a coding/system novel, restrict all conflicts to intellectual/logical hacking and coding, completely banning actual physical martial arts or cultivation. Specify that violations will fail structural/worldview audits.)
 \`\`\``
       : `生成 book_rules.md 格式的 YAML frontmatter + 叙事指导，包含：
 \`\`\`
@@ -587,12 +591,13 @@ protagonist:
   behavioralConstraints: [(3-5条行为约束)]
 genreLock:
   primary: ${book.genre}
-  forbidden: [(2-3种禁止混入的文风)]
+  forbidden: [(2-3种禁止混入的违和题材/文风，例如都市写实文严禁["异能", "修真", "特种兵兵王战力", "热武器枪战"])]
 ${gp.numericalSystem ? `numericalSystemOverrides:
   hardCap: (根据设定确定)
   resourceTypes: [(核心资源类型列表)]` : ""}
 prohibitions:
   - (3-5条本书禁忌)
+  - "题材防污染：(严密防范都市小说常见的异能/特种兵/修仙污染，根据本书题材制定绝对隔离规则，如：禁止出现任何武力冲突、军事行动或超自然设定)"
 chapterTypesOverride: []
 fatigueWordsOverride: []
 additionalAuditDimensions: []
@@ -604,6 +609,9 @@ enableFullCastTracking: false
 
 ## 核心冲突驱动
 (描述本书的核心矛盾和驱动力)
+
+## 题材防污染与风格硬边界
+(针对本书所属的细分题材，制定极度严苛的“题材防污染”和“文风防火墙”规则。比如都市商业/职场小说必须彻底禁止任何特种兵战力、枪战、爆破、特工、武力斗殴、超凡异能或软科幻元素；系统黑客/程序员文必须彻底禁止肉体战斗、武功修仙，只能在逻辑、Bug和智力层面交锋。必须明确一旦出现这些元素即视为严重偏离大纲，应彻底杜绝。这是防范多书并发生成时大模型上下文交叉污染的硬性红线规则！项目一旦违背这些边界，审核引擎将判定不及格并强制重写。)
 \`\`\``;
 
     const politicalSafetyRulesPrompt = resolvedLanguage === "en"
@@ -729,6 +737,77 @@ ${finalRequirementsPrompt}`;
     ], { temperature: 0.8, maxTokens: 16384 });
 
     return this.parseSections(response.content);
+  }
+
+  async completeStructureSignals(
+    book: BookConfig,
+    foundation: ArchitectOutput,
+  ): Promise<ArchitectOutput> {
+    if (foundation.structureSignals) {
+      return foundation;
+    }
+
+    const resolvedLanguage = book.language ?? "zh";
+    const prompt = resolvedLanguage === "en"
+      ? `You are a web novel architect. Please complete the missing "structure_signals" section for this book.
+
+## Book Information
+- Title: "${book.title}"
+- Genre: ${book.genre}
+
+## Story Bible
+${foundation.storyBible}
+
+## Volume Outline
+${foundation.volumeOutline}
+
+## Book Rules
+${foundation.bookRules}
+
+## Current State
+${foundation.currentState}
+
+## Pending Hooks
+${foundation.pendingHooks}
+
+${this.buildStructureSignalsPrompt(resolvedLanguage)}`
+      : `你是一个网络小说架构师。请为下面这本小说补生成其专属的 structure_signals (书级结构信号)。
+
+## 小说基本信息
+- 标题：《${book.title}》
+- 题材：${book.genre}
+
+## 故事设定 (Story Bible)
+${foundation.storyBible}
+
+## 卷纲设计 (Volume Outline)
+${foundation.volumeOutline}
+
+## 创作规则 (Book Rules)
+${foundation.bookRules}
+
+## 初始状态 (Current State)
+${foundation.currentState}
+
+## 待回收伏笔 (Pending Hooks)
+${foundation.pendingHooks}
+
+${this.buildStructureSignalsPrompt(resolvedLanguage)}`;
+
+    const response = await this.chat([
+      { role: "system", content: prompt },
+      {
+        role: "user",
+        content: resolvedLanguage === "en"
+          ? `Generate structure signals for "${book.title}".`
+          : `请为《${book.title}》补生成 structure_signals。`,
+      },
+    ], { temperature: 0.4, maxTokens: 4096 });
+
+    return {
+      ...foundation,
+      structureSignals: response.content,
+    };
   }
 
   async writeFoundationFiles(
@@ -1587,12 +1666,13 @@ protagonist:
   behavioralConstraints: [(infer 3-5 behavioral constraints from behavior)]
 genreLock:
   primary: ${book.genre}
-  forbidden: [(2-3 forbidden style intrusions)]
+  forbidden: [(2-3 forbidden style intrusions, e.g. ["Superpowers", "Cultivation", "Special Forces Combat"] for realistic urban books)]
 ${gp.numericalSystem ? `numericalSystemOverrides:
   hardCap: (infer from the text)
   resourceTypes: [(extract core resource types from the text)]` : ""}
 prohibitions:
   - (infer 3-5 book-specific prohibitions from the text)
+  - "Genre Contamination Prevention: (Strict, highly specific rule preventing common genre contamination, e.g. strictly banning combat/military/supernatural for realistic urban, or banning physical combat/magic for coding systems)"
 chapterTypesOverride: []
 fatigueWordsOverride: []
 additionalAuditDimensions: []
@@ -1604,6 +1684,9 @@ enableFullCastTracking: false
 
 ## Core Conflict Driver
 (Infer the book's core conflict and propulsion from the text)
+
+## Genre Firewall & Strict Boundaries (题材防污染与风格硬边界)
+(Formulate highly rigid, specific rules to prevent other unrelated high-combat or high-fantasy web novel clichés from bleeding into this book. For example, if it is a realistic urban or business story, explicitly and completely ban any physical combat, martial arts, special forces, firearms, secret agents, explosions, or supernatural system elements. If it is a coding/system novel, restrict all conflicts to intellectual/logical hacking and coding, completely banning actual physical martial arts or cultivation. Specify that violations will fail structural/worldview audits.)
 \`\`\``
       : `从正文中角色行为反推 book_rules.md 格式的 YAML frontmatter + 叙事指导：
 \`\`\`
@@ -1615,12 +1698,13 @@ protagonist:
   behavioralConstraints: [(从行为推断3-5条行为约束)]
 genreLock:
   primary: ${book.genre}
-  forbidden: [(2-3种禁止混入的文风)]
+  forbidden: [(2-3种禁止混入的违和题材/文风，例如都市写实文严禁["异能", "修真", "特种兵兵王战力", "热武器枪战"])]
 ${gp.numericalSystem ? `numericalSystemOverrides:
   hardCap: (从正文推断)
   resourceTypes: [(从正文提取核心资源类型)]` : ""}
 prohibitions:
   - (从正文推断3-5条本书禁忌)
+  - "题材防污染：(严密防范都市小说常见的异能/特种兵/修仙污染，根据本书题材制定绝对隔离规则，如：禁止出现任何武力冲突、军事行动或超自然设定)"
 chapterTypesOverride: []
 fatigueWordsOverride: []
 additionalAuditDimensions: []
@@ -1632,6 +1716,9 @@ enableFullCastTracking: false
 
 ## 核心冲突驱动
 (从正文推断本书的核心矛盾和驱动力)
+
+## 题材防污染与风格硬边界
+(针对本书所属的细分题材，制定极度严苛的“题材防污染”和“文风防火墙”规则。比如都市商业/职场小说必须彻底禁止任何特种兵战力、枪战、爆破、特工、武力斗殴、超凡异能或软科幻元素；系统黑客/程序员文必须彻底禁止肉体战斗、武功修仙，只能在逻辑、Bug和智力层面交锋。必须明确一旦出现这些元素即视为严重偏离大纲，应彻底杜绝。这是防范多书并发生成时大模型上下文交叉污染的硬性红线规则！项目一旦违背这些边界，审核引擎将判定不及格并强制重写。)
 \`\`\``;
 
     const currentStatePrompt = resolvedLanguage === "en"
