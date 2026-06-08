@@ -12,6 +12,21 @@ const cliEntry = resolve(cliDir, "dist", "index.js");
 
 let projectDir: string;
 
+const mockFirst10Plan = `## 2. 前10章章节表
+| 章数 | 阶段功能 | 情绪触发 | 章节目标 | 冲突/阻碍 | 解决手段 | 阶段收益 | 结尾钩子 |
+|---|---|---|---|---|---|---|---|
+| 1 | 开局入局 | 困境/危机/反差 | 活下来并进入主线 | 开局压迫 | 抓住第一处规则缝隙 | 入局，留下结尾钩子 | 更大威胁出现 |
+| 2 | 展示核心差异 | 试探/小爽 | 弄清核心差异 | 压力升级 | 初次使用核心差异 | 小爽点或希望感 | 奖励或代价异常 |
+| 3 | 明确目标 | 目标明确/压力升级 | 确立第一个阶段目标 | 第一阶段敌人出现 | 主动选择路线 | 主线目标成形 | 核心反派露影 |
+| 4 | 应对阻碍 | 应对阻碍 | 推进第一线索 | 规则或资源压迫 | 以行动试错 | 线索推进 | 新阻碍出现 |
+| 5 | 小收益 | 小收益/新问题 | 拿到阶段筹码 | 反击压迫 | 利用前文伏笔 | 小爽点 | 风险扩大 |
+| 6 | 关系拉扯 | 紧迫/关系拉扯 | 稳住同伴或资源 | 人物关系冲突 | 做出取舍 | 关系变化 | 新情报出现 |
+| 7 | 伏笔推进 | 收益/伏笔 | 推进隐藏线索 | 资源或规则线阻拦 | 验证推断 | 伏笔加深 | 真相露边 |
+| 8 | 危机反转 | 危机/反转 | 摆脱阶段危机 | 计划受阻或身份风险 | 用代价换破局 | 反转抬升压力 | 阶段敌人逼近 |
+| 9 | 爆发前夜 | 爆发前夜 | 准备阶段对抗 | 阶段敌人逼近 | 整合筹码 | 冲突收束 | 决战触发 |
+| 10 | 阶段爆发 | 阶段爆发/新敌显现 | 完成第一次局势变化 | 阶段敌人全面压迫 | 付代价反击 | 局势发生可见变化 | 打开下一轮矛盾 |
+`;
+
 function buildTestEnv(overrides?: Record<string, string>) {
   const baseEnv = Object.fromEntries(
     Object.entries(process.env).filter(([key]) =>
@@ -1393,6 +1408,7 @@ describe("CLI integration", () => {
       );
       await writeFile(join(storyDir, "current_state.md"), "State at ch1", "utf-8");
       await writeFile(join(storyDir, "pending_hooks.md"), "Hooks at ch1", "utf-8");
+      await writeFile(join(storyDir, "first_10_chapter_plan.md"), mockFirst10Plan, "utf-8");
       await writeFile(join(chaptersDir, "0001_ch1.md"), "# Chapter 1\n\nContent 1", "utf-8");
       await writeFile(
         join(chaptersDir, "index.json"),
@@ -1416,7 +1432,7 @@ describe("CLI integration", () => {
       await writeFile(join(storyDir, "current_state.md"), "State at ch3", "utf-8");
       await writeFile(join(storyDir, "pending_hooks.md"), "Hooks at ch3", "utf-8");
 
-      const output = run(["review", "approve", bookId, "1"]);
+      const output = run(["review", "approve", bookId, "1", "--skip-sync"]);
       expect(output).toContain("Chapter 1 approved");
 
       await expect(
@@ -1428,6 +1444,181 @@ describe("CLI integration", () => {
 
       const index = await state.loadChapterIndex(bookId);
       expect(index[0]?.status).toBe("approved");
+    });
+
+    it("fails approve on audit-failed, state-degraded, blocked-resource-plan, and planning-degraded status", async () => {
+      const configPath = join(projectDir, "inkos.json");
+      const initialized = await stat(configPath).then(() => true).catch(() => false);
+      if (!initialized) run(["init"]);
+
+      const bookId = "review-approve-block-cli";
+      const bookDir = join(projectDir, "books", bookId);
+      const chaptersDir = join(bookDir, "chapters");
+      await mkdir(chaptersDir, { recursive: true });
+
+      await writeFile(
+        join(bookDir, "book.json"),
+        JSON.stringify({
+          id: bookId,
+          title: "Approve Block Book",
+          platform: "other",
+          genre: "other",
+          status: "active",
+          targetChapters: 10,
+          chapterWordCount: 2200,
+        }, null, 2),
+        "utf-8",
+      );
+
+      const statuses = ["audit-failed", "state-degraded", "blocked-resource-plan", "planning-degraded"];
+      const indexData = statuses.map((status, index) => ({
+        number: index + 1,
+        title: `Ch${index + 1}`,
+        status,
+        wordCount: 100,
+        createdAt: "",
+        updatedAt: "",
+        auditIssues: [],
+        lengthWarnings: [],
+      }));
+
+      await writeFile(
+        join(chaptersDir, "index.json"),
+        JSON.stringify(indexData, null, 2),
+        "utf-8",
+      );
+
+      for (let i = 1; i <= statuses.length; i++) {
+        const result = runStderr(["review", "approve", bookId, String(i)]);
+        expect(result.exitCode).not.toBe(0);
+        expect(result.stderr + result.stdout).toContain("Approval is blocked");
+      }
+    });
+
+    it("skips degraded statuses with warnings during review approve-all", async () => {
+      const configPath = join(projectDir, "inkos.json");
+      const initialized = await stat(configPath).then(() => true).catch(() => false);
+      if (!initialized) run(["init"]);
+
+      const bookId = "review-approve-all-block-cli";
+      const bookDir = join(projectDir, "books", bookId);
+      const chaptersDir = join(bookDir, "chapters");
+      await mkdir(chaptersDir, { recursive: true });
+
+      await writeFile(
+        join(bookDir, "book.json"),
+        JSON.stringify({
+          id: bookId,
+          title: "Approve All Block Book",
+          platform: "other",
+          genre: "other",
+          status: "active",
+          targetChapters: 10,
+          chapterWordCount: 2200,
+        }, null, 2),
+        "utf-8",
+      );
+
+      const indexData = [
+        {
+          number: 1,
+          title: "Ch1",
+          status: "ready-for-review",
+          wordCount: 100,
+          createdAt: "",
+          updatedAt: "",
+          auditIssues: [],
+          lengthWarnings: [],
+        },
+        {
+          number: 2,
+          title: "Ch2",
+          status: "state-degraded",
+          wordCount: 100,
+          createdAt: "",
+          updatedAt: "",
+          auditIssues: [],
+          lengthWarnings: [],
+        },
+        {
+          number: 3,
+          title: "Ch3",
+          status: "planning-degraded",
+          wordCount: 100,
+          createdAt: "",
+          updatedAt: "",
+          auditIssues: [],
+          lengthWarnings: [],
+        }
+      ];
+
+      await writeFile(
+        join(chaptersDir, "index.json"),
+        JSON.stringify(indexData, null, 2),
+        "utf-8",
+      );
+
+      const output = run(["review", "approve-all", bookId]);
+      expect(output).toContain("Warning: Skipped chapter 2 from approve-all due to blocked status \"state-degraded\".");
+      expect(output).toContain("Warning: Skipped chapter 3 from approve-all due to blocked status \"planning-degraded\".");
+      expect(output).toContain("1 chapter(s) approved.");
+    });
+
+    it("correctly yields BLOCKED_BY_AUDIT, BLOCKED_BY_STATE, and BLOCKED_BY_PLANNING for publish-ready", async () => {
+      const configPath = join(projectDir, "inkos.json");
+      const initialized = await stat(configPath).then(() => true).catch(() => false);
+      if (!initialized) run(["init"]);
+
+      const bookId = "review-publish-ready-block-cli";
+      const bookDir = join(projectDir, "books", bookId);
+      const chaptersDir = join(bookDir, "chapters");
+      const reviewsDir = join(bookDir, "reviews", "publish-ready");
+      await mkdir(chaptersDir, { recursive: true });
+      await mkdir(reviewsDir, { recursive: true });
+
+      await writeFile(
+        join(bookDir, "book.json"),
+        JSON.stringify({
+          id: bookId,
+          title: "Publish Ready Block Book",
+          platform: "other",
+          genre: "other",
+          status: "active",
+          targetChapters: 10,
+          chapterWordCount: 2200,
+        }, null, 2),
+        "utf-8",
+      );
+
+      const statuses = ["audit-failed", "state-degraded", "planning-degraded"];
+      const indexData = statuses.map((status, index) => ({
+        number: index + 1,
+        title: `Ch${index + 1}`,
+        status,
+        wordCount: 100,
+        createdAt: "",
+        updatedAt: "",
+        auditIssues: [],
+        lengthWarnings: [],
+      }));
+
+      await writeFile(
+        join(chaptersDir, "index.json"),
+        JSON.stringify(indexData, null, 2),
+        "utf-8",
+      );
+
+      // Create dummy chapter file for findChapterFile
+      for (let i = 1; i <= statuses.length; i++) {
+        await writeFile(join(chaptersDir, `000${i}_ch${i}.md`), `# Ch${i}\n\nDummy Content`, "utf-8");
+      }
+
+      const expectedStatuses = ["BLOCKED_BY_AUDIT", "BLOCKED_BY_STATE", "BLOCKED_BY_PLANNING"];
+      for (let i = 1; i <= statuses.length; i++) {
+        const output = run(["review", "publish-ready", "--book", bookId, "--chapter", String(i), "--json"]);
+        const data = JSON.parse(output);
+        expect(data.results[0].publish_status).toBe(expectedStatuses[i - 1]);
+      }
     });
   });
 
@@ -1469,6 +1660,7 @@ describe("CLI integration", () => {
         writeFile(join(storyDir, "book_rules.md"), "---\nprohibitions:\n  - Do not reveal the mastermind\n---\n\n# Book Rules\n", "utf-8"),
         writeFile(join(storyDir, "current_state.md"), "# Current State\n\n- Lin Yue still hides the broken oath token.\n", "utf-8"),
         writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n\n- Why the mentor vanished after the trial.\n", "utf-8"),
+        writeFile(join(storyDir, "first_10_chapter_plan.md"), mockFirst10Plan, "utf-8"),
       ]);
     });
 

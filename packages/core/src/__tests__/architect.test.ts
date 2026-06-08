@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { ArchitectAgent } from "../agents/architect.js";
+import { ArchitectAgent, type ArchitectOutput } from "../agents/architect.js";
+import {
+  buildCharacterMatrixContent,
+  validateCharacterMatrix,
+  validateFirst10ChapterPlan,
+} from "../agents/foundation-documents.js";
 import type { BookConfig } from "../models/book.js";
 
 const ZERO_USAGE = {
@@ -35,9 +40,239 @@ function validStructureSignalsSection(): string {
   ].join("\n");
 }
 
+function completeFoundationOutput(overrides: Partial<ArchitectOutput> = {}): ArchitectOutput {
+  const first10Rows = Array.from({ length: 10 }, (_, index) => {
+    const chapter = index + 1;
+    return `| ${chapter} | 功能${chapter} | 情绪${chapter} | 目标${chapter} | 阻碍${chapter} | 解决${chapter} | 爽点${chapter} | 钩子${chapter} |`;
+  }).join("\n");
+
+  return {
+    storyBible: [
+      "# Story Bible",
+      "## 02_主角",
+      "- 姓名：林远舟",
+      "- 身份：1997年青石县高中生。",
+    ].join("\n"),
+    volumeOutline: "# Volume Outline\n\n第一卷：小城破局。",
+    bookRules: [
+      "---",
+      "version: \"1.0\"",
+      "protagonist:",
+      "  name: 林远舟",
+      "  personalityLock: [接地气, 幽默, 重情义]",
+      "  behavioralConstraints: [不主动违法, 不伤害亲友]",
+      "---",
+      "# Book Rules",
+    ].join("\n"),
+    currentState: [
+      "# Current State",
+      "- 当前目标：确认重生并寻找第一桶金。",
+      "- 当前限制：学生身份，本金不足。",
+      "- 当前冲突：家庭期望与赚钱冲动冲突。",
+    ].join("\n"),
+    pendingHooks: [
+      "# Pending Hooks",
+      "| hook_id | 起始章节 | 类型 | 状态 | 最近推进 | 预期回收 | 备注 |",
+      "| --- | --- | --- | --- | --- | --- | --- |",
+      "| H01 | 1 | business | pending | 0 | 8 | VCD第一桶金 |",
+    ].join("\n"),
+    genreArchitecture: "# 题材架构\n\n## 1. 题材定位\n- 核心卖点：信息差创业",
+    worldEngine: "# 世界发动机\n\n## 5. 主角异常性\n- 主角为什么是世界规则里的异常：掌握未来商业记忆。\n\n## 6. 自动产出冲突的方式\n1. 资源争夺。",
+    antagonistMap: [
+      "# 反派结构",
+      "## 1. 核心反派",
+      "- **姓名/代号**：赵明远",
+      "- **表层身份**：地产商",
+      "- **真实身份**：关系网经营者",
+      "- **反派类型**：谋局者",
+      "- **公开目标**：成为本地地产龙头",
+      "- **隐藏目标**：垄断土地信息",
+      "- **维护的秩序**：关系优先的商业秩序",
+      "- **为什么不能容忍主角**：主角用信息效率打破垄断。",
+      "## 4. 反派压力递进",
+      "- 初期：审批和供货压力。",
+    ].join("\n"),
+    motivationMatrix: [
+      "# 人物动机矩阵",
+      "## 1. 主角动机",
+      "- **表层目标**：赚钱改善家庭。",
+      "- **深层欲望**：证明自己不是失败者。",
+      "- **最大恐惧**：重蹈前世覆辙。",
+      "- **底线**：不伤害无辜，不背叛亲友。",
+      "## 2. 核心反派动机",
+      "- **表层目标**：扩大地产版图。",
+      "- **深层欲望**：证明关系秩序不可替代。",
+      "- **最大恐惧**：被后来者取代。",
+      "## 3. 重要配角动机表",
+      "| 角色 | 表层目标 | 深层欲望 | 恐惧 | 底线 | 会背叛什么 | 绝不背叛什么 | 与主角利益关系 |",
+      "|---|---|---|---|---|---|---|---|",
+      "| 陈小波 | 赚钱 | 不被看不起 | 受穷 | 不害人 | 小利益 | 友情 | 合伙人 |",
+      "| 苏婉清 | 上大学 | 走出去 | 被困住 | 良心 | 舒适圈 | 理想 | 价值观碰撞 |",
+      "| 林建国 | 保工作 | 家庭稳定 | 下岗 | 不违法 | 面子 | 家庭 | 父子冲突 |",
+      "| 周秀兰 | 转正 | 家庭和睦 | 儿子走歪 | 安全 | 暂时理解 | 儿子 | 母子情感 |",
+      "## 4. 人物关系张力",
+      "- 主角与核心反派的张力：信息效率对关系垄断。",
+    ].join("\n"),
+    first10ChapterPlan: [
+      "# 前10章规划",
+      "## 1. 黄金三章目标",
+      "### 第1章",
+      "- 主钩子类型：极度反差",
+      "- 前500字冲突：回到1997教室",
+      "- 主角困境：确认重生",
+      "- 章节结尾钩子：VCD机会出现",
+      "### 第2章",
+      "- 核心功能：展示信息差",
+      "- 金手指/核心差异如何展示：判断VCD利润",
+      "- 阻碍如何升级：本金不足",
+      "- 章节结尾钩子：游戏厅机会",
+      "### 第3章",
+      "- 核心功能：明确目标",
+      "- 长期目标如何明确：三个月赚五万",
+      "- 第一个阶段敌人如何出现：既有经营者施压",
+      "- 章节结尾钩子：审批风险出现",
+      "## 2. 前10章章节表",
+      "| 章数 | 章节功能 | 情绪事件 | 主角目标 | 阻碍困境 | 解决方法 | 爽点/反转 | 结尾钩子 |",
+      "|---|---|---|---|---|---|---|---|",
+      first10Rows,
+    ].join("\n"),
+    structureSignals: validStructureSignalsSection(),
+    ...overrides,
+  };
+}
+
 describe("ArchitectAgent", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it("rejects a truncated first-10 chapter plan before it can be written as foundation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-architect-incomplete-foundation-"));
+    const agent = new ArchitectAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+
+    try {
+      const truncatedPlan = [
+        "# 前10章规划",
+        "## 1. 黄金三章目标",
+        "### 第1章",
+        "- 主钩子类型：极度反差",
+        "- 前500字冲突：回到1997教室",
+        "- 主角困境：确认重生",
+        "- 章节结尾钩子：VCD机会出现",
+        "### 第2章",
+        "- 核心功能：展示信息差",
+        "- 金手指/核心差异如何展示：判断VCD利润",
+        "- 阻碍如何升级：本金不足",
+        "- 章节结尾钩子：游戏厅机会",
+        "### 第3章",
+        "- 核心功能：明确目标",
+      ].join("\n");
+
+      expect(validateFirst10ChapterPlan(truncatedPlan)).toMatchObject({
+        passed: false,
+      });
+
+      await expect(
+        agent.writeFoundationFiles(
+          root,
+          completeFoundationOutput({ first10ChapterPlan: truncatedPlan }),
+          false,
+          "zh",
+        ),
+      ).rejects.toThrow(/first_10_chapter_plan incomplete/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a first-10 plan with a truncated trailing table row", () => {
+    const validPlan = completeFoundationOutput().first10ChapterPlan;
+    const truncatedHookTable = [
+      validPlan,
+      "",
+      "## 4. 前10章伏笔安排",
+      "| 伏笔 | 埋设章节 | 表层表现 | 真实含义 | 预计回收章节 |",
+      "|---|---|---|---|---|",
+      "| 母亲肝病 | 第1章 | 想起前世母亲病逝 | 今生早期发现 | 第7章 |",
+      "| 马国良的注意 | 第",
+    ].join("\n");
+
+    expect(validateFirst10ChapterPlan(truncatedHookTable)).toMatchObject({
+      passed: false,
+      reason: expect.stringContaining('is not closed: "| 马国良的注意 | 第"'),
+    });
+  });
+
+  it("rejects a first-10 plan with a trailing table header but no rows", () => {
+    const validPlan = completeFoundationOutput().first10ChapterPlan;
+    const headerOnlyHookTable = [
+      validPlan,
+      "",
+      "## 4. 前10章伏笔安排",
+      "| 伏笔 | 埋设章节 | 表层表现 | 真实含义 | 预计回收章节 |",
+    ].join("\n");
+
+    expect(validateFirst10ChapterPlan(headerOnlyHookTable)).toMatchObject({
+      passed: false,
+      reason: expect.stringContaining("is missing separator row"),
+    });
+  });
+
+  it("allows golden-three details to fill an empty early table goal during validation", () => {
+    const rows = Array.from({ length: 10 }, (_, index) => {
+      const chapter = index + 1;
+      const goal = chapter === 1 ? "" : `目标${chapter}`;
+      return `| 第${chapter}章 | 功能${chapter} | 情绪${chapter} | ${goal} | 阻碍${chapter} | 解决${chapter} | 爽点${chapter} | 钩子${chapter} |`;
+    }).join("\n");
+    const plan = [
+      "# 前10章规划",
+      "## 1. 黄金三章目标",
+      "### 第1章",
+      "- 主钩子类型：极度反差",
+      "- 前500字冲突：林远舟必须在放学前确认VCD倒卖窗口。",
+      "- 主角困境：手里没有本金，家里还等他回去吃饭。",
+      "- 章节结尾钩子：第一个竞争者也盯上了同一批货。",
+      "### 第2章",
+      "- 核心功能：展示信息差",
+      "- 金手指/核心差异如何展示：判断VCD利润",
+      "- 阻碍如何升级：本金不足",
+      "- 章节结尾钩子：游戏厅机会",
+      "### 第3章",
+      "- 核心功能：明确目标",
+      "- 长期目标如何明确：三个月赚五万",
+      "- 第一个阶段敌人如何出现：既有经营者施压",
+      "- 章节结尾钩子：审批风险出现",
+      "## 2. 前10章章节表",
+      "| 章数 | 章节功能 | 情绪事件 | 主角目标 | 阻碍困境 | 解决方法 | 爽点/反转 | 结尾钩子 |",
+      "|---|---|---|---|---|---|---|---|",
+      rows,
+    ].join("\n");
+
+    expect(validateFirst10ChapterPlan(plan)).toEqual({ passed: true });
+  });
+
+  it("extracts bold-labeled character fields instead of writing blank protagonist or placeholder antagonist", () => {
+    const characterMatrix = buildCharacterMatrixContent(completeFoundationOutput(), { title: "重生1997" }, "zh");
+
+    expect(characterMatrix).toContain("## 主角：林远舟");
+    expect(characterMatrix).toContain("- 表层目标：赚钱改善家庭。");
+    expect(characterMatrix).toContain("## 核心反派：赵明远");
+    expect(characterMatrix).not.toContain("## 核心反派：核心反派");
+    expect(validateCharacterMatrix(characterMatrix)).toEqual({ passed: true });
   });
 
   it("recovers structure signals from a non-standard Chinese heading", async () => {
@@ -109,6 +344,54 @@ describe("ArchitectAgent", () => {
       validStructureSignalsSection(),
     ].join("\n"));
 
+    expect(output.structureSignals).toContain("\"signals\"");
+  });
+
+  it("accepts localized section labels from non-strict architect output", async () => {
+    const agent = new ArchitectAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+
+    const parseSections = (agent as unknown as { parseSections(content: string): ArchitectOutput }).parseSections.bind(agent);
+    const output = parseSections([
+      "=== SECTION: 故事设定 ===",
+      "# Story Bible",
+      "=== SECTION: 卷纲 ===",
+      "# Volume Outline",
+      "=== SECTION: 创作规则 ===",
+      "# Book Rules",
+      "=== SECTION: 初始状态 ===",
+      "# Current State",
+      "=== SECTION: 初始伏笔 ===",
+      "# Pending Hooks",
+      "=== SECTION: 题材架构 ===",
+      "# 题材架构",
+      "=== SECTION: 世界发动机 ===",
+      "# 世界发动机",
+      "=== SECTION: 反派结构 ===",
+      "# 反派结构",
+      "=== SECTION: 人物动机矩阵 ===",
+      "# 人物动机矩阵",
+      "=== SECTION: 前10章规划 ===",
+      "# 前10章规划",
+      "=== SECTION: 结构信号 ===",
+      validStructureSignalsSection(),
+    ].join("\n"));
+
+    expect(output.volumeOutline).toContain("# Volume Outline");
+    expect(output.first10ChapterPlan).toContain("# 前10章规划");
     expect(output.structureSignals).toContain("\"signals\"");
   });
 
@@ -874,14 +1157,7 @@ describe("ArchitectAgent", () => {
     try {
       await agent.writeFoundationFiles(
         root,
-        {
-          storyBible: "# Story Bible",
-          volumeOutline: "# Volume Outline",
-          bookRules: "# Book Rules",
-          currentState: "# Current State",
-          pendingHooks: "# Pending Hooks",
-          structureSignals: validStructureSignalsSection(),
-        },
+        completeFoundationOutput(),
         true,
         "zh",
         "xuanhuan",
@@ -975,7 +1251,7 @@ describe("ArchitectAgent", () => {
     expect(result.first10ChapterPlan).toContain("# 前10章规划");
   });
 
-  it("writes story skeleton files and falls back when sections are missing", async () => {
+  it("writes story skeleton files when foundation sections are complete", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-architect-story-skeleton-"));
     const agent = new ArchitectAgent({
       client: {
@@ -996,15 +1272,9 @@ describe("ArchitectAgent", () => {
     try {
       await agent.writeFoundationFiles(
         root,
-        {
-          storyBible: "# Story Bible",
-          volumeOutline: "# Volume Outline",
-          bookRules: "# Book Rules",
-          currentState: "# Current State",
-          pendingHooks: "# Pending Hooks",
+        completeFoundationOutput({
           genreArchitecture: "# 题材架构\n\n自定义题材骨架",
-          structureSignals: validStructureSignalsSection(),
-        },
+        }),
         false,
         "zh",
       );
@@ -1027,8 +1297,7 @@ describe("ArchitectAgent", () => {
       const motivationMatrix = await readFile(join(root, "story", "motivation_matrix.md"), "utf-8");
       const first10 = await readFile(join(root, "story", "first_10_chapter_plan.md"), "utf-8");
 
-      expect(worldEngine).toContain("fallback 生成");
-      expect(worldEngine).toContain("## 1. 核心稀缺资源");
+      expect(worldEngine).toContain("## 5. 主角异常性");
       expect(antagonistMap).toContain("## 1. 核心反派");
       expect(motivationMatrix).toContain("## 1. 主角动机");
       expect(first10).toContain("## 2. 前10章章节表");
@@ -1058,7 +1327,7 @@ describe("ArchitectAgent", () => {
     try {
       await agent.writeFoundationFiles(
         root,
-        {
+        completeFoundationOutput({
           storyBible: [
             "# Story Bible",
             "## 02_主角",
@@ -1104,7 +1373,12 @@ describe("ArchitectAgent", () => {
             "## 1. 核心反派",
             "- 姓名/代号：司命院主",
             "- 表层身份：宗门戒律掌控者",
+            "- 真实身份：维护命运法度的旧秩序代言人",
             "- 反派类型：谋局者",
+            "- 公开目标：审判所有系统异常者",
+            "- 隐藏目标：维持司命院对命数解释权的垄断",
+            "- 维护的秩序：命数不可违抗的宗门秩序",
+            "- 为什么不能容忍主角：林烬不断证明司命院判词可以被反向利用。",
             "## 4. 反派压力递进",
             "- 初期如何压迫主角？用戒律审判逼他认罪。",
           ].join("\n"),
@@ -1123,6 +1397,8 @@ describe("ArchitectAgent", () => {
             "|---|---|---|---|---|---|---|---|",
             "| 沈青禾 | 查清系统异常 | 摆脱家族棋子命运 | 被家族召回 | 不害平民 | 家族命令 | 自我判断 | 暂时同盟 |",
             "| 韩照 | 升入内门 | 被所有人看见 | 再次失败 | 不背刺兄弟 | 面子 | 林烬 | 同伴 |",
+            "| 陆雪衣 | 证明戒律漏洞 | 修正司命院偏差 | 被逐出师门 | 不伪造证据 | 职位 | 公义 | 潜在盟友 |",
+            "| 石伯 | 保住藏经阁 | 等到旧案翻身 | 旧案重演 | 不卖弟子 | 安稳 | 恩义 | 信息来源 |",
           ].join("\n"),
           first10ChapterPlan: [
             "# 前10章规划",
@@ -1140,9 +1416,16 @@ describe("ArchitectAgent", () => {
             "| 1 | 入局 | 当众受审 | 活下来 | 戒律压迫 | 反用任务规则 | 反杀 | 司命院盯上他 |",
             "| 2 | 展示差异 | 惩罚降临 | 弄懂系统 | 众人围观 | 试探规则 | 小爽 | 奖励异常 |",
             "| 3 | 树敌 | 爪牙出手 | 查清任务来源 | 阶段敌人 | 借力破局 | 反转 | 核心反派露影 |",
+            "| 4 | 线索追踪 | 沈青禾试探 | 查到任务源头 | 戒律弟子阻拦 | 借藏经阁旧卷 | 线索推进 | 旧案牵出司命院 |",
+            "| 5 | 小爽点 | 韩照被牵连 | 保住同伴 | 众人逼供 | 公开验证规则漏洞 | 打脸 | 陆雪衣介入 |",
+            "| 6 | 关系拉扯 | 陆雪衣审问 | 取得暂时信任 | 证据不足 | 交出一半线索 | 信任变化 | 石伯递来旧牌 |",
+            "| 7 | 伏笔推进 | 旧牌响应系统 | 找到第一条旧案线 | 旧牌反噬 | 以任务奖励压住代价 | 伏笔加深 | 司命院主现名 |",
+            "| 8 | 危机反转 | 戒律堂围堵 | 护住沈青禾 | 阵法封路 | 利用判词歧义破阵 | 危机反转 | 司命院主下令 |",
+            "| 9 | 爆发前夜 | 众人要求定罪 | 准备公开翻案 | 证人失踪 | 整合同伴证词 | 压力收束 | 审判钟响 |",
+            "| 10 | 阶段爆发 | 当庭反证 | 改变第一次审判结果 | 司命院全面压迫 | 付出声望代价反击 | 局势改变 | 更高命簿出现 |",
           ].join("\n"),
           structureSignals: validStructureSignalsSection(),
-        },
+        }),
         false,
         "zh",
         undefined,
@@ -1196,7 +1479,7 @@ describe("ArchitectAgent", () => {
     try {
       await agent.writeFoundationFiles(
         root,
-        {
+        completeFoundationOutput({
           storyBible: [
             "# Story Bible",
             "## 02_主角",
@@ -1256,8 +1539,16 @@ describe("ArchitectAgent", () => {
             "- 最大恐惧：身边的人因自己出事，奶奶的吊坠被毁。",
             "- 底线：绝不伤害普通人，绝不牺牲无辜者。",
             "## 2. 核心反派动机",
+            "- 表层目标：推动灵气复苏。",
             "- 深层欲望：复活死在旧时代的家人。",
             "- 最大恐惧：计划失败，家人永远无法复活。",
+            "## 3. 重要配角动机表",
+            "| 角色 | 表层目标 | 深层欲望 | 恐惧 | 底线 | 会背叛什么 | 绝不背叛什么 | 与主角利益关系 |",
+            "|---|---|---|---|---|---|---|---|",
+            "| 苏晚晴 | 查清规则类能力 | 摆脱家族控制 | 被家族抹去记忆 | 不害普通人 | 家族命令 | 自我判断 | 试探同盟 |",
+            "| 王磊 | 保住工作 | 获得尊重 | 被黑曜会清算 | 不出卖朋友 | 安稳 | 朋友 | 现实助力 |",
+            "| 奶奶 | 留下线索 | 保护林墨 | 系统落入无面手中 | 不牺牲孩子 | 自己名声 | 林墨 | 隐藏守护 |",
+            "| 许曼 | 抢到独家新闻 | 证明自己 | 被资本封杀 | 不造假 | 流量 | 事实 | 舆论变量 |",
           ].join("\n"),
           first10ChapterPlan: [
             "# 前10章规划",
@@ -1280,11 +1571,19 @@ describe("ArchitectAgent", () => {
             "## 2. 前10章章节表",
             "| 章数 | 章节功能 | 情绪事件 | 主角目标 | 阻碍困境 | 解决方法 | 爽点/反转 | 结尾钩子 |",
             "|---|---|---|---|---|---|---|---|",
+            "| 1 | 入局 | 林墨为了省钱参加慈善晚宴 | 活过系统惩罚 | 首富保安逼近 | 当众拆穿异常账目 | 系统奖励 | 无面第一次注意到林墨 |",
+            "| 2 | 展示差异 | 林墨越像找死 | 弄懂反向奖励 | 全网开始骂他碰瓷 | 用技能反查偷拍视频 | 小爽 | 系统乱码出现奶奶声音 |",
+            "| 3 | 明确目标 | 林墨决定查清吊坠和系统来源 | 锁定第一个调查目标 | 无面的秘书开始监控他 | 借苏晚晴试探反制 | 目标成形 | 苏晚晴认出规则类能力 |",
             "| 4 | 线索追踪 | 苏晚晴试探 | 找到乱码来源 | 黑曜会盯梢 | 假装无知 | 信息差 | 秘书现身 |",
             "| 5 | 小爽点 | 林墨反坑秘书 | 逼出幕后线索 | 舆论压迫 | 系统技能反制 | 打脸 | 无面加码 |",
+            "| 6 | 关系拉扯 | 苏晚晴提出交易 | 判断她是否可信 | 家族耳目跟踪 | 设置双重口径 | 同盟松动 | 吊坠发热 |",
+            "| 7 | 伏笔推进 | 奶奶旧照出现 | 找到旧时代入口 | 黑曜会抢先到场 | 用乱码提示绕路 | 真相露边 | 无面确认吊坠 |",
+            "| 8 | 危机反转 | 舆论全面反扑 | 保住身边人 | 许曼报道被撤 | 公开部分证据 | 反转 | 黑曜会封城 |",
+            "| 9 | 爆发前夜 | 王磊被胁迫 | 整合证据反击 | 证人失联 | 借系统规则逼对方现身 | 压力收束 | 晚宴复盘开启 |",
+            "| 10 | 阶段爆发 | 林墨当众反证 | 改变第一次舆论局势 | 无面亲自下场 | 付出系统代价反击 | 局势改变 | 更大规则碎片出现 |",
           ].join("\n"),
           structureSignals: validStructureSignalsSection(),
-        },
+        }),
         false,
         "zh",
       );
@@ -1340,14 +1639,10 @@ describe("ArchitectAgent", () => {
         await expect(
           agent.writeFoundationFiles(
             root,
-            {
-              storyBible: "# Story Bible",
-              volumeOutline: "# Volume Outline",
-              bookRules: "# Book Rules",
-              currentState: "# Current State",
-              pendingHooks: "# Pending Hooks",
+            completeFoundationOutput({
               // structureSignals intentionally omitted
-            },
+              structureSignals: undefined,
+            }),
             false,
             "zh",
           ),
@@ -1379,14 +1674,9 @@ describe("ArchitectAgent", () => {
         await expect(
           agent.writeFoundationFiles(
             root,
-            {
-              storyBible: "# Story Bible",
-              volumeOutline: "# Volume Outline",
-              bookRules: "# Book Rules",
-              currentState: "# Current State",
-              pendingHooks: "# Pending Hooks",
+            completeFoundationOutput({
               structureSignals: "gibberish that cannot be parsed as JSON",
-            },
+            }),
             false,
             "zh",
           ),
@@ -1446,14 +1736,9 @@ describe("ArchitectAgent", () => {
         await expect(
           agent.writeFoundationFiles(
             root,
-            {
-              storyBible: "# Story Bible",
-              volumeOutline: "# Volume Outline",
-              bookRules: "# Book Rules",
-              currentState: "# Current State",
-              pendingHooks: "# Pending Hooks",
+            completeFoundationOutput({
               structureSignals: failSection,
-            },
+            }),
             false,
             "zh",
           ),
@@ -1513,14 +1798,9 @@ describe("ArchitectAgent", () => {
 
         await agent.writeFoundationFiles(
           root,
-          {
-            storyBible: "# Story Bible",
-            volumeOutline: "# Volume Outline",
-            bookRules: "# Book Rules",
-            currentState: "# Current State",
-            pendingHooks: "# Pending Hooks",
+          completeFoundationOutput({
             structureSignals: section,
-          },
+          }),
           false,
           "zh",
         );
@@ -1561,14 +1841,9 @@ describe("ArchitectAgent", () => {
 
         await agent.writeFoundationFiles(
           stagingDir,
-          {
-            storyBible: "# Story Bible",
-            volumeOutline: "# Volume Outline",
-            bookRules: "# Book Rules",
-            currentState: "# Current State",
-            pendingHooks: "# Pending Hooks",
+          completeFoundationOutput({
             structureSignals: validStructureSignalsSection(),
-          },
+          }),
           false,
           "zh",
           undefined,

@@ -256,7 +256,7 @@ Use === TAG === delimiters exactly as shown:
 (Extract or infer the chapter title. Output title text only.)
 
 === CHAPTER_CONTENT ===
-(Repeat the original chapter content exactly. Do not rewrite.)
+(Leave empty in analysis mode.)
 
 === PRE_WRITE_CHECK ===
 (Leave empty in analysis mode.)
@@ -363,7 +363,7 @@ ${bookRulesBody ? `## 本书规则\n\n${bookRulesBody}` : ""}
 （从正文标题行提取或推断章节标题，只输出标题文字）
 
 === CHAPTER_CONTENT ===
-（原样输出正文内容，不做任何修改）
+（留空，分析模式不需要输出正文）
 
 === PRE_WRITE_CHECK ===
 （留空，分析模式不需要写作自检）

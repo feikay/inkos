@@ -62,7 +62,7 @@ export async function bootstrapStructuredStateFromMarkdown(params: {
   const markdownState = await loadMarkdownBootstrapState({
     bookDir: params.bookDir,
     storyDir,
-    fallbackChapter: params.fallbackChapter ?? 0,
+    fallbackChapter: params.fallbackChapter,
     warnings,
   });
 
@@ -125,6 +125,7 @@ export async function bootstrapStructuredStateFromMarkdown(params: {
 export async function rewriteStructuredStateFromMarkdown(params: {
   readonly bookDir: string;
   readonly fallbackChapter?: number;
+  readonly skipDegradationCheck?: boolean;
 }): Promise<BootstrapStructuredStateResult> {
   const storyDir = join(params.bookDir, "story");
   const stateDir = join(storyDir, "state");
@@ -141,12 +142,48 @@ export async function rewriteStructuredStateFromMarkdown(params: {
   const markdownState = await loadMarkdownBootstrapState({
     bookDir: params.bookDir,
     storyDir,
-    fallbackChapter: params.fallbackChapter ?? 0,
+    fallbackChapter: params.fallbackChapter,
     warnings,
   });
   const summariesState = markdownState.summariesState;
   const hooksState = markdownState.hooksState;
   const currentState = markdownState.currentState;
+
+  const existingCurrentState = await loadJsonIfValid(currentStatePath, CurrentStateStateSchema, [], "current_state.json").catch(() => null);
+  const existingHooks = await loadJsonIfValid(hooksPath, HooksStateSchema, [], "hooks.json").catch(() => null);
+
+  const targetChapter = markdownState.durableStoryProgress || params.fallbackChapter;
+
+  if (
+    !params.skipDegradationCheck &&
+    ((existingCurrentState && existingCurrentState.facts.length > 0 && currentState.facts.length === 0) ||
+     (existingHooks && existingHooks.hooks.length > 0 && hooksState.hooks.length === 0))
+  ) {
+    if (targetChapter) {
+      const indexPath = join(params.bookDir, "chapters", "index.json");
+      try {
+        const raw = await readFile(indexPath, "utf-8");
+        const index = JSON.parse(raw);
+        const idx = index.findIndex((ch: any) => ch.number === targetChapter);
+        const errorMsg = "[state-degraded] Markdown synchronization parsed empty facts/hooks, preventing overwrite.";
+        if (idx !== -1) {
+          const currentMeta = index[idx];
+          currentMeta.status = "state-degraded";
+          if (!currentMeta.auditIssues) currentMeta.auditIssues = [];
+          if (!currentMeta.auditIssues.includes(errorMsg)) {
+            currentMeta.auditIssues.push(errorMsg);
+          }
+          currentMeta.updatedAt = new Date().toISOString();
+          await writeFile(indexPath, JSON.stringify(index, null, 2), "utf-8");
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+    throw new Error(
+      `State sync abort: Markdown sync parsed 0 facts/hooks for chapter ${targetChapter}, but existing state was non-empty. Preventing destructive overwrite. Chapter status marked as state-degraded.`
+    );
+  }
 
   const manifest = StateManifestSchema.parse({
     schemaVersion: 2,
@@ -395,7 +432,7 @@ export async function resolveDurableStoryProgress(params: {
   readonly fallbackChapter?: number;
 }): Promise<number> {
   const explicitFallback = normalizeExplicitChapter(params.fallbackChapter);
-  const durableArtifactProgress = await resolveContiguousArtifactChapterProgress(params.bookDir);
+  const durableArtifactProgress = await resolveContiguousArtifactChapterProgress(params.bookDir, params.fallbackChapter);
   return Math.max(durableArtifactProgress, explicitFallback);
 }
 
@@ -420,7 +457,7 @@ async function loadJsonIfValid<T>(
 async function loadMarkdownBootstrapState(params: {
   readonly bookDir: string;
   readonly storyDir: string;
-  readonly fallbackChapter: number;
+  readonly fallbackChapter?: number;
   readonly warnings: string[];
 }): Promise<MarkdownBootstrapState> {
   const summariesState = await loadMarkdownSummariesState(params.storyDir);
@@ -429,7 +466,7 @@ async function loadMarkdownBootstrapState(params: {
     warnings: params.warnings,
   });
   const explicitFallback = normalizeExplicitChapter(params.fallbackChapter);
-  const durableArtifactProgress = await resolveContiguousArtifactChapterProgress(params.bookDir);
+  const durableArtifactProgress = await resolveContiguousArtifactChapterProgress(params.bookDir, params.fallbackChapter);
   const authoritativeProgress = Math.max(explicitFallback, durableArtifactProgress);
   const currentState = await loadMarkdownCurrentState({
     storyDir: params.storyDir,
@@ -470,34 +507,58 @@ async function loadMarkdownCurrentState(params: {
   return parseCurrentStateStateMarkdown(markdown, params.fallbackChapter, params.warnings);
 }
 
-async function resolveContiguousArtifactChapterProgress(bookDir: string): Promise<number> {
-  const chapterNumbers = await loadDurableArtifactChapterNumbers(bookDir);
+async function resolveContiguousArtifactChapterProgress(bookDir: string, limit?: number): Promise<number> {
+  const chapterNumbers = await loadDurableArtifactChapterNumbers(bookDir, limit);
   return resolveContiguousChapterPrefix(chapterNumbers);
 }
 
-async function loadDurableArtifactChapterNumbers(bookDir: string): Promise<number[]> {
+async function loadDurableArtifactChapterNumbers(bookDir: string, limit?: number): Promise<number[]> {
   const chaptersDir = join(bookDir, "chapters");
   const indexPath = join(chaptersDir, "index.json");
+
+  const indexedRejected = new Set<number>();
+  const indexedNumbers = new Set<number>();
+
   try {
     const raw = await readFile(indexPath, "utf-8");
     const parsed = JSON.parse(raw) as Array<{ number?: unknown; status?: unknown }>;
-    return parsed
-      .filter((entry) => entry?.status !== "rejected")
-      .map((entry) => entry?.number)
-      .filter((entry): entry is number => typeof entry === "number" && Number.isInteger(entry) && entry > 0);
+    for (const entry of parsed) {
+      const num = entry?.number;
+      if (typeof num === "number" && Number.isInteger(num) && num > 0) {
+        if (limit !== undefined && num > limit) {
+          continue;
+        }
+        if (entry?.status === "rejected") {
+          indexedRejected.add(num);
+        } else {
+          indexedNumbers.add(num);
+        }
+      }
+    }
   } catch {
-    // ignore and fallback
+    // index missing or corrupt
   }
 
+  let physicalNumbers: number[] = [];
   try {
     const entries = await readdir(chaptersDir);
-    return entries.flatMap((entry) => {
+    physicalNumbers = entries.flatMap((entry) => {
       const match = entry.match(/^(\d+)_/);
-      return match ? [parseInt(match[1]!, 10)] : [];
+      const num = match ? parseInt(match[1]!, 10) : null;
+      if (num && !indexedRejected.has(num)) {
+        if (limit !== undefined && num > limit) {
+          return [];
+        }
+        return [num];
+      }
+      return [];
     });
   } catch {
-    return [];
+    // chapters dir missing
   }
+
+  const allNumbers = new Set([...indexedNumbers, ...physicalNumbers]);
+  return [...allNumbers].sort((a, b) => a - b);
 }
 
 async function pathExists(path: string): Promise<boolean> {

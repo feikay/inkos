@@ -1,8 +1,8 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseGenreProfile, type ParsedGenreProfile } from "../models/genre-profile.js";
-import { parseBookRules, type ParsedBookRules } from "../models/book-rules.js";
+import { parseGenreProfile, type ParsedGenreProfile, type ContentSafetyProfile, type GenreProfile } from "../models/genre-profile.js";
+import { parseBookRules, type ParsedBookRules, type BookRules } from "../models/book-rules.js";
 import { BookConfigSchema } from "../models/book.js";
 
 const BUILTIN_GENRES_DIR = join(dirname(fileURLToPath(import.meta.url)), "../../genres");
@@ -105,4 +105,133 @@ export async function readBookLanguage(bookDir: string): Promise<"zh" | "en" | u
   } catch {
     return undefined;
   }
+}
+
+export function mergeContentSafetyProfile(
+  genreProfile: GenreProfile,
+  bookRules: BookRules | null,
+): ContentSafetyProfile {
+  const genreProfileSafety = genreProfile.contentSafetyProfile;
+  const bookRulesSafety = bookRules?.contentSafetyProfile;
+
+  const prohibitionsMap = new Map<string, {
+    id: string;
+    text: string;
+    severity: "error" | "warning";
+    disabled: boolean;
+  }>();
+
+  const addProhibition = (item: string | { id: string; text: string; severity?: "error" | "warning"; disabled?: boolean }) => {
+    let id: string;
+    let text: string;
+    let severity: "error" | "warning" = "error";
+    let disabled = false;
+
+    if (typeof item === "string") {
+      id = "本书禁忌";
+      text = item;
+    } else {
+      id = item.id;
+      text = item.text;
+      severity = item.severity ?? "error";
+      disabled = item.disabled ?? false;
+    }
+
+    const key = (id && id !== "本书禁忌") ? id : text;
+    const existing = prohibitionsMap.get(key);
+    if (existing) {
+      prohibitionsMap.set(key, {
+        id: id || existing.id,
+        text: text || existing.text,
+        severity: severity,
+        disabled: disabled,
+      });
+    } else {
+      prohibitionsMap.set(key, { id, text, severity, disabled });
+    }
+  };
+
+  if (genreProfileSafety?.prohibitions) {
+    for (const item of genreProfileSafety.prohibitions) {
+      addProhibition(item);
+    }
+  }
+
+  if (bookRulesSafety?.prohibitions) {
+    for (const item of bookRulesSafety.prohibitions) {
+      addProhibition(item);
+    }
+  }
+
+  if (bookRules?.prohibitions) {
+    for (const item of bookRules.prohibitions) {
+      addProhibition(item);
+    }
+  }
+
+  const termsMap = new Map<string, {
+    id?: string;
+    term: string;
+    exceptions: string[];
+    severity: "error" | "warning";
+    disabled: boolean;
+    dangerousContextWords: string[];
+  }>();
+
+  const addTerm = (item: {
+    id?: string;
+    term: string;
+    exceptions?: string[];
+    severity?: "error" | "warning";
+    disabled?: boolean;
+    dangerousContextWords?: string[];
+  }) => {
+    const id = item.id;
+    const term = item.term;
+    const exceptions = item.exceptions ?? [];
+    const severity = item.severity ?? "error";
+    const disabled = item.disabled ?? false;
+    const dangerousContextWords = item.dangerousContextWords ?? [];
+
+    const key = id || term;
+    const existing = termsMap.get(key);
+    if (existing) {
+      const combinedExceptions = Array.from(new Set([...existing.exceptions, ...exceptions]));
+      const combinedContextWords = Array.from(new Set([...existing.dangerousContextWords, ...dangerousContextWords]));
+      termsMap.set(key, {
+        id: id || existing.id,
+        term: term || existing.term,
+        exceptions: combinedExceptions,
+        severity: item.severity ?? existing.severity,
+        disabled: item.disabled ?? existing.disabled,
+        dangerousContextWords: combinedContextWords,
+      });
+    } else {
+      termsMap.set(key, {
+        id,
+        term,
+        exceptions,
+        severity,
+        disabled,
+        dangerousContextWords,
+      });
+    }
+  };
+
+  if (genreProfileSafety?.terms) {
+    for (const item of genreProfileSafety.terms) {
+      addTerm(item);
+    }
+  }
+
+  if (bookRulesSafety?.terms) {
+    for (const item of bookRulesSafety.terms) {
+      addTerm(item);
+    }
+  }
+
+  return {
+    prohibitions: Array.from(prohibitionsMap.values()),
+    terms: Array.from(termsMap.values()),
+  };
 }

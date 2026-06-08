@@ -47,6 +47,35 @@ export async function validateChapterTruthPersistence(params: {
   let persistenceOutput = params.persistenceOutput;
   let auditResult = params.auditResult;
 
+  if (persistenceOutput.isDegraded) {
+    const errorDescription = params.language === "en"
+      ? "State degradation warning: Placeholder status updates were blocked. Reverted to previous state."
+      : "检测到状态同步占位符，强制保留上一章有效历史状态。";
+    const errorIssue: AuditIssue = {
+      severity: "warning",
+      category: "state-validation",
+      description: errorDescription,
+      suggestion: params.language === "en"
+        ? "Repair chapter state from the persisted body before continuing."
+        : "请先基于已保存正文修复本章 state，再继续后续章节。",
+    };
+    return {
+      validation: { passed: false, warnings: [] },
+      chapterStatus: "state-degraded",
+      degradedIssues: [errorIssue],
+      persistenceOutput: buildStateDegradedPersistenceOutput({
+        output: persistenceOutput,
+        oldState: params.previousTruth.oldState,
+        oldHooks: params.previousTruth.oldHooks,
+        oldLedger: params.previousTruth.oldLedger,
+      }),
+      auditResult: {
+        ...params.auditResult,
+        issues: [...params.auditResult.issues, errorIssue],
+      },
+    };
+  }
+
   try {
     validation = await params.validator.validate(
       params.content,
@@ -119,6 +148,7 @@ export async function validateChapterTruthPersistence(params: {
           updatedHooks: repaired.updatedHooks,
           updatedLedger: repaired.updatedLedger,
           settlementConfidence: repaired.settlementConfidence,
+          isDegraded: repaired.isDegraded,
         };
 
         let localValidation: ValidationResult | null = null;
@@ -150,30 +180,20 @@ export async function validateChapterTruthPersistence(params: {
     }
   }
 
-  if (!validation.passed) {
-    const recovery = await retrySettlementAfterValidationFailure({
-      writer: params.writer,
-      validator: params.validator,
-      book: params.book,
-      bookDir: params.bookDir,
-      chapterNumber: params.chapterNumber,
-      title: params.title,
-      content: params.content,
-      reducedControlInput: params.reducedControlInput,
-      oldState: params.previousTruth.oldState,
-      oldHooks: params.previousTruth.oldHooks,
-      originalValidation: validation,
-      language: params.language,
-      logWarn: params.logWarn,
-      logger: params.logger,
-    });
-
-    if (recovery.kind === "recovered") {
-      persistenceOutput = recovery.output;
-      validation = recovery.validation;
-    } else {
+  if (!validation.passed || persistenceOutput.isDegraded) {
+    if (persistenceOutput.isDegraded) {
       chapterStatus = "state-degraded";
-      degradedIssues = recovery.issues;
+      const degradationIssue: AuditIssue = {
+        severity: "warning",
+        category: "state-validation",
+        description: params.language === "en"
+          ? "State degradation warning: Placeholder status updates were blocked. Reverted to previous state."
+          : "检测到状态同步占位符，已自动回滚并强制保留上一章有效历史状态。",
+        suggestion: params.language === "en"
+          ? "Check the state files and replace placeholders with concrete details."
+          : "请检查状态文件，用具体的事实替换占位符。",
+      };
+      degradedIssues = [degradationIssue];
       persistenceOutput = buildStateDegradedPersistenceOutput({
         output: persistenceOutput,
         oldState: params.previousTruth.oldState,
@@ -182,8 +202,57 @@ export async function validateChapterTruthPersistence(params: {
       });
       auditResult = {
         ...auditResult,
-        issues: [...auditResult.issues, ...recovery.issues],
+        issues: [...auditResult.issues, degradationIssue],
       };
+    } else {
+      const recovery = await retrySettlementAfterValidationFailure({
+        writer: params.writer,
+        validator: params.validator,
+        book: params.book,
+        bookDir: params.bookDir,
+        chapterNumber: params.chapterNumber,
+        title: params.title,
+        content: params.content,
+        reducedControlInput: params.reducedControlInput,
+        oldState: params.previousTruth.oldState,
+        oldHooks: params.previousTruth.oldHooks,
+        originalValidation: validation,
+        language: params.language,
+        logWarn: params.logWarn,
+        logger: params.logger,
+      });
+
+      if (recovery.kind === "recovered" && !recovery.output.isDegraded) {
+        persistenceOutput = recovery.output;
+        validation = recovery.validation;
+      } else {
+        chapterStatus = "state-degraded";
+        const recoveryIssues = recovery.kind === "recovered"
+          ? [
+              {
+                severity: "warning" as const,
+                category: "state-validation",
+                description: params.language === "en"
+                  ? "State degradation warning: Retry settlement resulted in degraded state."
+                  : "状态结算重试后检测到状态退化。",
+                suggestion: params.language === "en"
+                  ? "Repair chapter state manually."
+                  : "请手动修复状态。",
+              }
+            ]
+          : recovery.issues;
+        degradedIssues = recoveryIssues;
+        persistenceOutput = buildStateDegradedPersistenceOutput({
+          output: recovery.kind === "recovered" ? recovery.output : persistenceOutput,
+          oldState: params.previousTruth.oldState,
+          oldHooks: params.previousTruth.oldHooks,
+          oldLedger: params.previousTruth.oldLedger,
+        });
+        auditResult = {
+          ...auditResult,
+          issues: [...auditResult.issues, ...recoveryIssues],
+        };
+      }
     }
   }
 

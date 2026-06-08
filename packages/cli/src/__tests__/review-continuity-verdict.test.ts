@@ -12,6 +12,8 @@ import {
   resolvePublishReadyStartingCandidate,
   resolveContinuityOverridePassCandidate,
   decidePublishQuality,
+  evaluatePublishReadyLengthGate,
+  applyPublishReadyLengthGate,
   readChapterIndexStatus,
   applyStoryEffectivenessDecision,
   applyGolden3ChapterDecision,
@@ -181,6 +183,20 @@ describe("continuity-auto verdict helpers", () => {
     // With high accept threshold (85), scores between 75-84 are QUALITY_MANUAL_REVIEW
     expect(decidePublishQuality(82, 85, 85)).toBe("QUALITY_MANUAL_REVIEW");
     expect(decidePublishQuality(84, 85, 85)).toBe("QUALITY_MANUAL_REVIEW");
+  });
+
+  it("blocks publish-ready when the final candidate exceeds the hard chapter length range", () => {
+    const gate = evaluatePublishReadyLengthGate({
+      text: "字".repeat(7000),
+      targetChapterWords: 2000,
+      language: "zh",
+    });
+    const decision = applyPublishReadyLengthGate("READY_WITH_WARNINGS", ["quality warning"], gate);
+
+    expect(gate.status).toBe("FAIL");
+    expect(gate.hard_max).toBe(2545);
+    expect(decision.publishStatus).toBe("BLOCKED_BY_LENGTH");
+    expect(decision.warnings?.join("\n")).toContain("outside hard range");
   });
 
   it("prefers chapters-reviewed final as publish-ready starting candidate when manual continuity is accepted", async () => {

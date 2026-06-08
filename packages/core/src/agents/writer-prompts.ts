@@ -1,5 +1,5 @@
 import type { BookConfig, FanficMode } from "../models/book.js";
-import type { GenreProfile } from "../models/genre-profile.js";
+import type { GenreProfile, ContentSafetyProfile } from "../models/genre-profile.js";
 import type { BookRules } from "../models/book-rules.js";
 import type { LengthSpec } from "../models/length-governance.js";
 import { buildFanficCanonSection, buildCharacterVoiceProfiles, buildFanficModeInstructions } from "./fanfic-prompt-sections.js";
@@ -31,6 +31,7 @@ export function buildWriterSystemPrompt(
   languageOverride?: "zh" | "en",
   inputProfile: "legacy" | "governed" = "legacy",
   lengthSpec?: LengthSpec,
+  contentSafetyProfile?: ContentSafetyProfile,
 ): string {
   const isEnglish = (languageOverride ?? genreProfile.language) === "en";
   const governed = inputProfile === "governed";
@@ -58,6 +59,7 @@ export function buildWriterSystemPrompt(
         !governed ? buildEnglishCharacterMethod() : "",
         buildGenreRules(genreProfile, genreBody),
         buildProtagonistRules(bookRules),
+        buildContentSafetyRules(contentSafetyProfile, "en"),
         buildBookRulesBody(bookRulesBody),
         buildStyleGuide(styleGuide),
         buildStyleFingerprint(styleFingerprint),
@@ -84,6 +86,7 @@ export function buildWriterSystemPrompt(
         bookRules?.enableFullCastTracking ? buildFullCastTracking() : "",
         buildGenreRules(genreProfile, genreBody),
         buildProtagonistRules(bookRules),
+        buildContentSafetyRules(contentSafetyProfile, "zh"),
         buildBookRulesBody(bookRulesBody),
         buildStyleGuide(styleGuide),
         buildStyleFingerprint(styleFingerprint),
@@ -697,4 +700,64 @@ ${updatedLedger}
 - **关系**: 某角色(关系性质/Ch#) | ...
 - **已知**: 该角色已知的信息（仅限亲历或被告知）
 - **未知**: 该角色不知道的信息`;
+}
+
+function buildContentSafetyRules(profile?: ContentSafetyProfile, language: "zh" | "en" = "zh"): string {
+  if (!profile) return "";
+  const lines: string[] = [];
+
+  const renderProhibition = (item: ContentSafetyProfile["prohibitions"][number]): string => {
+    if (typeof item === "string") return item;
+    const severity = item.severity ? ` [${item.severity}]` : "";
+    const disabled = item.disabled ? " [disabled]" : "";
+    return `${item.id}${severity}${disabled}: ${item.text}`;
+  };
+  
+  if (language === "en") {
+    lines.push("## Content Safety & Prohibitions");
+    if (profile.prohibitions && profile.prohibitions.length > 0) {
+      lines.push("General Prohibitions:");
+      for (const p of profile.prohibitions) {
+        if (typeof p !== "string" && p.disabled) continue;
+        lines.push(`- ${renderProhibition(p)}`);
+      }
+    }
+    if (profile.terms && profile.terms.length > 0) {
+      lines.push("Forbidden Keywords & Exemptions:");
+      for (const item of profile.terms) {
+        if (item.disabled) continue;
+        const label = item.id ? `${item.id}: ` : "";
+        const suffix = item.severity ? ` [${item.severity}]` : "";
+        if (item.exceptions && item.exceptions.length > 0) {
+          lines.push(`- ${label}Forbidden: "${item.term}"${suffix} (Except in contexts containing: ${item.exceptions.join(", ")})`);
+        } else {
+          lines.push(`- ${label}Forbidden: "${item.term}"${suffix}`);
+        }
+      }
+    }
+  } else {
+    lines.push("## 内容安全与禁忌规则");
+    if (profile.prohibitions && profile.prohibitions.length > 0) {
+      lines.push("全局禁令：");
+      for (const p of profile.prohibitions) {
+        if (typeof p !== "string" && p.disabled) continue;
+        lines.push(`- ${renderProhibition(p)}`);
+      }
+    }
+    if (profile.terms && profile.terms.length > 0) {
+      lines.push("违禁词与豁免词：");
+      for (const item of profile.terms) {
+        if (item.disabled) continue;
+        const label = item.id ? `${item.id}: ` : "";
+        const suffix = item.severity ? ` [${item.severity}]` : "";
+        if (item.exceptions && item.exceptions.length > 0) {
+          lines.push(`- ${label}禁用词：\"${item.term}\"${suffix}（豁免场景：正文中包含 \"${item.exceptions.join("、")}\" 时允许使用）`);
+        } else {
+          lines.push(`- ${label}禁用词：\"${item.term}\"${suffix}`);
+        }
+      }
+    }
+  }
+  
+  return lines.join("\n");
 }

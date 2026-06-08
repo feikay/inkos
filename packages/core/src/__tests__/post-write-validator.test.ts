@@ -31,6 +31,7 @@ import {
   hasInvalidTitleIntegrity,
   normalizeRepeatedTitleShell,
 } from "../utils/chapter-title-engine.js";
+import { mergeContentSafetyProfile } from "../agents/rules-reader.js";
 
 const baseProfile: GenreProfile = {
   id: "test",
@@ -316,6 +317,92 @@ describe("validatePostWrite", () => {
     const result = detectParagraphShapeWarnings(current, "zh");
     expect(findRule(result, "段落过碎")).toBeDefined();
     expect(findRule(result, "连续短段")).toBeDefined();
+  });
+
+  it("uses contentSafetyProfile to check terms and exemptions", () => {
+    const safetyProfile = {
+      prohibitions: [],
+      terms: [
+        { term: "砍", exceptions: ["砍价"] },
+        { term: "刀", exceptions: ["剪刀"] }
+      ]
+    };
+    
+    // Test term match (no exemption) -> should violate
+    const content1 = "他拿起长刀砍了过去。";
+    const result1 = validatePostWrite(content1, baseProfile, null, "zh", safetyProfile);
+    expect(findRule(result1, "内容安全")).toBeDefined();
+    
+    // Test term match but exempted -> should NOT violate
+    const content2 = "他们正在砍价呢。";
+    const result2 = validatePostWrite(content2, baseProfile, null, "zh", safetyProfile);
+    expect(findRule(result2, "内容安全")).toBeUndefined();
+
+    // Test term match but exempted -> should NOT violate
+    const content3 = "快去拿剪刀过来。";
+    const result3 = validatePostWrite(content3, baseProfile, null, "zh", safetyProfile);
+    expect(findRule(result3, "内容安全")).toBeUndefined();
+  });
+
+  it("escalates single character term severity based on dangerous context words", () => {
+    const safetyProfile = {
+      prohibitions: [],
+      terms: [{ term: "砍", exceptions: [], dangerousContextWords: ["手枪"] }]
+    };
+
+    // Single character, no dangerous context -> warning
+    const content1 = "他伸手砍向树枝。";
+    const result1 = validatePostWrite(content1, baseProfile, null, "zh", safetyProfile);
+    expect(findRule(result1, "内容安全")).toBeDefined();
+    expect(findRule(result1, "内容安全")?.severity).toBe("warning");
+
+    // Single character with dangerous context ("手枪") -> error
+    const content2 = "他手枪里有子弹，朝那人砍了过去。";
+    const result2 = validatePostWrite(content2, baseProfile, null, "zh", safetyProfile);
+    expect(findRule(result2, "内容安全")).toBeDefined();
+    expect(findRule(result2, "内容安全")?.severity).toBe("error");
+  });
+
+  it("checks short and long prohibitions in contentSafetyProfile", () => {
+    const safetyProfile = {
+      prohibitions: [
+        "违规交易", // Short prohibition
+        "禁止主角在任何时候使用违禁枪支和危险暴力武器进行攻击" // Long prohibition (> 30 chars)
+      ],
+      terms: []
+    };
+
+    // Short prohibition match -> error
+    const content1 = "他们进行了一场违规交易。";
+    const result1 = validatePostWrite(content1, baseProfile, null, "zh", safetyProfile);
+    expect(findRule(result1, "安全禁忌")).toBeDefined();
+    expect(findRule(result1, "安全禁忌")?.severity).toBe("error");
+
+    // Long prohibition keyword match ("违禁枪支" or "危险暴力" extracted by keywords) -> error
+    const content2 = "他拿出了违禁枪支。";
+    const result2 = validatePostWrite(content2, baseProfile, null, "zh", safetyProfile);
+    expect(findRule(result2, "安全禁忌")).toBeDefined();
+    expect(findRule(result2, "安全禁忌")?.severity).toBe("error");
+  });
+
+  it("keeps legacy bookRules prohibitions active after safety profile merging", () => {
+    const bookRules = {
+      version: "1.0",
+      prohibitions: [
+        "题材防污染：禁止出现任何超自然设定、武力越级冲突、军事相关剧情，所有冲突必须为商业层面或市井矛盾，不得出现枪战、爆破、特工等元素",
+      ],
+      chapterTypesOverride: [],
+      fatigueWordsOverride: [],
+      additionalAuditDimensions: [],
+      enableFullCastTracking: false,
+      allowedDeviations: [],
+    };
+    const safetyProfile = mergeContentSafetyProfile(baseProfile, bookRules);
+
+    const result = validatePostWrite("仓库外突然爆破，枪战声压过了人群。", baseProfile, bookRules, "zh", safetyProfile);
+    const violation = findRule(result, "本书禁忌");
+    expect(violation).toBeDefined();
+    expect(violation?.severity).toBe("error");
   });
 
   it("detects duplicate chapter titles", () => {

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { PipelineRunner } from "../pipeline/runner.js";
 import * as llmProvider from "../llm/provider.js";
 import { StateManager } from "../state/manager.js";
-import { ArchitectAgent } from "../agents/architect.js";
+import { ArchitectAgent, type ArchitectOutput } from "../agents/architect.js";
 import { PlannerAgent } from "../agents/planner.js";
 import { ChapterIntentAgent } from "../agents/chapter-intent.js";
 import {
@@ -31,6 +31,8 @@ import { MemoryDB } from "../state/memory-db.js";
 import * as memoryDbModule from "../state/memory-db.js";
 import { countChapterLength } from "../utils/length-metrics.js";
 import { AntagonistIntelligenceReviewerAgent, type AntagonistIntelligenceReport } from "../agents/antagonist-intelligence.js";
+
+const originalChapterIntentGenerate = ChapterIntentAgent.prototype.generate;
 
 const require = createRequire(import.meta.url);
 const hasNodeSqlite = (() => {
@@ -73,6 +75,161 @@ const ZERO_USAGE = {
   completionTokens: 0,
   totalTokens: 0,
 } as const;
+
+function completeFoundationOutput(overrides: Partial<ArchitectOutput> = {}): ArchitectOutput {
+  const first10Rows = Array.from({ length: 10 }, (_, index) => {
+    const chapter = index + 1;
+    return `| ${chapter} | 功能${chapter} | 情绪${chapter} | 目标${chapter} | 阻碍${chapter} | 解决${chapter} | 爽点${chapter} | 钩子${chapter} |`;
+  }).join("\n");
+
+  return {
+    storyBible: "# Story Bible\n## 02_主角\n- 姓名：林远舟\n- 身份：青石县高中生。\n",
+    volumeOutline: "# Volume Outline\n",
+    bookRules: "---\nversion: \"1.0\"\nprotagonist:\n  name: 林远舟\n  personalityLock: [冷静, 护短]\n  behavioralConstraints: [不主动伤害无辜]\n---\n\n# Book Rules\n",
+    currentState: createStateCard({
+      chapter: 0,
+      location: "青石县",
+      protagonistState: "林远舟刚进入主线。",
+      goal: "找到第一桶金机会。",
+      conflict: "本金不足且竞争者逼近。",
+    }),
+    pendingHooks: "# Pending Hooks\n",
+    genreArchitecture: "# 题材架构\n\n## 1. 题材定位\n- 核心卖点：信息差破局",
+    worldEngine: "# 世界发动机\n\n## 5. 主角异常性\n- 主角为什么是世界规则里的异常：掌握未来信息。\n\n## 6. 自动产出冲突的方式\n- 资源争夺",
+    antagonistMap: [
+      "# 反派结构",
+      "## 1. 核心反派",
+      "- 姓名/代号：赵明远",
+      "- 表层身份：本地商人",
+      "- 真实身份：关系网垄断者",
+      "- 反派类型：谋局者",
+      "- 公开目标：扩大商业地盘",
+      "- 隐藏目标：垄断关键资源",
+      "- 维护的秩序：关系优先的旧秩序",
+      "- 为什么不能容忍主角：主角用效率和信息差打破垄断。",
+    ].join("\n"),
+    motivationMatrix: [
+      "# 人物动机矩阵",
+      "## 1. 主角动机",
+      "- 表层目标：赚钱改善家庭。",
+      "- 深层欲望：证明自己可以改变命运。",
+      "- 最大恐惧：重蹈前世覆辙。",
+      "- 底线：不伤害无辜，不背叛亲友。",
+      "## 2. 核心反派动机",
+      "- 表层目标：扩大商业地盘。",
+      "- 深层欲望：证明旧关系秩序不可替代。",
+      "- 最大恐惧：被后来者取代。",
+      "## 3. 重要配角动机表",
+      "| 角色 | 表层目标 | 深层欲望 | 恐惧 | 底线 | 会背叛什么 | 绝不背叛什么 | 与主角利益关系 |",
+      "|---|---|---|---|---|---|---|---|",
+      "| 陈小波 | 赚钱 | 被看见 | 受穷 | 不害人 | 小利益 | 友情 | 合伙人 |",
+      "| 苏婉清 | 上大学 | 走出去 | 被困住 | 良心 | 舒适圈 | 理想 | 价值观碰撞 |",
+      "| 林建国 | 保工作 | 家庭稳定 | 下岗 | 不违法 | 面子 | 家庭 | 父子冲突 |",
+      "| 周秀兰 | 转正 | 家庭和睦 | 儿子走歪 | 安全 | 暂时理解 | 儿子 | 母子情感 |",
+    ].join("\n"),
+    first10ChapterPlan: [
+      "# 前10章规划",
+      "## 1. 黄金三章目标",
+      "### 第1章",
+      "- 主钩子类型：极度反差",
+      "- 前500字冲突：主角回到关键一天。",
+      "- 主角困境：确认重生且缺钱。",
+      "- 章节结尾钩子：第一桶金机会出现。",
+      "### 第2章",
+      "- 核心功能：展示信息差。",
+      "- 金手指/核心差异如何展示：判断市场机会。",
+      "- 阻碍如何升级：本金不足。",
+      "- 章节结尾钩子：竞争者出现。",
+      "### 第3章",
+      "- 核心功能：明确长期目标。",
+      "- 长期目标如何明确：三个月改变家庭处境。",
+      "- 第一个阶段敌人如何出现：本地商人施压。",
+      "- 章节结尾钩子：审批风险出现。",
+      "## 2. 前10章章节表",
+      "| 章数 | 章节功能 | 情绪事件 | 主角目标 | 阻碍困境 | 解决方法 | 爽点/反转 | 结尾钩子 |",
+      "|---|---|---|---|---|---|---|---|",
+      first10Rows,
+    ].join("\n"),
+    structureSignals: validStructureSignalsSection(),
+    ...overrides,
+  };
+}
+
+function completeEnglishFoundationOutput(overrides: Partial<ArchitectOutput> = {}): ArchitectOutput {
+  const first10Rows = Array.from({ length: 10 }, (_, index) => {
+    const chapter = index + 1;
+    return `| ${chapter} | Function ${chapter} | Emotion ${chapter} | Goal ${chapter} | Obstacle ${chapter} | Solution ${chapter} | Payoff ${chapter} | Hook ${chapter} |`;
+  }).join("\n");
+
+  return completeFoundationOutput({
+    storyBible: "# Story Bible\n## 02_Protagonist\n- Name: Mara\n- Identity: Courier at the harbor gate.\n",
+    bookRules: "---\nversion: \"1.0\"\nprotagonist:\n  name: Mara\n---\n\n# Book Rules\n",
+    currentState: createStateCard({
+      chapter: 0,
+      location: "Harbor gate",
+      protagonistState: "Mara arrives with a sealed letter.",
+      goal: "Find the missing captain before sunrise.",
+      conflict: "The harbor watch is searching every ship.",
+    }),
+    genreArchitecture: "# Genre Architecture\n\n## 1. Genre Positioning\n- Core selling point: grounded harbor mystery",
+    worldEngine: "# World Engine\n\n## 5. Protagonist Anomaly\n- Why is the protagonist an anomaly under world rules: Mara carries the only uncensored letter.\n\n## 6. Reusable Conflict Sources\n- Institutional pressure",
+    antagonistMap: [
+      "# Antagonist Structure",
+      "## 1. Core Antagonist",
+      "- Name/code: Watch Captain",
+      "- Surface identity: Harbor watch commander",
+      "- Real identity: Keeper of the smuggling route",
+      "- Antagonist type: Strategist",
+      "- Public goal: Keep the harbor calm",
+      "- Hidden goal: Hide the missing captain's route",
+      "- Order defended: Port authority control",
+      "- Why they cannot tolerate the protagonist: Mara's letter can expose the route.",
+    ].join("\n"),
+    motivationMatrix: [
+      "# Motivation Matrix",
+      "## 1. Protagonist Motivation",
+      "- Surface goal: Deliver the sealed letter.",
+      "- Deep desire: Prove she is more than a disposable courier.",
+      "- Greatest fear: The captain dies because she hesitates.",
+      "- Bottom line: Never betray an innocent passenger.",
+      "## 2. Core Antagonist Motivation",
+      "- Surface goal: Keep the harbor sealed.",
+      "- Deep desire: Preserve his hidden authority.",
+      "- Greatest fear: Losing control of the route.",
+      "## 3. Important Supporting Character Motivation Table",
+      "| Character | Surface goal | Deep desire | Fear | Bottom line | Will betray | Never betray | Relation to protagonist |",
+      "|---|---|---|---|---|---|---|---|",
+      "| Tomas | Find work | Be trusted | Exile | No murder | Comfort | Mara | Ally |",
+      "| Elen | Keep records | Tell truth | Censorship | No forged logs | Position | Facts | Informant |",
+      "| Captain Roe | Survive | Clear name | Public execution | Crew safety | Pride | Crew | Hidden target |",
+      "| Mira | Sell passage | Buy freedom | Debt prison | Children | Profit | Children | Unstable helper |",
+    ].join("\n"),
+    first10ChapterPlan: [
+      "# First 10 Chapter Plan",
+      "## 1. Golden Three Chapter Goals",
+      "### Chapter 1",
+      "- Main hook type: immediate conflict",
+      "- First 500-word conflict: Mara reaches the locked harbor gate.",
+      "- Protagonist dilemma: enter openly or hide the letter.",
+      "- Ending hook: the watch recognizes the seal.",
+      "### Chapter 2",
+      "- Core function: show Mara's edge.",
+      "- How core edge/difference appears: she reads patrol habits.",
+      "- How obstacle escalates: the gate closes.",
+      "- Ending hook: Tomas offers a risky route.",
+      "### Chapter 3",
+      "- Core function: clarify goal.",
+      "- How long-term goal becomes clear: find the missing captain.",
+      "- How first stage enemy appears: the watch commander names her.",
+      "- Ending hook: the letter warms in her coat.",
+      "## 2. First 10 Chapter Table",
+      "| Chapter | Chapter Function | Emotional Event | Protagonist Goal | Obstacle/Dilemma | Solution | Payoff/Reversal | Ending Hook |",
+      "|---|---|---|---|---|---|---|---|",
+      first10Rows,
+    ].join("\n"),
+    ...overrides,
+  });
+}
 
 const CRITICAL_ISSUE: AuditIssue = {
   severity: "critical",
@@ -545,14 +702,14 @@ describe("PipelineRunner", () => {
       externalContext: brief,
     });
 
-    vi.spyOn(ArchitectAgent.prototype, "generateFoundation").mockResolvedValue({
+    vi.spyOn(ArchitectAgent.prototype, "generateFoundation").mockResolvedValue(completeFoundationOutput({
       storyBible: "# Story Bible\n",
       volumeOutline: "# Volume Outline\n",
       bookRules: "---\nversion: \"1.0\"\n---\n\n# Book Rules\n",
       currentState: "# Current State\n",
       pendingHooks: "# Pending Hooks\n",
       structureSignals: validStructureSignalsSection(),
-    });
+    }));
 
     try {
       await runner.initBook(book);
@@ -600,14 +757,14 @@ describe("PipelineRunner", () => {
       projectRoot: root,
     });
 
-    const generateFoundationSpy = vi.spyOn(ArchitectAgent.prototype, "generateFoundation").mockResolvedValue({
+    const generateFoundationSpy = vi.spyOn(ArchitectAgent.prototype, "generateFoundation").mockResolvedValue(completeFoundationOutput({
       storyBible: "# Story Bible\n",
       volumeOutline: "# Volume Outline\n",
       bookRules: "---\nversion: \"1.0\"\n---\n\n# Book Rules\n",
       currentState: "# Current State\n",
       pendingHooks: "# Pending Hooks\n",
       structureSignals: validStructureSignalsSection(),
-    });
+    }));
 
     try {
       await runner.initBook(book, {
@@ -632,6 +789,164 @@ describe("PipelineRunner", () => {
     }
   });
 
+  it("regenerates foundation when local structural validation fails even if reviewer passes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-init-book-local-foundation-gate-"));
+    const bookId = "local-foundation-gate";
+    const book: BookConfig = {
+      id: bookId,
+      title: "Local Foundation Gate",
+      platform: "tomato",
+      genre: "xuanhuan",
+      status: "outlining",
+      targetChapters: 20,
+      chapterWordCount: 2800,
+      createdAt: "2026-06-07T00:00:00.000Z",
+      updatedAt: "2026-06-07T00:00:00.000Z",
+    };
+    const runner = new PipelineRunner({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+        },
+      } as ConstructorParameters<typeof PipelineRunner>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+    });
+    const invalidRows = Array.from({ length: 10 }, (_, index) => {
+      const chapter = index + 1;
+      const goal = chapter === 1 ? "" : `目标${chapter}`;
+      return `| ${chapter} | 功能${chapter} | 情绪${chapter} | ${goal} | 阻碍${chapter} | 解决${chapter} | 爽点${chapter} | 钩子${chapter} |`;
+    }).join("\n");
+    const invalidPlan = [
+      "# 前10章规划",
+      "## 1. 黄金三章目标",
+      "### 第1章",
+      "- 主钩子类型：",
+      "- 前500字冲突：",
+      "- 主角困境：",
+      "- 章节结尾钩子：",
+      "## 2. 前10章章节表",
+      "| 章数 | 章节功能 | 情绪事件 | 主角目标 | 阻碍困境 | 解决方法 | 爽点/反转 | 结尾钩子 |",
+      "|---|---|---|---|---|---|---|---|",
+      invalidRows,
+    ].join("\n");
+    const generateFoundation = vi.spyOn(ArchitectAgent.prototype, "generateFoundation")
+      .mockResolvedValueOnce(completeFoundationOutput({ first10ChapterPlan: invalidPlan }))
+      .mockResolvedValueOnce(completeFoundationOutput());
+    vi.spyOn(ArchitectAgent.prototype, "completeStorySkeletonSections")
+      .mockImplementation(async (_book, foundation) => foundation);
+
+    try {
+      await runner.initBook(book);
+
+      expect(generateFoundation).toHaveBeenCalledTimes(2);
+      expect(generateFoundation.mock.calls[1]?.[2]).toContain("first_10_chapter_plan incomplete");
+      await expect(readFile(join(root, "books", bookId, "story", "first_10_chapter_plan.md"), "utf-8"))
+        .resolves.toContain("目标1");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("repairs missing story skeleton sections before foundation review", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-init-book-story-skeleton-repair-"));
+    const bookId = "story-skeleton-repair";
+    const book: BookConfig = {
+      id: bookId,
+      title: "Story Skeleton Repair",
+      platform: "tomato",
+      genre: "xuanhuan",
+      status: "outlining",
+      targetChapters: 20,
+      chapterWordCount: 2800,
+      createdAt: "2026-06-07T00:00:00.000Z",
+      updatedAt: "2026-06-07T00:00:00.000Z",
+    };
+    const runner = new PipelineRunner({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+        },
+      } as ConstructorParameters<typeof PipelineRunner>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+    });
+    const partialFoundation = completeFoundationOutput({
+      genreArchitecture: undefined,
+      worldEngine: undefined,
+      antagonistMap: undefined,
+      motivationMatrix: undefined,
+      first10ChapterPlan: undefined,
+    });
+    vi.spyOn(ArchitectAgent.prototype, "generateFoundation").mockResolvedValue(partialFoundation);
+    const repair = vi.spyOn(ArchitectAgent.prototype, "completeStorySkeletonSections")
+      .mockResolvedValue(completeFoundationOutput());
+
+    try {
+      await runner.initBook(book);
+
+      expect(repair).toHaveBeenCalled();
+      await expect(readFile(join(root, "books", bookId, "story", "first_10_chapter_plan.md"), "utf-8"))
+        .resolves.toContain("目标1");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("regenerates foundation when architect output misses a required section", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-init-book-missing-section-retry-"));
+    const bookId = "missing-section-retry";
+    const book: BookConfig = {
+      id: bookId,
+      title: "Missing Section Retry",
+      platform: "tomato",
+      genre: "xuanhuan",
+      status: "outlining",
+      targetChapters: 20,
+      chapterWordCount: 2800,
+      createdAt: "2026-06-07T00:00:00.000Z",
+      updatedAt: "2026-06-07T00:00:00.000Z",
+    };
+    const runner = new PipelineRunner({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+        },
+      } as ConstructorParameters<typeof PipelineRunner>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+    });
+    const generateFoundation = vi.spyOn(ArchitectAgent.prototype, "generateFoundation")
+      .mockRejectedValueOnce(new Error("Architect output missing required section: volume_outline"))
+      .mockResolvedValueOnce(completeFoundationOutput());
+
+    try {
+      await runner.initBook(book);
+
+      expect(generateFoundation).toHaveBeenCalledTimes(2);
+      expect(generateFoundation.mock.calls[1]?.[2]).toContain("volume_outline");
+      await expect(readFile(join(root, "books", bookId, "story", "volume_outline.md"), "utf-8"))
+        .resolves.toContain("# Volume Outline");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("feeds foundation review feedback into the regeneration call after a rejection", async () => {
     const { root, runner, bookId } = await createRunnerFixture();
     const reviewer = new FoundationReviewerAgent({
@@ -649,13 +964,7 @@ describe("PipelineRunner", () => {
       projectRoot: root,
       bookId,
     });
-    const foundation = {
-      storyBible: "# Story Bible",
-      volumeOutline: "# Volume Outline",
-      bookRules: "---\nversion: \"1.0\"\n---\n\n# Book Rules",
-      currentState: "# Current State",
-      pendingHooks: "# Pending Hooks",
-    };
+    const foundation = completeFoundationOutput();
     const generate = vi.fn(async (_reviewFeedback?: string) => foundation);
     const reviewMock = vi.mocked(FoundationReviewerAgent.prototype.review);
 
@@ -1330,7 +1639,7 @@ describe("PipelineRunner", () => {
     const { root, runner, state, bookId } = await createRunnerFixture({ logger });
     const book = await state.loadBookConfig(bookId);
 
-    vi.spyOn(ArchitectAgent.prototype, "generateFoundation").mockResolvedValue({
+    vi.spyOn(ArchitectAgent.prototype, "generateFoundation").mockResolvedValue(completeFoundationOutput({
       storyBible: "# Story Bible\n",
       volumeOutline: "# Volume Outline\n",
       bookRules: "---\nversion: \"1.0\"\n---\n\n# Book Rules\n",
@@ -1343,7 +1652,7 @@ describe("PipelineRunner", () => {
       }),
       pendingHooks: "# Pending Hooks\n",
       structureSignals: validStructureSignalsSection(),
-    });
+    }));
 
     try {
       await runner.initBook(book);
@@ -3925,7 +4234,7 @@ describe("PipelineRunner", () => {
     ).resyncChapterArtifacts(bookId, 1);
     const savedIndex = await state.loadChapterIndex(bookId);
 
-    expect(result.status).toBe("ready-for-review");
+    expect(result.status).toBe("approved");
     expect(result.chapterNumber).toBe(1);
     expect(settleSpy).toHaveBeenCalledWith(expect.objectContaining({
       allowReapply: true,
@@ -3933,7 +4242,7 @@ describe("PipelineRunner", () => {
     }));
     await expect(readFile(join(storyDir, "current_state.md"), "utf-8")).resolves.toBe("synced state");
     await expect(readFile(join(storyDir, "pending_hooks.md"), "utf-8")).resolves.toBe("synced hooks");
-    expect(savedIndex[0]?.status).toBe("ready-for-review");
+    expect(savedIndex[0]?.status).toBe("approved");
 
     await rm(root, { recursive: true, force: true });
   });
@@ -4137,7 +4446,7 @@ describe("PipelineRunner", () => {
       await writeFile(join(storyDir, "fanfic_canon.md"), "# Fanfic Canon\n", "utf-8");
       return "# Fanfic Canon\n";
     });
-    vi.spyOn(ArchitectAgent.prototype, "generateFanficFoundation").mockResolvedValue({
+    vi.spyOn(ArchitectAgent.prototype, "generateFanficFoundation").mockResolvedValue(completeFoundationOutput({
       storyBible: "# Story Bible\n",
       volumeOutline: "# Volume Outline\n",
       bookRules: "---\nversion: \"1.0\"\n---\n\n# Book Rules\n",
@@ -4150,7 +4459,7 @@ describe("PipelineRunner", () => {
       }),
       pendingHooks: "# Pending Hooks\n",
       structureSignals: validStructureSignalsSection(),
-    });
+    }));
     vi.spyOn(runner, "generateStyleGuide").mockRejectedValue(new Error("style failed"));
 
     try {
@@ -4219,7 +4528,7 @@ describe("PipelineRunner", () => {
     const { root, runner, state, bookId } = await createRunnerFixture();
     const chapterContent = "章节正文。".repeat(120);
 
-    vi.spyOn(ArchitectAgent.prototype, "generateFoundationFromImport").mockResolvedValue({
+    vi.spyOn(ArchitectAgent.prototype, "generateFoundationFromImport").mockResolvedValue(completeFoundationOutput({
       storyBible: "# Story Bible\n",
       volumeOutline: "# Volume Outline\n",
       bookRules: "---\nversion: \"1.0\"\n---\n\n# Book Rules\n",
@@ -4232,7 +4541,7 @@ describe("PipelineRunner", () => {
       }),
       pendingHooks: "# Pending Hooks\n",
       structureSignals: validStructureSignalsSection(),
-    });
+    }));
     vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockResolvedValue(
       createAnalyzedOutput({
         chapterNumber: 1,
@@ -4264,7 +4573,7 @@ describe("PipelineRunner", () => {
   sqliteIt("rebuilds fact history from imported chapter snapshots", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture();
 
-    vi.spyOn(ArchitectAgent.prototype, "generateFoundationFromImport").mockResolvedValue({
+    vi.spyOn(ArchitectAgent.prototype, "generateFoundationFromImport").mockResolvedValue(completeFoundationOutput({
       storyBible: "# Story Bible\n",
       volumeOutline: "# Volume Outline\n",
       bookRules: "---\nversion: \"1.0\"\n---\n\n# Book Rules\n",
@@ -4277,7 +4586,7 @@ describe("PipelineRunner", () => {
       }),
       pendingHooks: "# Pending Hooks\n",
       structureSignals: validStructureSignalsSection(),
-    });
+    }));
 
     vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter")
       .mockResolvedValueOnce(createAnalyzedOutput({
@@ -4508,7 +4817,7 @@ describe("PipelineRunner", () => {
 
     await state.saveBookConfig(bookId, englishBook);
 
-    const foundation = vi.spyOn(ArchitectAgent.prototype, "generateFoundationFromImport").mockResolvedValue({
+    const foundation = vi.spyOn(ArchitectAgent.prototype, "generateFoundationFromImport").mockResolvedValue(completeEnglishFoundationOutput({
       storyBible: "# Story Bible\n",
       volumeOutline: "# Volume Outline\n",
       bookRules: "---\nversion: \"1.0\"\n---\n\n# Book Rules\n",
@@ -4521,7 +4830,7 @@ describe("PipelineRunner", () => {
       }),
       pendingHooks: "# Pending Hooks\n\n| hook_id | start_chapter | type | status | last_advanced_chapter | expected_payoff | notes |\n| --- | --- | --- | --- | --- | --- | --- |\n",
       structureSignals: validStructureSignalsSection(),
-    });
+    }));
     const saveChapter = vi.spyOn(WriterAgent.prototype, "saveChapter");
 
     vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockResolvedValue(
@@ -4583,7 +4892,7 @@ describe("PipelineRunner", () => {
     const { logger, infos } = createCaptureLogger();
     const { root, runner, bookId } = await createRunnerFixture({ logger });
 
-    vi.spyOn(ArchitectAgent.prototype, "generateFoundationFromImport").mockResolvedValue({
+    vi.spyOn(ArchitectAgent.prototype, "generateFoundationFromImport").mockResolvedValue(completeFoundationOutput({
       storyBible: "# Story Bible\n",
       volumeOutline: "# Volume Outline\n",
       bookRules: "---\nversion: \"1.0\"\n---\n\n# Book Rules\n",
@@ -4596,7 +4905,7 @@ describe("PipelineRunner", () => {
       }),
       pendingHooks: "# Pending Hooks\n",
       structureSignals: validStructureSignalsSection(),
-    });
+    }));
     vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockResolvedValue(
       createAnalyzedOutput({
         chapterNumber: 1,
@@ -4631,7 +4940,7 @@ describe("PipelineRunner", () => {
   it("passes governed control inputs into import replay analyzer in v2 mode", async () => {
     const { root, runner, bookId } = await createRunnerFixture();
 
-    vi.spyOn(ArchitectAgent.prototype, "generateFoundationFromImport").mockResolvedValue({
+    vi.spyOn(ArchitectAgent.prototype, "generateFoundationFromImport").mockResolvedValue(completeFoundationOutput({
       storyBible: "# Story Bible\n\n- Keep the harbor search grounded in the missing captain thread.\n",
       volumeOutline: "# Volume Outline\n\n## Volume 1\n- Chapter 1: Mara arrives at the harbor with the sealed letter.\n",
       bookRules: "---\nversion: \"1.0\"\n---\n\n# Book Rules\n\n- Stay close to Mara's viewpoint.\n",
@@ -4651,7 +4960,7 @@ describe("PipelineRunner", () => {
         "",
       ].join("\n"),
       structureSignals: validStructureSignalsSection(),
-    });
+    }));
 
     const analyzeChapter = vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockResolvedValue(
       createAnalyzedOutput({
@@ -4739,7 +5048,7 @@ describe("PipelineRunner", () => {
       ),
     ]);
 
-    vi.spyOn(ArchitectAgent.prototype, "generateFoundationFromImport").mockResolvedValue({
+    vi.spyOn(ArchitectAgent.prototype, "generateFoundationFromImport").mockResolvedValue(completeEnglishFoundationOutput({
       storyBible: "# Story Bible\n",
       volumeOutline: "# Volume Outline\n",
       bookRules: "---\nversion: \"1.0\"\n---\n\n# Book Rules\n",
@@ -4759,7 +5068,7 @@ describe("PipelineRunner", () => {
         "",
       ].join("\n"),
       structureSignals: validStructureSignalsSection(),
-    });
+    }));
 
     let stateSeenByFirstReplay = "";
     let hooksSeenByFirstReplay = "";
@@ -6084,5 +6393,122 @@ describe("PipelineRunner", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  describe("skipPlanningValidation and skipStateDegradationCheck controls", () => {
+    it("runs planning integrity check and marks chapter status when skipPlanningValidation is false", async () => {
+      const { root, runner, state, bookId } = await createRunnerFixture({
+        skipPlanningValidation: false,
+      });
+      const storyDir = join(state.bookDir(bookId), "story");
+
+      await Promise.all([
+        writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 1\nOutline line.", "utf-8"),
+        writeFile(join(storyDir, "first_10_chapter_plan.md"), "invalid format without table structure", "utf-8"),
+        writeFile(join(storyDir, "current_state.md"), "# Current State\n\n- 当前目标：拿到账册。\n\n- facts:\n  - test fact", "utf-8"),
+        writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+      ]);
+
+      await expect(runner.planChapter(bookId)).rejects.toThrow();
+      
+      const index = await state.loadChapterIndex(bookId);
+      const ch1 = index.find(e => e.number === 1);
+      expect(ch1?.status).toBe("planning-degraded");
+
+      await rm(root, { recursive: true, force: true });
+    });
+
+    it("runs intent alignment check in ChapterIntentAgent and blocks when skipPlanningValidation is false", async () => {
+      const { root, runner, state, bookId } = await createRunnerFixture({
+        skipPlanningValidation: false,
+      });
+      const storyDir = join(state.bookDir(bookId), "story");
+
+      // Mock ChapterIntentAgent.prototype.generate to call the original implementation!
+      vi.spyOn(ChapterIntentAgent.prototype, "generate").mockImplementation(function (this: any, input) {
+        return originalChapterIntentGenerate.call(this, input);
+      });
+
+      const validFirst10Plan = [
+        "| 章节 | 核心功能 | 情绪事件 | 主角目标 | 阻碍冲突 | 解决破局 | 阶段反馈 | 结尾钩子 |",
+        "|---|---|---|---|---|---|---|---|",
+        "| 01 | function | emotion | target | conflict | solution | payoff | hook |",
+        "| 02 | function | emotion | target | conflict | solution | payoff | hook |",
+        "| 03 | function | emotion | target | conflict | solution | payoff | hook |",
+        "| 04 | function | emotion | target | conflict | solution | payoff | hook |",
+        "| 05 | function | emotion | target | conflict | solution | payoff | hook |",
+        "| 06 | function | emotion | target | conflict | solution | payoff | hook |",
+        "| 07 | function | emotion | target | conflict | solution | payoff | hook |",
+        "| 08 | function | emotion | target | conflict | solution | payoff | hook |",
+        "| 09 | function | emotion | target | conflict | solution | payoff | hook |",
+        "| 10 | function | emotion | target | conflict | solution | payoff | hook |",
+      ].join("\n");
+
+      await Promise.all([
+        writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 1\nOutline line.", "utf-8"),
+        writeFile(join(storyDir, "first_10_chapter_plan.md"), validFirst10Plan, "utf-8"),
+        writeFile(join(storyDir, "current_state.md"), "# Current State\n\n- 当前目标：无\n\n- facts:\n", "utf-8"),
+        writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+      ]);
+      await mkdir(join(storyDir, "state"), { recursive: true });
+      await writeFile(
+        join(storyDir, "state", "current_state.json"),
+        JSON.stringify({ chapter: 0, facts: [] }, null, 2),
+        "utf-8",
+      );
+
+      await expect(runner.writeNextChapter(bookId)).rejects.toThrow(/Alignment failure/);
+
+      await rm(root, { recursive: true, force: true });
+    });
+
+    it("runs state degradation check and throws when skipStateDegradationCheck is false", async () => {
+      const { root, runner, state, bookId } = await createRunnerFixture({
+        skipStateDegradationCheck: false,
+      });
+      const storyDir = join(state.bookDir(bookId), "story");
+      const stateDir = join(storyDir, "state");
+      await mkdir(stateDir, { recursive: true });
+
+      const validFact = {
+        subject: "林越",
+        predicate: "持有",
+        object: "账册",
+        validFromChapter: 1,
+        validUntilChapter: null,
+        sourceChapter: 1,
+      };
+
+      const validHook = {
+        hookId: "hook-1",
+        startChapter: 1,
+        type: "danger",
+        status: "open",
+        lastAdvancedChapter: 1,
+        expectedPayoff: "payoff",
+        notes: "",
+      };
+
+      await Promise.all([
+        writeFile(join(stateDir, "current_state.json"), JSON.stringify({ chapter: 1, facts: [validFact] }), "utf-8"),
+        writeFile(join(stateDir, "hooks.json"), JSON.stringify({ hooks: [validHook] }), "utf-8"),
+        writeFile(join(stateDir, "chapter_summaries.json"), JSON.stringify({ rows: [] }), "utf-8"),
+        writeFile(join(stateDir, "manifest.json"), JSON.stringify({ schemaVersion: 2, language: "zh", lastAppliedChapter: 1, projectionVersion: 1 }), "utf-8"),
+      ]);
+
+      await Promise.all([
+        writeFile(join(storyDir, "current_state.md"), "# Current State\n\n- 当前目标：无\n\n- facts:\n", "utf-8"),
+        writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+      ]);
+
+      const { rewriteStructuredStateFromMarkdown } = await import("../state/state-bootstrap.js");
+      await expect(rewriteStructuredStateFromMarkdown({
+        bookDir: state.bookDir(bookId),
+        fallbackChapter: 1,
+        skipDegradationCheck: false,
+      })).rejects.toThrow(/State sync abort/);
+
+      await rm(root, { recursive: true, force: true });
+    });
   });
 });

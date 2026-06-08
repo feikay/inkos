@@ -455,6 +455,18 @@ export {
   type AppendStructureSignalResult,
 } from "./utils/structure-signals.js";
 
+// Chapter scope gate
+export {
+  parseChapterScopeBoundaries,
+  evaluateChapterScopeGate,
+  buildChapterScopeConstraintBlock,
+  buildStructureSignalsScopeConstraint,
+  type ChapterScopeBoundaries,
+  type ChapterScopeGateResult,
+  type ChapterScopeIssue,
+  type ChapterScopeGateInput,
+} from "./utils/chapter-scope-gate.js";
+
 // Pipeline
 export { PipelineRunner, type PipelineConfig, type ChapterPipelineResult, type DraftResult, type PlanChapterResult, type ComposeChapterResult, type ReviseResult, type TruthFiles, type BookStatusInfo, type ImportChaptersInput, type ImportChaptersResult, type TokenUsageSummary } from "./pipeline/runner.js";
 export { Scheduler, type SchedulerConfig } from "./pipeline/scheduler.js";

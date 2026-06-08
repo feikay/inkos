@@ -89,7 +89,7 @@ function summarizeSingleLine(value: string | undefined, maxLength = 160): string
 function extractBulletValue(markdown: string, labels: readonly string[]): string {
   for (const label of labels) {
     const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const match = markdown.match(new RegExp(`^\\s*(?:-\\s*)?${escaped}\\s*[：:]\\s*(.+)$`, "im"));
+    const match = markdown.match(new RegExp(`^[ \\t]*(?:[-*][ \\t]*)?(?:\\*\\*)?${escaped}(?:\\*\\*)?[ \\t]*[：:][ \\t]*(.+)$`, "im"));
     if (match?.[1]?.trim()) return match[1].trim();
   }
   return "";
@@ -104,7 +104,7 @@ function extractYamlNestedValue(markdown: string, parent: string, key: string): 
 
 function extractSection(markdown: string, heading: string, maxLength = 1200): string {
   const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = markdown.match(new RegExp(`^#{2,3}\\s+${escaped}\\s*$\\n?([\\s\\S]*?)(?=^#{2,3}\\s+|(?![\\s\\S]))`, "im"));
+  const match = markdown.match(new RegExp(`^#{2,3}\\s+${escaped}(?:\\s*[：:].*)?\\s*$\\n?([\\s\\S]*?)(?=^#{2,3}\\s+|(?![\\s\\S]))`, "im"));
   return compact(match?.[1] ?? "", maxLength);
 }
 
@@ -140,6 +140,11 @@ interface ChapterPlanRow {
   readonly endingHook: string;
 }
 
+function parseChapterNumber(value: string | undefined): number {
+  const match = (value ?? "").match(/\d+/);
+  return match ? parseInt(match[0]!, 10) : Number.NaN;
+}
+
 function parseGoldenThreeChapters(first10ChapterPlan: string): Map<number, Partial<ChapterPlanRow>> {
   const result = new Map<number, Partial<ChapterPlanRow>>();
   for (const chapter of [1, 2, 3]) {
@@ -159,15 +164,92 @@ function parseGoldenThreeChapters(first10ChapterPlan: string): Map<number, Parti
     result.set(chapter, {
       chapter,
       functionText: coreFunction || mainHook || (chapter === 1 ? "开局入局" : chapter === 2 ? "展示核心差异" : "明确长期目标"),
-      emotionEvent: conflict || edge || longGoal || "按黄金三章目标推进情绪事件",
-      goal: longGoal || conflict || "推进黄金三章目标",
-      obstacle: dilemma || obstacle || stageEnemy || "阻碍升级",
-      solution: edge || "用主角选择或核心差异破局",
-      payoff: mainHook || coreFunction || "阶段反馈",
-      endingHook: endingHook || stageEnemy || "留下下一章钩子",
+      emotionEvent: conflict || edge || longGoal,
+      goal: longGoal || conflict,
+      obstacle: dilemma || obstacle || stageEnemy,
+      solution: edge,
+      payoff: mainHook || coreFunction,
+      endingHook: endingHook || stageEnemy,
     });
   }
   return result;
+}
+
+function mergeChapterPlanRow(
+  chapter: number,
+  tableRow: ChapterPlanRow | undefined,
+  goldenRow: Partial<ChapterPlanRow> | undefined,
+): ChapterPlanRow | undefined {
+  if (!tableRow && !goldenRow) return undefined;
+  const base = defaultChapterRow(chapter);
+  return {
+    chapter,
+    functionText: tableRow?.functionText || goldenRow?.functionText || base.functionText,
+    emotionEvent: tableRow?.emotionEvent || goldenRow?.emotionEvent || base.emotionEvent,
+    goal: tableRow?.goal || goldenRow?.goal || "",
+    obstacle: tableRow?.obstacle || goldenRow?.obstacle || "",
+    solution: tableRow?.solution || goldenRow?.solution || base.solution,
+    payoff: tableRow?.payoff || goldenRow?.payoff || base.payoff,
+    endingHook: tableRow?.endingHook || goldenRow?.endingHook || "",
+  };
+}
+
+function hasMeaningfulChapterRow(row: ChapterPlanRow): boolean {
+  const placeholderRegex = /^(?:无|略|待补充|未设定|none|todo|tbd|placeholder|待定)$/i;
+  return [row.goal, row.obstacle, row.endingHook].every((value) => {
+    const trimmed = value.trim();
+    return trimmed.length > 0 && !placeholderRegex.test(trimmed);
+  });
+}
+
+function validateMarkdownTableIntegrity(markdown: string): string | undefined {
+  const lines = markdown.replace(/\r/g, "").split("\n");
+  const tableBlocks: Array<{ readonly startLine: number; readonly rows: readonly string[] }> = [];
+  let currentStart = -1;
+  let currentRows: string[] = [];
+
+  const flush = (): void => {
+    if (currentRows.length > 0) {
+      tableBlocks.push({ startLine: currentStart, rows: currentRows });
+      currentRows = [];
+      currentStart = -1;
+    }
+  };
+
+  for (let index = 0; index < lines.length; index++) {
+    const trimmed = lines[index]!.trim();
+    if (!trimmed.startsWith("|")) {
+      flush();
+      continue;
+    }
+
+    if (!trimmed.endsWith("|")) {
+      return `Markdown table row ${index + 1} is not closed: "${trimmed.slice(0, 80)}"`;
+    }
+
+    const cells = trimmed.split("|").slice(1, -1);
+    if (cells.length < 2) {
+      return `Markdown table row ${index + 1} has too few cells`;
+    }
+
+    if (currentRows.length === 0) {
+      currentStart = index + 1;
+    }
+    currentRows.push(trimmed);
+  }
+  flush();
+
+  for (const block of tableBlocks) {
+    const separatorIndex = block.rows.findIndex((row) => /^\|\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?$/.test(row));
+    if (separatorIndex < 0) {
+      return `Markdown table starting at row ${block.startLine} is missing separator row`;
+    }
+    if (block.rows.length <= separatorIndex + 1) {
+      return `Markdown table starting at row ${block.startLine} has no data rows`;
+    }
+  }
+
+  return undefined;
 }
 
 function parseChapterTable(first10ChapterPlan: string): ChapterPlanRow[] {
@@ -184,7 +266,7 @@ function parseChapterTable(first10ChapterPlan: string): ChapterPlanRow[] {
 
   return rows
     .map((cells) => ({
-      chapter: parseInt(cells[0] ?? "", 10),
+      chapter: parseChapterNumber(cells[0]),
       functionText: cells[1] ?? "",
       emotionEvent: cells[2] ?? "",
       goal: cells[3] ?? "",
@@ -677,4 +759,137 @@ ${rows.join("\n")}
 |---|---|---|---|---|---|---|---|---|
 ${rows.join("\n")}
 `;
+}
+
+export function validateFirst10ChapterPlan(first10ChapterPlan: string): { readonly passed: boolean; readonly reason?: string } {
+  if (!first10ChapterPlan || !first10ChapterPlan.trim()) {
+    return { passed: false, reason: "Plan is empty" };
+  }
+
+  const tableIntegrityIssue = validateMarkdownTableIntegrity(first10ChapterPlan);
+  if (tableIntegrityIssue) {
+    return { passed: false, reason: tableIntegrityIssue };
+  }
+
+  const tableRows = parseChapterTable(first10ChapterPlan);
+  const goldenRows = parseGoldenThreeChapters(first10ChapterPlan);
+  const rowsMap = new Map(tableRows.map((row) => [row.chapter, row]));
+
+  const placeholderRegex = /无|略|待补充|未设定|none|todo|tbd|placeholder/i;
+
+  for (let chapter = 1; chapter <= 10; chapter++) {
+    const row = mergeChapterPlanRow(chapter, rowsMap.get(chapter), chapter <= 3 ? goldenRows.get(chapter) : undefined);
+    if (!row) {
+      return { passed: false, reason: `Chapter ${chapter} plan row is missing` };
+    }
+
+    const { goal = "", obstacle = "", endingHook = "" } = row;
+    if (!hasMeaningfulChapterRow({ ...defaultChapterRow(chapter), goal, obstacle, endingHook })) {
+      if (!goal || !goal.trim() || placeholderRegex.test(goal)) {
+        return { passed: false, reason: `Chapter ${chapter} has invalid or missing Goal: "${goal}"` };
+      }
+      if (!obstacle || !obstacle.trim() || placeholderRegex.test(obstacle)) {
+        return { passed: false, reason: `Chapter ${chapter} has invalid or missing Obstacle/Conflict: "${obstacle}"` };
+      }
+      if (!endingHook || !endingHook.trim() || placeholderRegex.test(endingHook)) {
+        return { passed: false, reason: `Chapter ${chapter} has invalid or missing Ending Hook: "${endingHook}"` };
+      }
+    }
+  }
+
+  if (tableRows.length < 10) {
+    return { passed: false, reason: `First 10 Chapter Table has only ${tableRows.length} valid row(s); expected 10` };
+  }
+
+  return { passed: true };
+}
+
+export function validateFoundationDocuments(
+  output: ArchitectOutput,
+  meta: FoundationDocumentMeta = {},
+  language: Language = "zh",
+): readonly string[] {
+  const issues: string[] = [];
+  const first10Validation = validateFirst10ChapterPlan(output.first10ChapterPlan ?? "");
+  if (!first10Validation.passed) {
+    issues.push(`first_10_chapter_plan incomplete: ${first10Validation.reason}`);
+  }
+
+  const currentFocusValidation = validateCurrentFocus(buildCurrentFocusContent(output, meta, language));
+  if (!currentFocusValidation.passed) {
+    issues.push(`current_focus incomplete: ${currentFocusValidation.reason}`);
+  }
+
+  const characterValidation = validateCharacterMatrix(buildCharacterMatrixContent(output, meta, language));
+  if (!characterValidation.passed) {
+    issues.push(`character_matrix incomplete: ${characterValidation.reason}`);
+  }
+
+  return issues;
+}
+
+export function validateCharacterMatrix(characterMatrix: string): { readonly passed: boolean; readonly reason?: string } {
+  if (!characterMatrix || !characterMatrix.trim()) {
+    return { passed: false, reason: "Character matrix is empty" };
+  }
+
+  const protagonist = extractSection(characterMatrix, "主角", 1600)
+    || extractSection(characterMatrix, "Protagonist", 1600);
+  if (!protagonist) {
+    return { passed: false, reason: "Character matrix missing protagonist section" };
+  }
+  const protagonistRequiredLabels = [
+    ["表层目标", "Surface goal"],
+    ["深层欲望", "Deep desire"],
+    ["最大恐惧", "Greatest fear"],
+    ["底线", "Bottom line"],
+  ] as const;
+  for (const labels of protagonistRequiredLabels) {
+    const value = extractBulletValue(protagonist, labels);
+    if (!value.trim()) {
+      return { passed: false, reason: `Character matrix protagonist missing ${labels.join("/")}` };
+    }
+  }
+
+  const antagonist = extractSection(characterMatrix, "核心反派", 1600)
+    || extractSection(characterMatrix, "Core Antagonist", 1600);
+  if (!antagonist) {
+    return { passed: false, reason: "Character matrix missing core antagonist section" };
+  }
+  const antagonistTitle = characterMatrix.match(/^##\s+(?:核心反派|Core Antagonist)[：:]\s*(.+)$/im)?.[1]?.trim() ?? "";
+  if (!antagonistTitle || /^(?:核心反派|Core Antagonist|待定|待细化)$/i.test(antagonistTitle)) {
+    return { passed: false, reason: `Character matrix core antagonist has invalid name: "${antagonistTitle}"` };
+  }
+  const antagonistRequiredLabels = [
+    ["表层身份", "Surface identity"],
+    ["真实身份", "Real identity"],
+    ["公开目标", "Public goal"],
+    ["不能容忍主角的原因", "Why they cannot tolerate protagonist", "Why they cannot tolerate the protagonist"],
+  ] as const;
+  for (const labels of antagonistRequiredLabels) {
+    const value = extractBulletValue(antagonist, labels);
+    if (!value.trim()) {
+      return { passed: false, reason: `Character matrix core antagonist missing ${labels.join("/")}` };
+    }
+  }
+
+  const supportCount = (characterMatrix.match(/^##\s+(?:重要配角|Important Supporting Character)[：:]/gim) ?? []).length;
+  if (supportCount < 4) {
+    return { passed: false, reason: `Character matrix has only ${supportCount} supporting character section(s); expected at least 4` };
+  }
+
+  return { passed: true };
+}
+
+export function validateCurrentFocus(currentFocus: string): { readonly passed: boolean; readonly reason?: string } {
+  if (!currentFocus || !currentFocus.trim()) {
+    return { passed: false, reason: "Current focus is empty" };
+  }
+  for (const chapter of [1, 2, 3]) {
+    const value = extractBulletValue(currentFocus, [`第${chapter}章必须完成`, `Chapter ${chapter} must complete`]);
+    if (!value.trim()) {
+      return { passed: false, reason: `Current focus missing chapter ${chapter} must-complete item` };
+    }
+  }
+  return { passed: true };
 }

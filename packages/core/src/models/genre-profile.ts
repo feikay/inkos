@@ -1,6 +1,29 @@
 import { z } from "zod";
 import yaml from "js-yaml";
 
+export const SafetyProhibitionSchema = z.object({
+  id: z.string(),
+  text: z.string(),
+  severity: z.enum(["error", "warning"]).optional(),
+  disabled: z.boolean().optional(),
+});
+
+export const SafetyTermSchema = z.object({
+  id: z.string().optional(),
+  term: z.string(),
+  exceptions: z.array(z.string()).optional(),
+  severity: z.enum(["error", "warning"]).optional(),
+  disabled: z.boolean().optional(),
+  dangerousContextWords: z.array(z.string()).optional(),
+});
+
+export const ContentSafetyProfileSchema = z.object({
+  prohibitions: z.array(z.union([z.string(), SafetyProhibitionSchema])).default([]),
+  terms: z.array(SafetyTermSchema).default([]),
+});
+
+export type ContentSafetyProfile = z.infer<typeof ContentSafetyProfileSchema>;
+
 export const GenreProfileSchema = z.object({
   name: z.string(),
   id: z.string(),
@@ -13,6 +36,7 @@ export const GenreProfileSchema = z.object({
   pacingRule: z.string().default(""),
   satisfactionTypes: z.array(z.string()).default([]),
   auditDimensions: z.array(z.number()).default([]),
+  contentSafetyProfile: ContentSafetyProfileSchema.optional(),
 });
 
 export type GenreProfile = z.infer<typeof GenreProfileSchema>;

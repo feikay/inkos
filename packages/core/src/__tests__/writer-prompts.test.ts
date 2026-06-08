@@ -108,6 +108,46 @@ describe("buildWriterSystemPrompt", () => {
     expect(prompt).toContain("Keep the prose restrained");
   });
 
+  it("renders structured content safety profile entries instead of object placeholders", () => {
+    const prompt = buildWriterSystemPrompt(
+      BOOK,
+      GENRE,
+      null,
+      "# Book Rules",
+      "# Genre Body",
+      "# Style Guide",
+      undefined,
+      3,
+      "creative",
+      undefined,
+      "zh",
+      "governed",
+      undefined,
+      {
+        prohibitions: [
+          {
+            id: "firearms",
+            text: "不得出现枪战、爆破、特工等元素",
+            severity: "error",
+          },
+        ],
+        terms: [
+          {
+            id: "weapon",
+            term: "手枪",
+            exceptions: ["玩具手枪"],
+            severity: "error",
+          },
+        ],
+      },
+    );
+
+    expect(prompt).toContain("firearms [error]: 不得出现枪战、爆破、特工等元素");
+    expect(prompt).toContain("weapon: 禁用词：\"手枪\" [error]");
+    expect(prompt).toContain("玩具手枪");
+    expect(prompt).not.toContain("[object Object]");
+  });
+
   it("injects anti-template structure rules into governed Chinese prompts", () => {
     const prompt = buildWriterSystemPrompt(
       BOOK,

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import yaml from "js-yaml";
+import { ContentSafetyProfileSchema } from "./genre-profile.js";
 
 const ProtagonistSchema = z.object({
   name: z.string(),
@@ -36,6 +37,7 @@ export const BookRulesSchema = z.object({
   enableFullCastTracking: z.boolean().default(false),
   fanficMode: z.enum(["canon", "au", "ooc", "cp"]).optional(),
   allowedDeviations: z.array(z.string()).default([]),
+  contentSafetyProfile: ContentSafetyProfileSchema.optional(),
 });
 
 export type BookRules = z.infer<typeof BookRulesSchema>;

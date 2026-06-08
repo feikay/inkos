@@ -7,7 +7,7 @@ import { buildSettlerSystemPrompt, buildSettlerUserPrompt } from "./settler-prom
 import { buildObserverSystemPrompt, buildObserverUserPrompt } from "./observer-prompts.js";
 import { parseSettlerDeltaOutput } from "./settler-delta-parser.js";
 import { parseSettlementOutput } from "./settler-parser.js";
-import { readGenreProfile, readBookRules } from "./rules-reader.js";
+import { readGenreProfile, readBookRules, mergeContentSafetyProfile } from "./rules-reader.js";
 import {
   detectCrossChapterRepetition,
   detectParagraphLengthDrift,
@@ -286,6 +286,7 @@ export interface WriteChapterOutput {
     readonly suggestion: string;
   }>;
   readonly tokenUsage?: TokenUsage;
+  readonly isDegraded?: boolean;
 }
 
 export class WriterAgent extends BaseAgent {
@@ -573,12 +574,15 @@ export class WriterAgent extends BaseAgent {
       });
     }
 
+    const mergedSafetyProfile = mergeContentSafetyProfile(genreProfile, bookRules);
+
     // ── Phase 1: Creative writing (temperature 0.7) ──
     const creativeSystemPrompt = buildWriterSystemPrompt(
       book, genreProfile, bookRules, bookRulesBody, genreBody, styleGuide, styleFingerprint,
       chapterNumber, "creative", fanficContext, resolvedLanguage,
       input.chapterIntent ? "governed" : "legacy",
       resolvedLengthSpec,
+      mergedSafetyProfile,
     );
 
     const creativeUserPrompt = input.chapterIntent && input.contextPackage && input.ruleStack
@@ -1018,7 +1022,7 @@ export class WriterAgent extends BaseAgent {
       oldLedger: ledger,
       updatedState: runtimeStateArtifacts?.currentStateMarkdown ?? settlement.updatedState,
       updatedHooks: runtimeStateArtifacts?.hooksMarkdown ?? settlement.updatedHooks,
-      updatedLedger: settlement.updatedLedger,
+      updatedLedger: runtimeStateArtifacts ? (settlement.updatedLedger || ledger) : settlement.updatedLedger,
     });
     const resolvedRuntimeStateDelta = runtimeStateArtifacts?.resolvedDelta ?? settlement.runtimeStateDelta;
     const priorHookIds = new Set(parsePendingHooksMarkdown(hooks).map((hook) => hook.hookId));
@@ -1036,7 +1040,7 @@ export class WriterAgent extends BaseAgent {
 
     // ── Post-write validation (regex + rule-based, zero LLM cost) ──
     const ruleViolations = [
-      ...validatePostWrite(creative.content, genreProfile, bookRules, resolvedLanguage),
+      ...validatePostWrite(creative.content, genreProfile, bookRules, resolvedLanguage, mergedSafetyProfile),
       ...detectCrossChapterRepetition(creative.content, fingerprintChapters, resolvedLanguage),
       ...detectParagraphLengthDrift(creative.content, fingerprintChapters, resolvedLanguage),
     ];
@@ -1204,6 +1208,7 @@ export class WriterAgent extends BaseAgent {
       hookDebtCheck,
       hookHealthIssues,
       tokenUsage,
+      isDegraded: reconciledSettlement.isDegraded,
     };
   }
 
@@ -1280,7 +1285,7 @@ export class WriterAgent extends BaseAgent {
       oldLedger: ledger,
       updatedState: runtimeStateArtifacts?.currentStateMarkdown ?? settlement.updatedState,
       updatedHooks: runtimeStateArtifacts?.hooksMarkdown ?? settlement.updatedHooks,
-      updatedLedger: settlement.updatedLedger,
+      updatedLedger: runtimeStateArtifacts ? (settlement.updatedLedger || ledger) : settlement.updatedLedger,
     });
 
     return {
@@ -1314,6 +1319,7 @@ export class WriterAgent extends BaseAgent {
       resourceLedgerCheck: undefined,
       hookDebtCheck: undefined,
       tokenUsage: settleResult.usage,
+      isDegraded: reconciledSettlement.isDegraded,
     };
   }
 

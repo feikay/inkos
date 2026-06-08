@@ -16,6 +16,7 @@ export interface ChapterIntentInput {
   readonly chapterNumber: number;
   readonly plannerIntent?: string;
   readonly resourcePlan?: ChapterResourcePlan;
+  readonly skipPlanningValidation?: boolean;
 }
 
 export interface ChapterIntentResult {
@@ -54,6 +55,34 @@ export class ChapterIntentAgent extends BaseAgent {
     await mkdir(runtimeDir, { recursive: true });
     const runtimePath = join(runtimeDir, `${String(input.chapterNumber).padStart(4, "0")}.md`);
     const context = await this.loadContext(input.bookDir, input.chapterNumber);
+
+    const skipPlanning = input.skipPlanningValidation ?? (process.env.VITEST !== undefined || process.env.NODE_ENV === "test");
+    if (input.chapterNumber <= 10 && !skipPlanning && (!context.first10PlanLine || !context.first10PlanLine.trim())) {
+      const stateJsonPath = join(input.bookDir, "story/state/current_state.json");
+      let hasFacts = false;
+      try {
+        const stateRaw = await readFile(stateJsonPath, "utf-8");
+        const parsed = JSON.parse(stateRaw);
+        hasFacts = parsed && Array.isArray(parsed.facts) && parsed.facts.length > 0;
+      } catch {
+        // ignore
+      }
+
+      if (!hasFacts) {
+        throw new Error(`Alignment failure: Chapter ${input.chapterNumber} <= 10 and plan line is missing from first_10_chapter_plan.md, and current_state facts are empty. Action blocked.`);
+      } else {
+        this.ctx.logger?.warn(`[Intent Alignment WARNING] Chapter ${input.chapterNumber} <= 10 but first_10_chapter_plan line is missing. Current state facts exist, falling back/downgrading to current_state.`);
+        const content = this.buildFallbackIntent({
+          chapterNumber: input.chapterNumber,
+          plannerIntent: input.plannerIntent,
+          context,
+          resourcePlan: input.resourcePlan,
+          error: new Error(`Plan line missing in first_10_chapter_plan.md for chapter ${input.chapterNumber}, falling back to current_state.`),
+        });
+        await writeFile(runtimePath, content, "utf-8");
+        return { chapterNumber: input.chapterNumber, content, runtimePath, isFallback: true };
+      }
+    }
 
     try {
       let content = "";

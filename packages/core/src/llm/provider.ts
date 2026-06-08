@@ -865,7 +865,18 @@ export async function chatWithTools(
  * (e.g. agent overrides).
  */
 function resolvePiModel(client: LLMClient, model: string): PiModel<PiApi> {
-  const base = client._piModel!;
+  const base = client._piModel || {
+    id: model,
+    name: model,
+    api: client.apiFormat === "responses" ? "openai-responses" : "openai-completions",
+    provider: client.provider,
+    baseUrl: "",
+    reasoning: (client.defaults?.thinkingBudget ?? 0) > 0,
+    input: ["text"] as ("text" | "image")[],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128_000,
+    maxTokens: client.defaults?.maxTokens ?? 8192,
+  };
   if (base.id === model) return base;
   return { ...base, id: model, name: model };
 }

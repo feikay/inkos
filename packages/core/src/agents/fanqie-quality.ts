@@ -173,14 +173,16 @@ export function buildFanqiePolishPrompt(params: {
   readonly chapterText: string;
   readonly issues: ReadonlyArray<FanqieQualityIssue> | string;
   readonly qualityScore: number;
+  readonly lengthConstraint?: string;
+  readonly scopeConstraint?: string;
 }): string {
   if (params.qualityScore >= 85) return "";
   const issues = typeof params.issues === "string"
     ? params.issues
     : params.issues.map((issue) => `[${issue.severity}] ${issue.type}: ${issue.detail}`).join("\n");
   return params.qualityScore >= 80
-    ? buildLightPolishPrompt(params.chapterText, issues)
-    : buildStrongPolishPrompt(params.chapterText, issues);
+    ? buildLightPolishPrompt(params.chapterText, issues, params.lengthConstraint, params.scopeConstraint)
+    : buildStrongPolishPrompt(params.chapterText, issues, params.lengthConstraint, params.scopeConstraint);
 }
 
 function buildFanqieQualityPrompt(input: RunFanqieQualityCheckInput): string {
@@ -244,13 +246,13 @@ function buildLocalFanqieQualityReport(input: Omit<RunFanqieQualityCheckInput, "
   const first300 = text.slice(0, 300);
   const ending = text.slice(-500);
   const stimulusMatches = text.match(/压|杀|逃|血|痛|怒|惊|轰|裂|断|反|逼近|危机|真相|秘密|露出|出现|终于|竟然|不对|代价|机会|收获|突破|跪|死/g)?.length ?? 0;
-  const dialogueMatches = text.match(/“[^”]+”/g)?.length ?? 0;
+  const dialogueMatches = text.match(/“[^”]+”|"[^"]+"/g)?.length ?? 0;
   const actionMatches = text.match(/冲|退|抓|挥|斩|砸|撞|拖|拉|踏|扑|按|抬|盯|转身|低吼/g)?.length ?? 0;
   const explanationPenalty = text.match(/因为|所谓|规则|体系|境界|设定|意味着|换句话说/g)?.length ?? 0;
   const openingConflict = /压|杀|逃|血|痛|怒|惊|轰|裂|断|逼近|危机|不对/.test(first300);
   const endingHook = /不对|忽然|下一刻|声音|睁开|出现|逼近|裂开|抬头|笑了|死|活|主人|真相|秘密/.test(ending);
   const hasChoice = /选择|必须|只能|赌|代价|要么|否则|不敢|不能/.test(text);
-  const stagnantParagraphs = paragraphs.filter((p) => p.length > 260 && !/[“”]/.test(p) && !/冲|退|杀|血|轰|裂|问|吼|笑|出现/.test(p)).length;
+  const stagnantParagraphs = paragraphs.filter((p) => p.length > 260 && !/["“”"]/.test(p) && !/冲|退|杀|血|轰|裂|问|吼|笑|出现/.test(p)).length;
 
   const hook = clampDimension(Math.round(14 + Math.min(10, stimulusMatches / 4) + (endingHook ? 3 : 0) - stagnantParagraphs), 0, 30);
   const pacing = clampDimension(Math.round(12 + (openingConflict ? 5 : 0) + Math.min(5, actionMatches / 5) + (paragraphs.length >= 20 ? 2 : 0) - stagnantParagraphs * 2), 0, 25);
@@ -388,15 +390,17 @@ function buildSuggestions(scores: FanqieQualityScores): string[] {
   return suggestions;
 }
 
-function buildLightPolishPrompt(chapterText: string, issues: string): string {
-  return `你正在优化一章“可发布但爽点不足”的番茄网文章节。
+function buildLightPolishPrompt(chapterText: string, issues: string, lengthConstraint?: string, scopeConstraint?: string): string {
+  const lengthBlock = lengthConstraint ? `\n${lengthConstraint}\n` : "";
+  const scopeBlock = scopeConstraint ? `\n${scopeConstraint}\n` : "";
+  return `你正在优化一章”可发布但爽点不足”的番茄网文章节。
 
 【当前章节】
 ${chapterText}
 
 【检测问题】
 ${issues}
-
+${lengthBlock}${scopeBlock}
 【优化要求】
 1. 不改变剧情主线。
 2. 不改变人物关系。
@@ -406,19 +410,21 @@ ${issues}
 6. 每3~5段增加一次变化。
 7. 结尾钩子更尖锐，必须让读者想看下一章。
 8. 输出完整优化后的章节正文。
-
+${lengthConstraint ? "9. 严格遵守字数约束，不得超过硬上限。\n" : ""}${scopeBlock ? "10. 严格遵守章节作用域约束，不提前完成下一章目标，不引入未来人物/支线。\n" : ""}
 禁止输出解释说明。`;
 }
 
-function buildStrongPolishPrompt(chapterText: string, issues: string): string {
-  return `你正在优化一章“不建议发布”的番茄网文章节。
+function buildStrongPolishPrompt(chapterText: string, issues: string, lengthConstraint?: string, scopeConstraint?: string): string {
+  const lengthBlock = lengthConstraint ? `\n${lengthConstraint}\n` : "";
+  const scopeBlock = scopeConstraint ? `\n${scopeConstraint}\n` : "";
+  return `你正在优化一章”不建议发布”的番茄网文章节。
 
 【当前章节】
 ${chapterText}
 
 【检测问题】
 ${issues}
-
+${lengthBlock}${scopeBlock}
 【优化要求】
 1. 保留核心事件和本章剧情目的。
 2. 可以重排结构和段落。
@@ -428,7 +434,7 @@ ${issues}
 6. 删除大段说明文。
 7. 增加动作、对白、选择和代价。
 8. 保持番茄网文风格：短段落、快节奏、强冲突、强期待。
-
+${lengthConstraint ? "9. 严格遵守字数约束：当前已超软上限时优先压缩式修复，不得继续扩写。不得超过硬上限。\n" : ""}${scopeBlock ? "10. 严格遵守章节作用域约束，不提前完成下一章目标，不引入未来人物/支线。\n" : ""}
 禁止改变主线、战力、人物关系。
 禁止输出解释说明。`;
 }

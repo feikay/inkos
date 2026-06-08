@@ -9,6 +9,7 @@ export interface SettlementReconciliationResult {
   readonly updatedLedger: string;
   readonly settlementConfidence: number;
   readonly repaired: boolean;
+  readonly isDegraded?: boolean;
   readonly findings: ReadonlyArray<{
     readonly kind: "location" | "injury" | "hook" | "resource";
     readonly detail: string;
@@ -30,7 +31,19 @@ export function reconcileSettlementDiff(params: {
   let updatedState = params.updatedState;
   let updatedHooks = params.updatedHooks;
   let updatedLedger = params.updatedLedger;
-  let repaired = false;
+  let isDegraded = false;
+
+  const statePlaceholder = !updatedState.trim() || /未更新|not updated/i.test(updatedState);
+  const hooksPlaceholder = !updatedHooks.trim() || /未更新|not updated/i.test(updatedHooks);
+  const ledgerPlaceholder = !updatedLedger.trim() || /未更新|not updated/i.test(updatedLedger);
+
+  if (statePlaceholder || hooksPlaceholder || ledgerPlaceholder) {
+    updatedState = params.oldState;
+    updatedHooks = params.oldHooks;
+    updatedLedger = params.oldLedger;
+    isDegraded = true;
+  }
+  let repaired = isDegraded;
 
   const findings: Array<{
     kind: "location" | "injury" | "hook" | "resource";
@@ -114,13 +127,18 @@ export function reconcileSettlementDiff(params: {
     updatedLedger,
     settlementConfidence: total === 0 ? 1 : synchronized / total,
     repaired,
+    isDegraded,
     findings,
   };
 }
 
 function extractLocationChange(content: string): string | undefined {
   const match = content.match(/(?:进入|走进|踏入|钻进)([^，。！？\n]{2,12})/u);
-  return match?.[1]?.trim();
+  const loc = match?.[1]?.trim();
+  if (loc && /(?:走了|跑了|去了|飞了|退了|开走|离开)$/u.test(loc)) {
+    return undefined;
+  }
+  return loc;
 }
 
 function extractInjuryChange(content: string): string | undefined {

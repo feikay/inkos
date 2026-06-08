@@ -18,6 +18,7 @@ import {
   buildCurrentFocusContent,
   buildEmotionalArcsContent,
   buildSubplotBoardContent,
+  validateFoundationDocuments,
   type FoundationDocumentMeta,
 } from "./foundation-documents.js";
 import { parseArchitectStructureSignals, writeStructureSignals, validateStructureSignalsFull } from "../utils/structure-signals.js";
@@ -375,16 +376,7 @@ const STORY_SKELETON_FALLBACK_TEMPLATES: Record<StorySkeletonSection, Record<"zh
 ## 2. 前10章章节表
 | 章数 | 章节功能 | 情绪事件 | 主角目标 | 阻碍困境 | 解决方法 | 爽点/反转 | 结尾钩子 |
 |---|---|---|---|---|---|---|---|
-| 1 |  |  |  |  |  |  |  |
-| 2 |  |  |  |  |  |  |  |
-| 3 |  |  |  |  |  |  |  |
-| 4 |  |  |  |  |  |  |  |
-| 5 |  |  |  |  |  |  |  |
-| 6 |  |  |  |  |  |  |  |
-| 7 |  |  |  |  |  |  |  |
-| 8 |  |  |  |  |  |  |  |
-| 9 |  |  |  |  |  |  |  |
-| 10 |  |  |  |  |  |  |  |
+必须输出 1-10 共10行；每行必须有8列；每个单元格必须填写具体行动、冲突或钩子，禁止空白、待定、略、同上、模板词。第1章主角目标必须是可执行动作，不得只写“适应重生/了解情况”。
 
 ## 3. 前10章反派压力安排
 - 核心反派或阶段反派的压力如何逐步显现：
@@ -419,16 +411,7 @@ const STORY_SKELETON_FALLBACK_TEMPLATES: Record<StorySkeletonSection, Record<"zh
 ## 2. First 10 Chapter Table
 | Chapter | Chapter Function | Emotion Event | Protagonist Goal | Obstacle/Dilemma | Solution | Gratification/Reversal | Ending Hook |
 |---|---|---|---|---|---|---|---|
-| 1 |  |  |  |  |  |  |  |
-| 2 |  |  |  |  |  |  |  |
-| 3 |  |  |  |  |  |  |  |
-| 4 |  |  |  |  |  |  |  |
-| 5 |  |  |  |  |  |  |  |
-| 6 |  |  |  |  |  |  |  |
-| 7 |  |  |  |  |  |  |  |
-| 8 |  |  |  |  |  |  |  |
-| 9 |  |  |  |  |  |  |  |
-| 10 |  |  |  |  |  |  |  |
+You must output exactly 10 rows for Chapters 1-10; each row must have 8 columns; every cell must contain a concrete action, conflict, payoff, or hook. No blank cells, TBD, same as above, none, or template text. Chapter 1's protagonist goal must be an executable action, not merely "adjust to the situation" or "understand what happened".
 
 ## 3. First 10 Chapter Antagonist Pressure
 - How core or stage antagonist pressure gradually appears:
@@ -810,6 +793,134 @@ ${this.buildStructureSignalsPrompt(resolvedLanguage)}`;
     };
   }
 
+  async completeStorySkeletonSections(
+    book: BookConfig,
+    foundation: ArchitectOutput,
+    reviewFeedback?: string,
+  ): Promise<ArchitectOutput> {
+    const resolvedLanguage = (book.language ?? "zh") === "en" ? "en" as const : "zh" as const;
+    const issues = validateFoundationDocuments(foundation, book, resolvedLanguage);
+    if (issues.length === 0) {
+      return foundation;
+    }
+
+    const feedbackBlock = reviewFeedback?.trim()
+      ? (resolvedLanguage === "en"
+          ? `\n## Existing Review Feedback\n${reviewFeedback.trim()}\n`
+          : `\n## 已有审核反馈\n${reviewFeedback.trim()}\n`)
+      : "";
+    const prompt = resolvedLanguage === "en"
+      ? `You are repairing only the missing or invalid story skeleton sections for a web novel foundation.
+
+The base foundation already exists. Do not rewrite story_bible, volume_outline, book_rules, current_state, or pending_hooks.
+
+## Book
+- Title: ${book.title}
+- Genre: ${book.genre}
+- Platform: ${book.platform}
+
+## Local structural validation errors
+${issues.map((issue) => `- ${issue}`).join("\n")}
+${feedbackBlock}
+## Existing base foundation
+### Story Bible
+${foundation.storyBible}
+
+### Volume Outline
+${foundation.volumeOutline}
+
+### Book Rules
+${foundation.bookRules}
+
+### Current State
+${foundation.currentState}
+
+### Pending Hooks
+${foundation.pendingHooks}
+
+## Existing skeleton drafts, if any
+### Genre Architecture
+${foundation.genreArchitecture ?? ""}
+
+### World Engine
+${foundation.worldEngine ?? ""}
+
+### Antagonist Structure
+${foundation.antagonistMap ?? ""}
+
+### Motivation Matrix
+${foundation.motivationMatrix ?? ""}
+
+### First 10 Chapter Plan
+${foundation.first10ChapterPlan ?? ""}
+
+Output exactly these sections with the exact tags, and fill them completely. The first_10_chapter_plan must include a 10-row table for Chapters 1-10 with no blank cells.
+
+${this.buildStorySkeletonPrompt("en")}`
+      : `你正在修复一本网络小说基础设定中缺失或不合格的故事骨架 section。
+
+基础设定已经存在。不要重写 story_bible、volume_outline、book_rules、current_state、pending_hooks。
+
+## 书籍
+- 标题：${book.title}
+- 题材：${book.genre}
+- 平台：${book.platform}
+
+## 本地结构校验错误
+${issues.map((issue) => `- ${issue}`).join("\n")}
+${feedbackBlock}
+## 已有基础设定
+### Story Bible
+${foundation.storyBible}
+
+### Volume Outline
+${foundation.volumeOutline}
+
+### Book Rules
+${foundation.bookRules}
+
+### Current State
+${foundation.currentState}
+
+### Pending Hooks
+${foundation.pendingHooks}
+
+## 已有骨架草稿，如有
+### 题材架构
+${foundation.genreArchitecture ?? ""}
+
+### 世界发动机
+${foundation.worldEngine ?? ""}
+
+### 反派结构
+${foundation.antagonistMap ?? ""}
+
+### 人物动机矩阵
+${foundation.motivationMatrix ?? ""}
+
+### 前10章规划
+${foundation.first10ChapterPlan ?? ""}
+
+请只输出以下故事骨架 section，必须使用精确标签，并完整填写。first_10_chapter_plan 必须有第1-10章共10行章节表，不能有空单元格。
+
+${this.buildStorySkeletonPrompt("zh")}`;
+
+    const response = await this.chat([
+      { role: "system", content: prompt },
+      {
+        role: "user",
+        content: resolvedLanguage === "en"
+          ? "Repair the story skeleton sections now."
+          : "现在补齐故事骨架 section。",
+      },
+    ], { temperature: 0.35, maxTokens: 12000 });
+    const repaired = this.parseOptionalSections(response.content);
+    return {
+      ...foundation,
+      ...repaired,
+    };
+  }
+
   async writeFoundationFiles(
     bookDir: string,
     output: ArchitectOutput,
@@ -820,6 +931,7 @@ ${this.buildStructureSignalsPrompt(resolvedLanguage)}`;
   ): Promise<void> {
     const storyDir = join(bookDir, "story");
     await mkdir(storyDir, { recursive: true });
+    this.assertFoundationDocumentsComplete(output, documentMeta, language);
 
     const writes: Array<Promise<void>> = [
       writeFile(join(storyDir, "story_bible.md"), output.storyBible, "utf-8"),
@@ -946,6 +1058,17 @@ ${this.buildStructureSignalsPrompt(resolvedLanguage)}`;
     }
 
     await Promise.all(writes);
+  }
+
+  private assertFoundationDocumentsComplete(
+    output: ArchitectOutput,
+    documentMeta: FoundationDocumentMeta,
+    language: "zh" | "en",
+  ): void {
+    const issues = validateFoundationDocuments(output, documentMeta, language);
+    if (issues.length > 0) {
+      throw new Error(`[architect] ${issues.join("; ")}`);
+    }
   }
 
   private buildWebnovelTemplateFiles(
@@ -1233,7 +1356,7 @@ List character behavior constraints that write-next must obey later.
 | Chapter | Chapter Function | Emotion Event | Protagonist Goal | Obstacle/Dilemma | Solution | Gratification/Reversal | Ending Hook |
 |---|---|---|---|---|---|---|---|
 
-Requirements: every chapter has a goal, obstacle, and ending hook; at least 3 small gratification beats; at least 2 reversals; Chapter 10 creates a stage situation change.
+Requirements: output exactly 10 rows for Chapters 1-10; each row must have 8 columns; every chapter has a concrete protagonist goal, obstacle, solution, payoff/reversal, and ending hook; no cell may be blank or say TBD/none/same as above. Chapter 1's protagonist goal must be an executable action, not merely "adjust to the situation" or "understand what happened." At least 3 small gratification beats; at least 2 reversals; Chapter 10 creates a stage situation change.
 
 ## 3. First 10 Chapter Antagonist Pressure
 Explain how core or stage antagonist pressure gradually appears without free experience delivery.
@@ -1423,7 +1546,7 @@ List possible reader drop-off risks and avoidance strategies.`;
 | 章数 | 章节功能 | 情绪事件 | 主角目标 | 阻碍困境 | 解决方法 | 爽点/反转 | 结尾钩子 |
 |---|---|---|---|---|---|---|---|
 
-要求：每章都有明确目标、阻碍和结尾钩子；至少 3 章有小爽点；至少 2 章有反转；第10章必须形成阶段性局势变化。
+要求：必须输出 1-10 共10行；每行必须有8列；每章都有明确目标、阻碍和结尾钩子；任何单元格都不能留空，不能写“待定/略/同上/无”。第1章主角目标必须是可执行动作，不得只写“适应重生/了解情况”。至少 3 章有小爽点；至少 2 章有反转；第10章必须形成阶段性局势变化。
 
 ## 3. 前10章反派压力安排
 说明核心反派或阶段反派的压力如何逐步显现，不能让反派直接无脑送经验。
@@ -2067,6 +2190,42 @@ ${trimmed}\n`;
     };
   }
 
+  private parseOptionalSections(content: string): Partial<ArchitectOutput> {
+    const parsedSections = new Map<string, string>();
+    const sectionPattern = /^\s*===\s*SECTION\s*[：:]\s*([^\n=]+?)\s*===\s*$/gim;
+    const matches = [...content.matchAll(sectionPattern)];
+
+    for (let i = 0; i < matches.length; i++) {
+      const match = matches[i]!;
+      const rawName = match[1] ?? "";
+      const start = (match.index ?? 0) + match[0].length;
+      const end = matches[i + 1]?.index ?? content.length;
+      const normalizedName = this.normalizeSectionName(rawName);
+      parsedSections.set(normalizedName, content.slice(start, end).trim());
+    }
+
+    const output: { -readonly [K in keyof ArchitectOutput]?: ArchitectOutput[K] } = {};
+    const copyIfPresent = (field: keyof ArchitectOutput, sectionName: string): void => {
+      const section = parsedSections.get(this.normalizeSectionName(sectionName));
+      if (section !== undefined) {
+        output[field] = section;
+      }
+    };
+
+    copyIfPresent("genreArchitecture", "genre_architecture");
+    copyIfPresent("worldEngine", "world_engine");
+    copyIfPresent("antagonistMap", "antagonist_map");
+    copyIfPresent("motivationMatrix", "motivation_matrix");
+    copyIfPresent("first10ChapterPlan", "first_10_chapter_plan");
+
+    const structureSignals = this.extractStructureSignalsSection(content, parsedSections);
+    if (structureSignals !== undefined) {
+      output.structureSignals = structureSignals;
+    }
+
+    return output;
+  }
+
   private extractStructureSignalsSection(content: string, parsedSections: Map<string, string>): string | undefined {
     const direct = parsedSections.get(this.normalizeSectionName("structure_signals"));
     if (direct) {
@@ -2103,12 +2262,51 @@ ${trimmed}\n`;
   }
 
   private normalizeSectionName(name: string): string {
-    return name
+    const normalizedText = name.normalize("NFKC").trim().toLowerCase();
+    const compactText = normalizedText.replace(/\s+/g, "");
+    if (/故事设定|世界设定|故事圣经|设定圣经/.test(compactText)) return "story_bible";
+    if (/卷纲|大纲|分卷规划|卷规划/.test(compactText)) return "volume_outline";
+    if (/创作规则|书籍规则|规则/.test(compactText)) return "book_rules";
+    if (/当前状态|初始状态|状态卡/.test(compactText)) return "current_state";
+    if (/待回收伏笔|伏笔池|初始伏笔|伏笔/.test(compactText)) return "pending_hooks";
+    if (/题材架构|类型架构/.test(compactText)) return "genre_architecture";
+    if (/世界发动机|世界引擎/.test(compactText)) return "world_engine";
+    if (/反派结构|反派地图|反派图谱/.test(compactText)) return "antagonist_map";
+    if (/人物动机矩阵|动机矩阵|角色动机矩阵/.test(compactText)) return "motivation_matrix";
+    if (/前(?:10|十)章规划|前(?:10|十)章计划|前(?:10|十)章章节表/.test(compactText)) return "first_10_chapter_plan";
+    if (/结构信号|书级结构信号/.test(compactText)) return "structure_signals";
+
+    const normalized = name
       .normalize("NFKC")
       .toLowerCase()
       .replace(/[`"'*_]/g, " ")
       .replace(/[^a-z0-9]+/g, "_")
       .replace(/^_+|_+$/g, "");
+    const aliases: Record<string, string> = {
+      outline: "volume_outline",
+      volume_plan: "volume_outline",
+      volume_planning: "volume_outline",
+      rules: "book_rules",
+      initial_state: "current_state",
+      initial_hooks: "pending_hooks",
+      hooks: "pending_hooks",
+      genre: "genre_architecture",
+      genre_profile: "genre_architecture",
+      world_rules: "world_engine",
+      worldbuilding_engine: "world_engine",
+      antagonist_structure: "antagonist_map",
+      antagonist_profile: "antagonist_map",
+      character_motivation_matrix: "motivation_matrix",
+      character_matrix_source: "motivation_matrix",
+      first_10_chapters_plan: "first_10_chapter_plan",
+      first10_chapter_plan: "first_10_chapter_plan",
+      first_ten_chapter_plan: "first_10_chapter_plan",
+      first_ten_chapters: "first_10_chapter_plan",
+      structure_signal: "structure_signals",
+      structure_signals_json: "structure_signals",
+      signals: "structure_signals",
+    };
+    return aliases[normalized] ?? normalized;
   }
 
   private stripTrailingAssistantCoda(section: string): string {

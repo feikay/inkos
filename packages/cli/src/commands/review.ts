@@ -3,6 +3,7 @@ import {
   StateManager,
   chapterNumberPrefix,
   chatCompletion,
+  buildLengthSpec,
   createLLMClient,
   countChapterLength,
   formatLengthCount,
@@ -16,9 +17,14 @@ import {
   inspectStructureSignals,
   validateStructureSignalsFull,
   appendStructureSignal,
+  parseChapterScopeBoundaries,
+  evaluateChapterScopeGate,
+  buildChapterScopeConstraintBlock,
+  buildStructureSignalsScopeConstraint,
   type StructureSignals,
   type StructureSignalsReadResult,
   type InspectStructureSignalsResult,
+  type ChapterScopeGateResult,
   renderContinuityMarkdown,
   renderFanqieQualityMarkdown,
   buildNumericExpressionGuidance,
@@ -240,6 +246,8 @@ reviewCommand
           qualityPassThreshold,
           qualityAcceptThreshold,
           minChapterWords,
+          targetChapterWords: book.chapterWordCount ?? 3000,
+          language: book.language ?? "zh",
           maxFixAttempts,
           json: Boolean(opts.json),
         });
@@ -811,7 +819,7 @@ reviewCommand
   .action(async (opts) => {
     try {
       const root = findProjectRoot();
-      const runtime = await loadContinuityRuntime(true);
+      const runtime = await loadContinuityRuntime(false);
       const book = await resolveContinuityBook(root, opts.book);
       const range = resolveContinuityRange(opts);
       const maxFixAttempts = parseNonNegativeInt(opts.maxFixAttempts, "--max-fix-attempts");
@@ -841,8 +849,8 @@ reviewCommand
           bookId: book.id,
           bookDir: book.dir,
           chapter,
-          client: runtime.client!,
-          model: runtime.model!,
+          client: runtime.client,
+          model: runtime.model,
           maxFixAttempts,
           maxPolishAttempts,
           maxQualityFixAttempts,
@@ -853,6 +861,8 @@ reviewCommand
           structurePassThreshold,
           structureAcceptThreshold,
           minChapterWords,
+          targetChapterWords: book.chapterWordCount ?? 3000,
+          language: book.language ?? "zh",
           acceptManualContinuity: Boolean(opts.acceptManualContinuity),
           continuityOverridePass: Boolean(opts.continuityOverridePass),
           json: Boolean(opts.json),
@@ -1064,6 +1074,8 @@ function renderReviewGroups(
 interface ContinuityBookRef {
   readonly id: string;
   readonly dir: string;
+  readonly chapterWordCount?: number;
+  readonly language?: "zh" | "en";
 }
 
 interface ContinuityChapterFile {
@@ -1111,6 +1123,7 @@ interface FanqiePolishCommandResult {
   readonly finalReportJsonPath: string;
   readonly finalReportMarkdownPath: string;
   readonly blockedByContinuity: boolean;
+  readonly blockedByLength?: boolean;
 }
 
 interface ContinuityFixResult {
@@ -1145,8 +1158,22 @@ interface ContinuityBatchStop {
 
 type ContinuityBodySource = "fixed" | "salvaged" | "polished" | "original";
 
-type PublishReadyStatus = "READY_TO_EXPORT" | "READY_WITH_WARNINGS" | "BLOCKED_BY_CONTINUITY" | "BLOCKED_BY_QUALITY" | "BLOCKED_BY_RESOURCE" | "QUALITY_MANUAL_REVIEW" | "NEED_REWRITE" | "MANUAL_REVIEW";
+type PublishReadyStatus = "READY_TO_EXPORT" | "READY_WITH_WARNINGS" | "BLOCKED_BY_CONTINUITY" | "BLOCKED_BY_QUALITY" | "BLOCKED_BY_LENGTH" | "BLOCKED_BY_SCOPE" | "BLOCKED_BY_RESOURCE" | "QUALITY_MANUAL_REVIEW" | "NEED_REWRITE" | "MANUAL_REVIEW" | "BLOCKED_BY_AUDIT" | "BLOCKED_BY_STATE" | "BLOCKED_BY_PLANNING";
 export type PublishQualityDecision = "QUALITY_PASS" | "QUALITY_WARN_POLISH_OPTIONAL" | "QUALITY_MANUAL_REVIEW" | "NEED_REWRITE";
+
+type PublishReadyLengthStatus = "PASS" | "WARN" | "FAIL";
+
+interface PublishReadyLengthGate {
+  readonly status: PublishReadyLengthStatus;
+  readonly count: number;
+  readonly target: number;
+  readonly soft_min: number;
+  readonly soft_max: number;
+  readonly hard_min: number;
+  readonly hard_max: number;
+  readonly counting_mode: string;
+  readonly summary: string;
+}
 
 interface ReviewedChapterSource {
   readonly path: string;
@@ -1192,6 +1219,10 @@ interface PublishReadyResult {
   readonly source_file?: string;
   readonly word_count?: number;
   readonly min_chapter_words: number;
+  readonly target_chapter_words?: number;
+  readonly max_chapter_words?: number;
+  readonly length_gate?: PublishReadyLengthGate;
+  readonly scope_gate?: ChapterScopeGateResult;
   readonly report_json_path: string;
   readonly report_markdown_path: string;
   readonly story_effectiveness?: {
@@ -1275,8 +1306,8 @@ async function runPublishReadyChapter(params: {
   readonly bookId: string;
   readonly bookDir: string;
   readonly chapter: number;
-  readonly client: ReturnType<typeof createClient>;
-  readonly model: string;
+  readonly client?: ReturnType<typeof createClient>;
+  readonly model?: string;
   readonly maxFixAttempts: number;
   readonly maxPolishAttempts: number;
   readonly maxQualityFixAttempts: number;
@@ -1287,6 +1318,8 @@ async function runPublishReadyChapter(params: {
   readonly structurePassThreshold: number;
   readonly structureAcceptThreshold: number;
   readonly minChapterWords: number;
+  readonly targetChapterWords: number;
+  readonly language: "zh" | "en";
   readonly acceptManualContinuity: boolean;
   readonly continuityOverridePass: boolean;
   readonly json: boolean;
@@ -1342,6 +1375,10 @@ async function runPublishReadyChapter(params: {
   const first = await runPublishReadyChapterOnce(params);
   if (!shouldRunPublishReadyPlotAutoFix(first, params.maxPlotFixAttempts)) return first;
 
+  if (!params.client || !params.model) {
+    throw new Error("INKOS_LLM_API_KEY not set. Run 'inkos config set-global' or add it to project .env file.");
+  }
+
   if (!params.json) {
     log("");
     log("structure precheck:");
@@ -1373,6 +1410,8 @@ async function runPublishReadyChapter(params: {
     model: params.model,
     maxPlotFixAttempts: params.maxPlotFixAttempts,
     json: params.json,
+    targetChapterWords: params.targetChapterWords,
+    language: params.language,
   });
   if (!params.json) {
     if (fixed.input_file) log(`input: ${fixed.input_file}`);
@@ -1503,8 +1542,8 @@ async function runPublishReadyChapterOnce(params: {
   readonly bookId: string;
   readonly bookDir: string;
   readonly chapter: number;
-  readonly client: ReturnType<typeof createClient>;
-  readonly model: string;
+  readonly client?: ReturnType<typeof createClient>;
+  readonly model?: string;
   readonly maxFixAttempts: number;
   readonly maxPolishAttempts: number;
   readonly maxQualityFixAttempts: number;
@@ -1515,6 +1554,8 @@ async function runPublishReadyChapterOnce(params: {
   readonly structurePassThreshold: number;
   readonly structureAcceptThreshold: number;
   readonly minChapterWords: number;
+  readonly targetChapterWords: number;
+  readonly language: "zh" | "en";
   readonly acceptManualContinuity: boolean;
   readonly continuityOverridePass: boolean;
   readonly json: boolean;
@@ -1544,25 +1585,37 @@ async function runPublishReadyChapterOnce(params: {
   const resourceBlocked = !ignoreStaleResourceReport && (resourceReport?.blocking === true || resourceReport?.closureStatus === "resource_failed");
   const chapterBlocked = !ignoreStaleResourceReport && resourceReport?.status && ["BLOCKED_BY_RESOURCE_PLAN", "BLOCKED"].includes(String(resourceReport.status));
 
-  // Also check chapter index status: state-degraded / blocked-resource-plan block even if resource report is missing or non-blocking
-  const chapterIndexBlocked = chapterStatus === "state-degraded" || chapterStatus === "blocked-resource-plan";
+  let publishBlockedStatus: "BLOCKED_BY_AUDIT" | "BLOCKED_BY_STATE" | "BLOCKED_BY_PLANNING" | "BLOCKED_BY_RESOURCE" | null = null;
+  const warnings: string[] = [];
 
-  if (resourceBlocked || chapterBlocked || chapterIndexBlocked) {
-    const warnings: string[] = [];
+  if (chapterStatus === "audit-failed") {
+    publishBlockedStatus = "BLOCKED_BY_AUDIT";
+    warnings.push(`Chapter ${params.chapter} is audit-failed. Fix audit issues before publishing.`);
+  } else if (chapterStatus === "state-degraded") {
+    publishBlockedStatus = "BLOCKED_BY_STATE";
+    warnings.push(`Chapter ${params.chapter} is state-degraded. Revert or repair state before publishing.`);
+  } else if (chapterStatus === "planning-degraded") {
+    publishBlockedStatus = "BLOCKED_BY_PLANNING";
+    warnings.push(`Chapter ${params.chapter} is planning-degraded. Align plan before publishing.`);
+  } else if (resourceBlocked || chapterBlocked || chapterStatus === "blocked-resource-plan") {
+    publishBlockedStatus = "BLOCKED_BY_RESOURCE";
     if (resourceBlocked || chapterBlocked) {
       warnings.push(
         `Resource consistency check: blocking=${resourceReport?.blocking ?? false}, closureStatus=${resourceReport?.closureStatus ?? "unknown"}. Fix resource issues before publishing.`,
       );
     }
-    if (chapterIndexBlocked) {
+    if (chapterStatus === "blocked-resource-plan") {
       warnings.push(
         `Chapter index status is "${chapterStatus}". Chapter must be repaired before publishing.`,
       );
     }
+  }
+
+  if (publishBlockedStatus) {
     return writePublishReadyReport(params.bookDir, {
       book: params.bookId,
       chapter_index: params.chapter,
-      publish_status: "BLOCKED_BY_RESOURCE",
+      publish_status: publishBlockedStatus,
       final_candidate_file: "",
       source_chain: [...sourceChain],
       continuity: { final_status: "UNKNOWN" },
@@ -1575,6 +1628,10 @@ async function runPublishReadyChapterOnce(params: {
     });
   }
 
+  if (!params.client || !params.model) {
+    throw new Error("INKOS_LLM_API_KEY not set. Run 'inkos config set-global' or add it to project .env file.");
+  }
+
   let candidateOverride: string | undefined = await resolvePublishReadyStartingCandidate(
     params.bookDir,
     params.chapter,
@@ -1583,7 +1640,7 @@ async function runPublishReadyChapterOnce(params: {
   );
   if (candidateOverride === original.file) candidateOverride = undefined;
   if (params.continuityOverridePass) {
-    const overrideResult = await runPublishReadyWithContinuityOverride(params, sourceChain);
+    const overrideResult = await runPublishReadyWithContinuityOverride(params as any, sourceChain);
     if (overrideResult) return overrideResult;
     return writePublishReadyReport(params.bookDir, {
       book: params.bookId,
@@ -1601,7 +1658,7 @@ async function runPublishReadyChapterOnce(params: {
     });
   }
   if (!skipAcceptedExistingCandidate) {
-    const existingReady = await tryWriteAcceptedExistingCandidate(params, candidateOverride ?? original.file, sourceChain);
+    const existingReady = await tryWriteAcceptedExistingCandidate(params as any, candidateOverride ?? original.file, sourceChain);
     if (existingReady) return existingReady;
   }
   let continuity: ContinuityCommandResult | undefined;
@@ -1610,13 +1667,13 @@ async function runPublishReadyChapterOnce(params: {
   let qualityStatus: "QUALITY_PASS" | "QUALITY_WARN_POLISH_OPTIONAL" | "QUALITY_MANUAL_REVIEW" | undefined;
   let qualityCandidate: string | undefined;
   let manualContinuityAcceptance: PublishReadyManualContinuityAcceptance | undefined;
-
+ 
   for (let loop = 1; loop <= 2; loop += 1) {
     if (!params.json) {
       log("");
       log(loop === 1 ? "step 1 continuity:" : `loop ${loop} continuity:`);
     }
-    const continuityResult = await runContinuityPublishPass(params, candidateOverride, sourceChain);
+    const continuityResult = await runContinuityPublishPass(params as any, candidateOverride, sourceChain);
     continuity = continuityResult.final;
     continuityReport = continuityResult.report;
     sourceChain.add(relative(params.bookDir, continuity.sourceFile));
@@ -1686,23 +1743,22 @@ async function runPublishReadyChapterOnce(params: {
         log("step 2.5 structure precheck:");
       }
 
-      // Load book-level structure signals for structure review
+      // Load book-level structure signals and chapter intent for structure review
       const signalsResult = await readStructureSignals(params.bookDir);
       let activeSignals: StructureSignals | undefined =
         signalsResult.status === "ok" ? signalsResult.signals : undefined;
 
-      if (activeSignals) {
-        const intentPrefix = chapterNumberPrefix(params.chapter);
-        try {
-          const intentPath = join(params.bookDir, "story", "runtime", "chapter-intents", `${intentPrefix}.md`);
-          const intentContent = await readFile(intentPath, "utf-8").catch(() => "");
-          if (intentContent) {
-            const merged = mergeIntentSignals(activeSignals, intentContent);
-            if (merged) activeSignals = merged;
-          }
-        } catch {
-          // ignore
-        }
+      const intentPrefix = chapterNumberPrefix(params.chapter);
+      let chapterIntentContent = "";
+      try {
+        const intentPath = join(params.bookDir, "story", "runtime", "chapter-intents", `${intentPrefix}.md`);
+        chapterIntentContent = await readFile(intentPath, "utf-8").catch(() => "");
+      } catch {
+        // ignore
+      }
+      if (activeSignals && chapterIntentContent) {
+        const merged = mergeIntentSignals(activeSignals, chapterIntentContent);
+        if (merged) activeSignals = merged;
       }
 
       if (!params.json) {
@@ -1763,6 +1819,12 @@ async function runPublishReadyChapterOnce(params: {
           } as any,
           sixStepReport: sixStepReport as any,
           storyEffectivenessReport: seReport as any,
+          lengthConstraint: buildRepairLengthConstraint({
+            chapterText: currentText,
+            targetChapterWords: params.targetChapterWords,
+            language: params.language,
+          }),
+          scopeConstraint: buildRepairScopeConstraint(chapterIntentContent),
         });
 
         plotFixedFile = plotFixedPath;
@@ -1836,10 +1898,33 @@ async function runPublishReadyChapterOnce(params: {
       const finalFile = await writeReviewedFinalChapter(params.bookDir, params.chapter, continuity.sourceFile);
       sourceChain.add(relative(params.bookDir, finalFile));
       const readyToExport = isReadyToExport(continuityReport, immediateQualityDecision, finalFile, params.minChapterWords, Boolean(manualContinuityAcceptance));
+      const lengthGate = await checkPublishReadyFinalLength({
+        file: finalFile,
+        targetChapterWords: params.targetChapterWords,
+        language: params.language,
+      });
+      const lengthDecision = applyPublishReadyLengthGate(
+        readyToExport ? publishStatusForQualityDecision(immediateQualityDecision) : "MANUAL_REVIEW",
+        qualityWarnings(immediateQualityDecision, quality.report.quality_score, params.qualityPassThreshold),
+        lengthGate,
+      );
+      const finalText = await readFile(finalFile, "utf-8");
+      const scopeGate = await evaluatePublishReadyScopeGate({
+        bookDir: params.bookDir,
+        chapter: params.chapter,
+        finalText,
+        originalText: await readFile(original.file, "utf-8").catch(() => undefined),
+        language: params.language,
+      });
+      const scopeDecision = applyPublishReadyScopeGate(
+        lengthDecision.publishStatus,
+        lengthDecision.warnings,
+        scopeGate,
+      );
       return writePublishReadyReport(params.bookDir, {
         book: params.bookId,
         chapter_index: params.chapter,
-        publish_status: readyToExport ? publishStatusForQualityDecision(immediateQualityDecision) : "MANUAL_REVIEW",
+        publish_status: scopeDecision.publishStatus,
         final_candidate_file: relative(params.bookDir, finalFile),
         source_chain: [...sourceChain],
         continuity: { final_status: continuityReport.final_status, score: continuityReport.score },
@@ -1851,11 +1936,15 @@ async function runPublishReadyChapterOnce(params: {
         structure_pass_threshold: params.structurePassThreshold,
         structure_accept_threshold: params.structureAcceptThreshold,
         accepted_reason: immediateQualityDecision === "QUALITY_WARN_POLISH_OPTIONAL" ? "quality score is publishable with optional polish" : undefined,
-        warnings: qualityWarnings(immediateQualityDecision, quality.report.quality_score, params.qualityPassThreshold),
+        warnings: scopeDecision.warnings,
         ...manualContinuityAcceptance,
         source_file: relative(params.bookDir, continuity.sourceFile),
-        word_count: continuityReport.word_count,
+        word_count: lengthGate.count,
         min_chapter_words: params.minChapterWords,
+        target_chapter_words: params.targetChapterWords,
+        max_chapter_words: lengthGate.hard_max,
+        length_gate: lengthGate,
+        scope_gate: scopeGate,
         report_json_path: "",
         report_markdown_path: "",
       });
@@ -1877,9 +1966,14 @@ async function runPublishReadyChapterOnce(params: {
         currentOverridePath: qualityCandidate,
         qualityPassThreshold: params.qualityPassThreshold,
         qualityAcceptThreshold: params.qualityAcceptThreshold,
+        targetChapterWords: params.targetChapterWords,
+        language: params.language,
       });
       qualityStatus = polished.finalQualityStatus;
-      if (polished.usedPolishedFile) {
+      if (polished.blockedByLength) {
+        if (!params.json) log("polish blocked by length gate. Using pre-polish candidate.");
+        // Do NOT upgrade qualityCandidate to the length-exceeding polished file
+      } else if (polished.usedPolishedFile) {
         const polishedPath = resolveUsedFilePath(params.bookDir, polished.usedPolishedFile);
         if (polishedPath) {
           qualityCandidate = polishedPath;
@@ -1951,6 +2045,8 @@ async function runPublishReadyChapterOnce(params: {
             qualityPassThreshold: params.qualityPassThreshold,
             qualityAcceptThreshold: params.qualityAcceptThreshold,
             minChapterWords: params.minChapterWords,
+            targetChapterWords: params.targetChapterWords,
+            language: params.language,
             maxFixAttempts: params.maxFixAttempts,
             json: params.json,
           });
@@ -1972,7 +2068,7 @@ async function runPublishReadyChapterOnce(params: {
       log("step 4 continuity recheck:");
       log(`input: ${relative(params.bookDir, qualityCandidate)}`);
     }
-    const recheck = await runContinuityPublishPass(params, qualityCandidate, sourceChain);
+    const recheck = await runContinuityPublishPass(params as any, qualityCandidate, sourceChain);
     continuity = recheck.final;
     continuityReport = recheck.report;
     sourceChain.add(relative(params.bookDir, continuity.sourceFile));
@@ -2018,12 +2114,36 @@ async function runPublishReadyChapterOnce(params: {
       const qualityDecision = decidePublishQuality(qualityScore, params.qualityPassThreshold, params.qualityAcceptThreshold);
       qualityStatus = qualityFinalStatusFromDecision(qualityDecision);
       const readyToExport = isReadyToExport(continuityReport, qualityDecision, finalFile, params.minChapterWords, Boolean(manualContinuityAcceptance));
+      const lengthGate = await checkPublishReadyFinalLength({
+        file: finalFile,
+        targetChapterWords: params.targetChapterWords,
+        language: params.language,
+      });
+      const basePublishStatus: PublishReadyStatus = readyToExport
+        ? publishStatusForQualityDecision(qualityDecision)
+        : qualityDecision === "NEED_REWRITE" ? "NEED_REWRITE" : "MANUAL_REVIEW";
+      const lengthDecision = applyPublishReadyLengthGate(
+        basePublishStatus,
+        qualityWarnings(qualityDecision, qualityScore, params.qualityPassThreshold),
+        lengthGate,
+      );
+      const loopFinalText = await readFile(finalFile, "utf-8");
+      const scopeGate = await evaluatePublishReadyScopeGate({
+        bookDir: params.bookDir,
+        chapter: params.chapter,
+        finalText: loopFinalText,
+        originalText: await readFile(original.file, "utf-8").catch(() => undefined),
+        language: params.language,
+      });
+      const scopeDecision = applyPublishReadyScopeGate(
+        lengthDecision.publishStatus,
+        lengthDecision.warnings,
+        scopeGate,
+      );
       return writePublishReadyReport(params.bookDir, {
         book: params.bookId,
         chapter_index: params.chapter,
-        publish_status: readyToExport
-          ? publishStatusForQualityDecision(qualityDecision)
-          : qualityDecision === "NEED_REWRITE" ? "NEED_REWRITE" : "MANUAL_REVIEW",
+        publish_status: scopeDecision.publishStatus,
         final_candidate_file: relative(params.bookDir, finalFile),
         source_chain: [...sourceChain],
         continuity: { final_status: continuityReport.final_status, score: continuityReport.score },
@@ -2035,11 +2155,15 @@ async function runPublishReadyChapterOnce(params: {
         structure_pass_threshold: params.structurePassThreshold,
         structure_accept_threshold: params.structureAcceptThreshold,
         accepted_reason: qualityDecision === "QUALITY_WARN_POLISH_OPTIONAL" ? "quality score is publishable with optional polish" : undefined,
-        warnings: qualityWarnings(qualityDecision, qualityScore, params.qualityPassThreshold),
+        warnings: scopeDecision.warnings,
         ...manualContinuityAcceptance,
         source_file: relative(params.bookDir, continuity.sourceFile),
-        word_count: continuityReport.word_count,
+        word_count: lengthGate.count,
         min_chapter_words: params.minChapterWords,
+        target_chapter_words: params.targetChapterWords,
+        max_chapter_words: lengthGate.hard_max,
+        length_gate: lengthGate,
+        scope_gate: scopeGate,
         report_json_path: "",
         report_markdown_path: "",
       });
@@ -2098,6 +2222,8 @@ async function runPublishReadyWithContinuityOverride(
     readonly qualityPassThreshold: number;
     readonly qualityAcceptThreshold: number;
     readonly minChapterWords: number;
+    readonly targetChapterWords: number;
+    readonly language: "zh" | "en";
     readonly json: boolean;
   },
   sourceChain: Set<string>,
@@ -2167,13 +2293,27 @@ async function runPublishReadyWithContinuityOverride(
   const finalFile = await writeReviewedFinalChapter(params.bookDir, params.chapter, candidateSource);
   sourceChain.add(relative(params.bookDir, finalFile));
   const readyToExport = isReadyToExport(override.report, qualityDecision, finalFile, params.minChapterWords);
+  const lengthGate = await checkPublishReadyFinalLength({
+    file: finalFile,
+    targetChapterWords: params.targetChapterWords,
+    language: params.language,
+  });
+  const lengthDecision = applyPublishReadyLengthGate(
+    readyToExport ? publishStatusForQualityDecision(qualityDecision) : "MANUAL_REVIEW",
+    qualityWarnings(qualityDecision, qualityScore, params.qualityPassThreshold),
+    lengthGate,
+  );
   return writePublishReadyReport(params.bookDir, {
     ...common,
-    publish_status: readyToExport ? publishStatusForQualityDecision(qualityDecision) : "MANUAL_REVIEW",
+    publish_status: lengthDecision.publishStatus,
     final_candidate_file: relative(params.bookDir, finalFile),
     source_chain: [...sourceChain],
     accepted_reason: qualityDecision === "QUALITY_WARN_POLISH_OPTIONAL" ? "quality score is publishable with optional polish" : undefined,
-    warnings: qualityWarnings(qualityDecision, qualityScore, params.qualityPassThreshold),
+    warnings: lengthDecision.warnings,
+    word_count: lengthGate.count,
+    target_chapter_words: params.targetChapterWords,
+    max_chapter_words: lengthGate.hard_max,
+    length_gate: lengthGate,
   });
 }
 
@@ -2404,6 +2544,226 @@ async function writeReviewedFinalChapter(bookDir: string, chapter: number, sourc
   return outFile;
 }
 
+export function evaluatePublishReadyLengthGate(params: {
+  readonly text: string;
+  readonly targetChapterWords: number;
+  readonly language: "zh" | "en";
+}): PublishReadyLengthGate {
+  const spec = buildLengthSpec(params.targetChapterWords, params.language);
+  const count = countChapterLength(params.text, spec.countingMode);
+  const countText = formatLengthCount(count, spec.countingMode);
+  const targetText = formatLengthCount(spec.target, spec.countingMode);
+  const hardMinText = formatLengthCount(spec.hardMin, spec.countingMode);
+  const hardMaxText = formatLengthCount(spec.hardMax, spec.countingMode);
+  const softMinText = formatLengthCount(spec.softMin, spec.countingMode);
+  const softMaxText = formatLengthCount(spec.softMax, spec.countingMode);
+
+  if (count < spec.hardMin || count > spec.hardMax) {
+    return {
+      status: "FAIL",
+      count,
+      target: spec.target,
+      soft_min: spec.softMin,
+      soft_max: spec.softMax,
+      hard_min: spec.hardMin,
+      hard_max: spec.hardMax,
+      counting_mode: spec.countingMode,
+      summary: `final length ${countText} is outside hard range ${hardMinText}-${hardMaxText} (target ${targetText}).`,
+    };
+  }
+
+  if (count < spec.softMin || count > spec.softMax) {
+    return {
+      status: "WARN",
+      count,
+      target: spec.target,
+      soft_min: spec.softMin,
+      soft_max: spec.softMax,
+      hard_min: spec.hardMin,
+      hard_max: spec.hardMax,
+      counting_mode: spec.countingMode,
+      summary: `final length ${countText} is outside soft range ${softMinText}-${softMaxText} (target ${targetText}).`,
+    };
+  }
+
+  return {
+    status: "PASS",
+    count,
+    target: spec.target,
+    soft_min: spec.softMin,
+    soft_max: spec.softMax,
+    hard_min: spec.hardMin,
+    hard_max: spec.hardMax,
+    counting_mode: spec.countingMode,
+    summary: `final length ${countText} is within target range.`,
+  };
+}
+
+/**
+ * Build a length constraint block for inclusion in repair prompts.
+ */
+function buildRepairLengthConstraint(params: {
+  readonly chapterText: string;
+  readonly targetChapterWords: number;
+  readonly language: "zh" | "en";
+}): string {
+  const spec = buildLengthSpec(params.targetChapterWords, params.language);
+  const currentCount = countChapterLength(params.chapterText, spec.countingMode);
+  const currentText = formatLengthCount(currentCount, spec.countingMode);
+  const targetText = formatLengthCount(spec.target, spec.countingMode);
+  const softMinText = formatLengthCount(spec.softMin, spec.countingMode);
+  const softMaxText = formatLengthCount(spec.softMax, spec.countingMode);
+  const hardMaxText = formatLengthCount(spec.hardMax, spec.countingMode);
+  const overSoft = currentCount > spec.softMax;
+
+  return `【字数约束】
+- 目标字数：${targetText}
+- 允许区间：${softMinText}–${softMaxText}
+- 硬上限：${hardMaxText}（严禁超过）
+- 当前候选字数：${currentText}
+${overSoft ? "- 当前已超过软上限，修复时必须优先压缩，不得继续扩写。\n" : ""}- 修复后输出不得超过硬上限 ${hardMaxText}。
+- 禁止通过增加新支线、新人物、新场景来填充字数。`;
+}
+
+/**
+ * Load chapter intent content for scope constraint building.
+ */
+async function loadChapterIntentContent(bookDir: string, chapter: number): Promise<string> {
+  const intentPath = join(bookDir, "story", "runtime", "chapter-intents", `${chapterNumberPrefix(chapter)}.md`);
+  try {
+    return await readFile(intentPath, "utf-8");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Build a scope constraint block for inclusion in repair prompts.
+ */
+function buildRepairScopeConstraint(intentContent: string): string {
+  if (!intentContent.trim()) return "";
+  const boundaries = parseChapterScopeBoundaries(intentContent);
+  return buildChapterScopeConstraintBlock(boundaries);
+}
+
+/**
+ * Build a structure signals scope constraint block.
+ */
+function buildRepairSignalsScopeConstraint(intentContent: string): string {
+  if (!intentContent.trim()) return "";
+  return buildStructureSignalsScopeConstraint(intentContent);
+}
+
+/**
+ * Check if a repair output exceeds hardMax and should be blocked.
+ */
+function isRepairLengthBlocked(params: {
+  readonly outputText: string;
+  readonly targetChapterWords: number;
+  readonly language: "zh" | "en";
+}): boolean {
+  const spec = buildLengthSpec(params.targetChapterWords, params.language);
+  const count = countChapterLength(params.outputText, spec.countingMode);
+  return count > spec.hardMax;
+}
+
+async function checkPublishReadyFinalLength(params: {
+  readonly file: string;
+  readonly targetChapterWords: number;
+  readonly language: "zh" | "en";
+}): Promise<PublishReadyLengthGate> {
+  return evaluatePublishReadyLengthGate({
+    text: await readFile(params.file, "utf-8"),
+    targetChapterWords: params.targetChapterWords,
+    language: params.language,
+  });
+}
+
+export function applyPublishReadyLengthGate(
+  publishStatus: PublishReadyStatus,
+  existingWarnings: ReadonlyArray<string> | undefined,
+  gate: PublishReadyLengthGate,
+): { readonly publishStatus: PublishReadyStatus; readonly warnings: ReadonlyArray<string> | undefined } {
+  const warnings = [...(existingWarnings ?? [])];
+  if (gate.status === "FAIL") {
+    warnings.push(`length_gate: ${gate.summary}`);
+    const hardBlocked = publishStatus === "BLOCKED_BY_RESOURCE"
+      || publishStatus === "BLOCKED_BY_CONTINUITY"
+      || publishStatus === "BLOCKED_BY_QUALITY"
+      || publishStatus === "NEED_REWRITE";
+    return {
+      publishStatus: hardBlocked ? publishStatus : "BLOCKED_BY_LENGTH",
+      warnings: [...new Set(warnings)],
+    };
+  }
+  if (gate.status === "WARN") {
+    warnings.push(`length_gate: ${gate.summary}`);
+    const nextStatus = publishStatus === "READY_TO_EXPORT" ? "READY_WITH_WARNINGS" : publishStatus;
+    return { publishStatus: nextStatus, warnings: [...new Set(warnings)] };
+  }
+  return { publishStatus, warnings: warnings.length ? [...new Set(warnings)] : existingWarnings };
+}
+
+export function applyPublishReadyScopeGate(
+  publishStatus: PublishReadyStatus,
+  existingWarnings: ReadonlyArray<string> | undefined,
+  gate: ChapterScopeGateResult | undefined,
+): { readonly publishStatus: PublishReadyStatus; readonly warnings: ReadonlyArray<string> | undefined } {
+  if (!gate || gate.status === "PASS") {
+    return { publishStatus, warnings: existingWarnings };
+  }
+  const warnings = [...(existingWarnings ?? [])];
+  warnings.push(`scope_gate: ${gate.summary}`);
+  if (gate.status === "FAIL") {
+    const hardBlocked = publishStatus === "BLOCKED_BY_RESOURCE"
+      || publishStatus === "BLOCKED_BY_CONTINUITY"
+      || publishStatus === "BLOCKED_BY_QUALITY"
+      || publishStatus === "BLOCKED_BY_LENGTH"
+      || publishStatus === "NEED_REWRITE";
+    return {
+      publishStatus: hardBlocked ? publishStatus : "BLOCKED_BY_SCOPE",
+      warnings: [...new Set(warnings)],
+    };
+  }
+  if (gate.status === "WARN") {
+    const nextStatus = publishStatus === "READY_TO_EXPORT" ? "READY_WITH_WARNINGS" : publishStatus;
+    return { publishStatus: nextStatus, warnings: [...new Set(warnings)] };
+  }
+  return { publishStatus, warnings: warnings.length ? [...new Set(warnings)] : existingWarnings };
+}
+
+/**
+ * Evaluate chapter scope gate against a final candidate.
+ * Loads intent, pending hooks, and compares final text against original.
+ */
+async function evaluatePublishReadyScopeGate(params: {
+  readonly bookDir: string;
+  readonly chapter: number;
+  readonly finalText: string;
+  readonly originalText?: string;
+  readonly language: "zh" | "en";
+}): Promise<ChapterScopeGateResult> {
+  const intentContent = await loadChapterIntentContent(params.bookDir, params.chapter);
+  if (!intentContent.trim()) {
+    return { status: "PASS", issues: [], summary: "no chapter intent found; scope gate skipped." };
+  }
+
+  let pendingHooksContent = "";
+  try {
+    pendingHooksContent = await readFile(join(params.bookDir, "story", "pending_hooks.md"), "utf-8");
+  } catch {
+    // no pending hooks file
+  }
+
+  return evaluateChapterScopeGate({
+    intentContent,
+    chapterText: params.finalText,
+    pendingHooksContent,
+    chapterNumber: params.chapter,
+    previousChapterText: params.originalText,
+  });
+}
+
 async function getFileMtime(file: string): Promise<number> {
   try {
     const s = await stat(file);
@@ -2497,9 +2857,11 @@ async function tryWriteAcceptedExistingCandidate(
     readonly bookId: string;
     readonly bookDir: string;
     readonly chapter: number;
-    readonly qualityPassThreshold: number;
-    readonly qualityAcceptThreshold: number;
-    readonly minChapterWords: number;
+  readonly qualityPassThreshold: number;
+  readonly qualityAcceptThreshold: number;
+  readonly minChapterWords: number;
+  readonly targetChapterWords: number;
+  readonly language: "zh" | "en";
   },
   candidateFile: string,
   sourceChain: Set<string>,
@@ -2517,14 +2879,27 @@ async function tryWriteAcceptedExistingCandidate(
   if (!Number.isFinite(wordCount) || wordCount < params.minChapterWords) return null;
   if (qualityDecision !== "QUALITY_PASS" && qualityDecision !== "QUALITY_WARN_POLISH_OPTIONAL") return null;
   if (!existsSync(candidateFile)) return null;
+  // Do not short-circuit if the previous publish report was not exportable (e.g. MANUAL_REVIEW
+  // due to structure scores below threshold). Re-running without changes must not bypass gates.
+  if (publishReport?.publish_status && !isExportablePublishStatus(String(publishReport.publish_status))) return null;
 
   sourceChain.add(relative(params.bookDir, candidateFile));
   const finalFile = await writeReviewedFinalChapter(params.bookDir, params.chapter, candidateFile);
   sourceChain.add(relative(params.bookDir, finalFile));
+  const lengthGate = await checkPublishReadyFinalLength({
+    file: finalFile,
+    targetChapterWords: params.targetChapterWords,
+    language: params.language,
+  });
+  const lengthDecision = applyPublishReadyLengthGate(
+    publishStatusForQualityDecision(qualityDecision),
+    qualityWarnings(qualityDecision, qualityScore, params.qualityPassThreshold),
+    lengthGate,
+  );
   return writePublishReadyReport(params.bookDir, {
     book: params.bookId,
     chapter_index: params.chapter,
-    publish_status: publishStatusForQualityDecision(qualityDecision),
+    publish_status: lengthDecision.publishStatus,
     final_candidate_file: relative(params.bookDir, finalFile),
     source_chain: [...sourceChain],
     continuity: { final_status: "PASS", score: publishReport?.continuity?.score ?? continuityReport?.score },
@@ -2534,10 +2909,13 @@ async function tryWriteAcceptedExistingCandidate(
     quality_pass_threshold: params.qualityPassThreshold,
     quality_accept_threshold: params.qualityAcceptThreshold,
     accepted_reason: qualityDecision === "QUALITY_WARN_POLISH_OPTIONAL" ? "quality score is publishable with optional polish" : undefined,
-    warnings: qualityWarnings(qualityDecision, qualityScore, params.qualityPassThreshold),
+    warnings: lengthDecision.warnings,
     source_file: relative(params.bookDir, candidateFile),
-    word_count: wordCount,
+    word_count: lengthGate.count,
     min_chapter_words: params.minChapterWords,
+    target_chapter_words: params.targetChapterWords,
+    max_chapter_words: lengthGate.hard_max,
+    length_gate: lengthGate,
     report_json_path: "",
     report_markdown_path: "",
   });
@@ -2590,6 +2968,7 @@ export function applyStoryEffectivenessDecision(
   const hardBlocked = publishStatus === "BLOCKED_BY_RESOURCE"
     || publishStatus === "BLOCKED_BY_CONTINUITY"
     || publishStatus === "BLOCKED_BY_QUALITY"
+    || publishStatus === "BLOCKED_BY_LENGTH"
     || publishStatus === "NEED_REWRITE";
 
   // Never override existing hard blocks
@@ -2628,6 +3007,7 @@ export function applyGolden3ChapterDecision(
   const hardBlocked = publishStatus === "BLOCKED_BY_RESOURCE"
     || publishStatus === "BLOCKED_BY_CONTINUITY"
     || publishStatus === "BLOCKED_BY_QUALITY"
+    || publishStatus === "BLOCKED_BY_LENGTH"
     || publishStatus === "NEED_REWRITE";
 
   // Never override existing hard blocks
@@ -3105,7 +3485,10 @@ ${report.accepted_reason ? `- accepted_reason: ${report.accepted_reason}\n` : ""
 - reviewedFinalExists: ${report.reviewedFinalExists ? "true" : "false"}
 ` : ""}${report.continuityOverride ? `- continuityOverride: ${report.continuityOverride}
 - continuityOverrideReason: ${report.continuityOverrideReason ?? "n/a"}
-` : ""}${report.warnings?.length ? `- warnings:\n${report.warnings.map((warning) => `  - ${warning}`).join("\n")}\n` : ""}${report.source_file ? `- source_file: ${report.source_file}\n` : ""}- word_count: ${report.word_count ?? "n/a"}/${report.min_chapter_words}${report.story_effectiveness ? `
+` : ""}${report.warnings?.length ? `- warnings:\n${report.warnings.map((warning) => `  - ${warning}`).join("\n")}\n` : ""}${report.source_file ? `- source_file: ${report.source_file}\n` : ""}- word_count: ${report.word_count ?? "n/a"}/${report.min_chapter_words}
+- target_chapter_words: ${report.target_chapter_words ?? "n/a"}
+- max_chapter_words: ${report.max_chapter_words ?? "n/a"}${report.length_gate ? `
+- length_gate: ${report.length_gate.status} (${report.length_gate.summary})` : ""}${report.story_effectiveness ? `
 - story_effectiveness: ${report.story_effectiveness.status} (${report.story_effectiveness.score ?? "n/a"})
   ${report.story_effectiveness.summary}` : ""}${report.golden_3_chapter ? `
 - golden_3_chapter: ${report.golden_3_chapter.status} (${report.golden_3_chapter.score ?? "n/a"})
@@ -3144,6 +3527,8 @@ async function runQualityAutoFixChapter(params: {
   readonly qualityPassThreshold: number;
   readonly qualityAcceptThreshold: number;
   readonly minChapterWords: number;
+  readonly targetChapterWords: number;
+  readonly language: "zh" | "en";
   readonly maxFixAttempts: number;
   readonly json: boolean;
 }): Promise<QualityAutoFixResult> {
@@ -3196,6 +3581,17 @@ async function runQualityAutoFixChapter(params: {
   const sourceChain = new Set(context.sourceChain);
   sourceChain.add(relative(params.bookDir, context.inputFile));
 
+  // Compute length/scope constraints for quality-auto-fix
+  const qaCurrentText = await readFile(context.inputFile, "utf-8");
+  const qaLengthConstraint = buildRepairLengthConstraint({
+    chapterText: qaCurrentText,
+    targetChapterWords: params.targetChapterWords,
+    language: params.language as "zh" | "en",
+  });
+  const qaScopeContent = await loadChapterIntentContent(params.bookDir, params.chapter);
+  const qaScopeConstraint = buildRepairScopeConstraint(qaScopeContent);
+  const qaSignalsScopeConstraint = buildRepairSignalsScopeConstraint(qaScopeContent);
+
   for (let attempt = 1; attempt <= params.maxQualityFixAttempts; attempt += 1) {
     if (!params.json) log(`attempt ${attempt}/${params.maxQualityFixAttempts} -> fixing...`);
     outputFile = await writeQualityFixedChapter({
@@ -3204,8 +3600,10 @@ async function runQualityAutoFixChapter(params: {
       attempt,
       client: params.client,
       model: params.model,
-      currentText: await readFile(context.inputFile, "utf-8"),
+      currentText: qaCurrentText,
       qualityReport: context.qualityReport!,
+      lengthConstraint: `${qaLengthConstraint}\n\n${qaSignalsScopeConstraint}`,
+      scopeConstraint: qaScopeConstraint,
     });
     sourceChain.add(relative(params.bookDir, outputFile));
 
@@ -3242,12 +3640,22 @@ async function runQualityAutoFixChapter(params: {
       const finalFile = await writeReviewedFinalChapter(params.bookDir, params.chapter, continuityAfter.final.sourceFile);
       sourceChain.add(relative(params.bookDir, finalFile));
       const readyToExport = isReadyToExport(continuityAfter.report, qualityDecision, finalFile, params.minChapterWords);
+      const lengthGate = await checkPublishReadyFinalLength({
+        file: finalFile,
+        targetChapterWords: params.targetChapterWords,
+        language: params.language,
+      });
+      const lengthDecision = applyPublishReadyLengthGate(
+        readyToExport
+          ? publishStatusForQualityDecision(qualityDecision)
+          : "MANUAL_REVIEW",
+        qualityWarnings(qualityDecision, qualityAfter.report.quality_score, params.qualityPassThreshold),
+        lengthGate,
+      );
       const publish = await writePublishReadyReport(params.bookDir, {
         book: params.bookId,
         chapter_index: params.chapter,
-        publish_status: readyToExport
-          ? publishStatusForQualityDecision(qualityDecision)
-          : "MANUAL_REVIEW",
+        publish_status: lengthDecision.publishStatus,
         final_candidate_file: relative(params.bookDir, finalFile),
         source_chain: [...sourceChain],
         continuity: { final_status: continuityAfter.report.final_status, score: continuityAfter.report.score },
@@ -3257,10 +3665,13 @@ async function runQualityAutoFixChapter(params: {
         quality_pass_threshold: params.qualityPassThreshold,
         quality_accept_threshold: params.qualityAcceptThreshold,
         accepted_reason: qualityDecision === "QUALITY_WARN_POLISH_OPTIONAL" ? "quality score is publishable with optional polish" : undefined,
-        warnings: qualityWarnings(qualityDecision, qualityAfter.report.quality_score, params.qualityPassThreshold),
+        warnings: lengthDecision.warnings,
         source_file: relative(params.bookDir, continuityAfter.final.sourceFile),
-        word_count: continuityAfter.report.word_count,
+        word_count: lengthGate.count,
         min_chapter_words: params.minChapterWords,
+        target_chapter_words: params.targetChapterWords,
+        max_chapter_words: lengthGate.hard_max,
+        length_gate: lengthGate,
         report_json_path: "",
         report_markdown_path: "",
       });
@@ -3399,6 +3810,8 @@ async function writeQualityFixedChapter(params: {
   readonly model: string;
   readonly currentText: string;
   readonly qualityReport: Partial<FanqieQualityReport>;
+  readonly lengthConstraint?: string;
+  readonly scopeConstraint?: string;
 }): Promise<string> {
   const numericExpressionGuidance = buildNumericExpressionGuidance(
     await readBookNumericExpressionMode(params.bookDir),
@@ -3415,7 +3828,7 @@ async function writeQualityFixedChapter(params: {
         numericExpressionGuidance,
       ].join("\n"),
     },
-    { role: "user", content: buildQualityAutoFixPrompt(params.currentText, params.qualityReport) },
+    { role: "user", content: buildQualityAutoFixPrompt(params.currentText, params.qualityReport, params.lengthConstraint, params.scopeConstraint) },
   ], { temperature: 0.28, maxTokens: 8192, stage: "fanqie-quality" });
   const fixed = stripMarkdownCodeFence(response.content).trim();
   if (!fixed) throw new Error("quality-auto-fix returned empty chapter content");
@@ -3426,11 +3839,13 @@ async function writeQualityFixedChapter(params: {
   return outputPath;
 }
 
-function buildQualityAutoFixPrompt(currentText: string, report: Partial<FanqieQualityReport>): string {
+function buildQualityAutoFixPrompt(currentText: string, report: Partial<FanqieQualityReport>, lengthConstraint?: string, scopeConstraint?: string): string {
   const issues = (report.issues ?? []).map((issue) => `- [${issue.severity}] ${issue.type}: ${issue.detail}`).join("\n") || "- 无";
   const risks = (report.reader_drop_risks ?? []).map((item) => `- ${item}`).join("\n") || "- 无";
   const suggestions = (report.polish_suggestions ?? []).map((item) => `- ${item}`).join("\n") || "- 无";
-  return `你正在对一章“连续性已通过，但番茄质量分不足”的网文章节做定向增强。
+  const lengthBlock = lengthConstraint ? `\n${lengthConstraint}\n` : "";
+  const scopeBlock = scopeConstraint ? `\n${scopeConstraint}\n` : "";
+  return `你正在对一章"连续性已通过，但番茄质量分不足"的网文章节做定向增强。
 
 【当前章节】
 ${currentText}
@@ -3443,7 +3858,7 @@ ${risks}
 
 【优化建议】
 ${suggestions}
-
+${lengthBlock}${scopeBlock}
 【硬性要求】
 1. 不改变剧情主线。
 2. 不改变人物关系。
@@ -3453,25 +3868,25 @@ ${suggestions}
 6. 保留原文 80% 以上。
 7. 只针对报告中的问题做局部增强。
 8. 输出完整章节正文。
-
+${lengthConstraint ? "9. 严格遵守字数约束，不得超过硬上限。如当前已超软上限，优先压缩式修复。\n" : ""}${scopeConstraint ? "10. 严格遵守章节作用域约束，不提前完成下一章目标，不引入未来人物/支线。\n" : ""}
 【增强方向】
-如果问题包含“爽点密度不足”：
+如果问题包含"爽点密度不足"：
 - 增加主角获得收益、反击、压制、突破、信息揭露的细节。
 - 每次增加 2~4 段，不要水字数。
 
-如果问题包含“节奏推进不足”：
+如果问题包含"节奏推进不足"：
 - 增加目标 → 阻碍 → 应对 → 变化的动作链。
 - 补足冲突前的铺垫和冲突后的代价。
 
-如果问题包含“结尾钩子偏弱”：
+如果问题包含"结尾钩子偏弱"：
 - 强化最后 3~6 段。
 - 增加新危机、新信息、新反转或下一章期待。
 
-如果问题包含“情绪拉扯不足”：
+如果问题包含"情绪拉扯不足"：
 - 增加角色选择、代价、紧张感、压迫感。
 - 不写空泛心理独白。
 
-如果问题包含“发布风险”：
+如果问题包含"发布风险"：
 - 删除或压缩说明文。
 - 增加动作、对白、冲突。
 
@@ -3518,6 +3933,8 @@ async function runPlotAutoFixChapter(params: {
   readonly model: string;
   readonly maxPlotFixAttempts: number;
   readonly json: boolean;
+  readonly targetChapterWords?: number;
+  readonly language?: "zh" | "en";
 }): Promise<PlotAutoFixResult> {
   const context = await resolvePlotAutoFixContext(params.bookDir, params.chapter);
   if (!context.eligible) {
@@ -3536,20 +3953,31 @@ async function runPlotAutoFixChapter(params: {
     });
   }
 
+  const targetWords = params.targetChapterWords ?? 3000;
+  const lang = params.language ?? "zh";
+  const plotScopeContent = await loadChapterIntentContent(params.bookDir, params.chapter);
+
   let inputFile = context.inputFile;
   let outputFile = "";
   for (let attempt = 1; attempt <= params.maxPlotFixAttempts; attempt += 1) {
     if (!params.json) log(`attempt ${attempt}/${params.maxPlotFixAttempts} -> fixing publish-ready structure...`);
+    const plotCurrentText = await readFile(inputFile, "utf-8");
     outputFile = await writePlotFixedChapter({
       bookDir: params.bookDir,
       chapter: params.chapter,
       attempt,
       client: params.client,
       model: params.model,
-      currentText: await readFile(inputFile, "utf-8"),
+      currentText: plotCurrentText,
       publishReport: context.publishReport,
       sixStepReport: context.sixStepReport,
       storyEffectivenessReport: context.storyEffectivenessReport,
+      lengthConstraint: buildRepairLengthConstraint({
+        chapterText: plotCurrentText,
+        targetChapterWords: targetWords,
+        language: lang as "zh" | "en",
+      }),
+      scopeConstraint: buildRepairScopeConstraint(plotScopeContent),
     });
     inputFile = outputFile;
   }
@@ -3643,6 +4071,8 @@ async function writePlotFixedChapter(params: {
   readonly publishReport: Partial<PublishReadyResult> | null;
   readonly sixStepReport: Record<string, unknown> | null;
   readonly storyEffectivenessReport: Record<string, unknown> | null;
+  readonly lengthConstraint?: string;
+  readonly scopeConstraint?: string;
 }): Promise<string> {
   const numericExpressionGuidance = buildNumericExpressionGuidance(
     await readBookNumericExpressionMode(params.bookDir),
@@ -3659,7 +4089,7 @@ async function writePlotFixedChapter(params: {
         numericExpressionGuidance,
       ].join("\n"),
     },
-    { role: "user", content: buildPlotAutoFixPrompt(params.currentText, params.publishReport, params.sixStepReport, params.storyEffectivenessReport) },
+    { role: "user", content: buildPlotAutoFixPrompt(params.currentText, params.publishReport, params.sixStepReport, params.storyEffectivenessReport, params.lengthConstraint, params.scopeConstraint) },
   ], { temperature: 0.3, maxTokens: 8192, stage: "six-step-plot-fix" });
   const fixed = stripMarkdownCodeFence(response.content).trim();
   if (!fixed) throw new Error("plot-auto-fix returned empty chapter content");
@@ -3675,7 +4105,11 @@ function buildPlotAutoFixPrompt(
   publishReport: Partial<PublishReadyResult> | null,
   sixStepReport: Record<string, unknown> | null,
   storyEffectivenessReport: Record<string, unknown> | null,
+  lengthConstraint?: string,
+  scopeConstraint?: string,
 ): string {
+  const lengthBlock = lengthConstraint ? `\n${lengthConstraint}\n` : "";
+  const scopeBlock = scopeConstraint ? `\n${scopeConstraint}\n` : "";
   return `你正在修复一章 publish-ready 的 six_step_plot=FAIL_STRUCTURAL 问题。
 
 【当前章节】
@@ -3694,7 +4128,7 @@ ${formatPlotReportForPrompt(sixStepReport)}
 
 【story-effectiveness 报告】
 ${formatStoryEffectivenessReportForPrompt(storyEffectivenessReport)}
-
+${lengthBlock}${scopeBlock}
 【修复目标】
 1. 让章节具备清晰的 Hook / Pressure / Attempt / Twist / Payoff / Pull。
 2. 开头 1-3 段补出明确情绪事件或即时危机，不要空泛铺陈。
@@ -3706,10 +4140,10 @@ ${formatStoryEffectivenessReportForPrompt(storyEffectivenessReport)}
 1. 必须改写或补强前 300 字。
 2. 开头必须出现一个可被读者立刻感知的外部事件，例如：有人当众压价/羞辱、关键物品被夺走、交易条件突然变卦、敌人逼近、门被封死、倒计时压迫。
 3. 这个事件必须迫使主角立刻做选择，不能只是环境描写、设定说明或心理独白。
-4. 第一屏必须同时有“目标 + 阻碍 + 情绪压力”。
+4. 第一屏必须同时有"目标 + 阻碍 + 情绪压力"。
 
 【如果报告提到 story_effectiveness / 主角目标 / 结尾钩子】
-1. 必须在前 500 字明确主角本章目标，目标要能被读者复述，例如”用[本书核心道具]换取[资源]，保住[重要据点]”。
+1. 必须在前 500 字明确主角本章目标，目标要能被读者复述，例如"用[本书核心道具]换取[资源]，保住[重要据点]"。
 2. 必须让目标遇到具体阻碍，例如盟友不信任、资源不足、敌对势力逼近、权限威胁。
 3. 结尾必须留下一个未解决问题或下一章选择，不能只列状态数值。
 4. 章末钩子要和本章目标直接相连，例如更高代价、权限掠夺、是否接受支线任务、防御即将失守。
@@ -3719,7 +4153,8 @@ ${formatStoryEffectivenessReportForPrompt(storyEffectivenessReport)}
 2. 不改变已经通过连续性/资源检查的事实。
 3. 不整章重写，保留原文 70% 以上，只做 3-10 处定点补强。
 4. 不新增无来源 of 系统规则、战力设定、隐藏道具或重大角色关系。
-5. 输出完整章节正文。`;
+5. 输出完整章节正文。
+${lengthConstraint ? "6. 严格遵守字数约束，不得超过硬上限。如当前已超软上限，优先压缩式修复。\n" : ""}${scopeConstraint ? "7. 严格遵守章节作用域约束，不提前完成下一章目标，不引入未来人物/支线。\n" : ""}`;
 }
 
 function formatPlotReportForPrompt(report: Record<string, unknown> | null): string {
@@ -3844,8 +4279,25 @@ async function resolveContinuityBook(root: string, bookIdArg: string | undefined
     for (const entry of entries) {
       const dir = join(booksRoot, entry);
       try {
-        await stat(join(dir, "book.json"));
-        books.push({ id: entry, dir });
+        const bookJsonPath = join(dir, "book.json");
+        await stat(bookJsonPath);
+        let chapterWordCount: number | undefined;
+        let language: "zh" | "en" | undefined;
+        try {
+          const parsed = JSON.parse(await readFile(bookJsonPath, "utf-8")) as {
+            readonly chapterWordCount?: unknown;
+            readonly language?: unknown;
+          };
+          if (Number.isInteger(parsed.chapterWordCount) && Number(parsed.chapterWordCount) > 0) {
+            chapterWordCount = Number(parsed.chapterWordCount);
+          }
+          if (parsed.language === "zh" || parsed.language === "en") {
+            language = parsed.language;
+          }
+        } catch {
+          // Keep the book discoverable; publish-ready will fall back to defaults.
+        }
+        books.push({ id: entry, dir, chapterWordCount, language });
       } catch {
         // skip non-book directories
       }
@@ -4102,6 +4554,8 @@ async function polishFanqieQualityChapter(params: {
   readonly currentOverridePath?: string;
   readonly qualityPassThreshold?: number;
   readonly qualityAcceptThreshold?: number;
+  readonly targetChapterWords?: number;
+  readonly language?: "zh" | "en";
 }): Promise<FanqiePolishCommandResult> {
   const passThreshold = params.qualityPassThreshold ?? 85;
   const acceptThreshold = params.qualityAcceptThreshold ?? 80;
@@ -4167,6 +4621,7 @@ async function polishFanqieQualityChapter(params: {
       finalReportJsonPath: paths.jsonPath,
       finalReportMarkdownPath: paths.markdownPath,
       blockedByContinuity: true,
+      blockedByLength: false,
     };
   }
 
@@ -4177,6 +4632,22 @@ async function polishFanqieQualityChapter(params: {
   const goldenNeedsFix = goldenScore < 85 && hasGoldenInstructions;
 
   log(`[debug] polishFanqieQualityChapter Ch ${params.chapter}: initialScore=${initialScore}, goldenScore=${goldenScore}, hasGoldenInstructions=${hasGoldenInstructions}, goldenNeedsFix=${goldenNeedsFix}`);
+
+  // Compute length/scope constraints for polish prompt
+  const targetWords = params.targetChapterWords ?? 3000;
+  const lang = params.language ?? "zh";
+  const scopeContent = await loadChapterIntentContent(params.bookDir, params.chapter);
+  const lengthConstraint = buildRepairLengthConstraint({
+    chapterText: await readFile(inputFile, "utf-8"),
+    targetChapterWords: targetWords,
+    language: lang as "zh" | "en",
+  });
+  const scopeConstraint = buildRepairScopeConstraint(scopeContent);
+  const signalsScopeConstraint = buildRepairSignalsScopeConstraint(scopeContent);
+
+  // QUALITY_WARN_POLISH_OPTIONAL: limit to 1 attempt with compress-only constraint
+  const isWarnOptional = initialScore >= Math.max(80, acceptThreshold) && initialScore < passThreshold;
+  const effectiveMaxAttempts = isWarnOptional ? 1 : params.maxPolishAttempts;
 
   if ((initialScore >= passThreshold && !goldenNeedsFix) || (!quality.report.polish_prompt.trim() && !hasGoldenInstructions)) {
     const finalReport = markFinalFanqieQualityReport(quality.report, {
@@ -4199,14 +4670,16 @@ async function polishFanqieQualityChapter(params: {
       finalReportJsonPath: paths.jsonPath,
       finalReportMarkdownPath: paths.markdownPath,
       blockedByContinuity: false,
+      blockedByLength: false,
     };
   }
 
-  while ((finalScore < passThreshold || (goldenNeedsFix && attempts === 0)) && attempts < params.maxPolishAttempts) {
+  let lengthBlocked = false;
+  while ((finalScore < passThreshold || (goldenNeedsFix && attempts === 0)) && attempts < effectiveMaxAttempts) {
     const nextAttempt = attempts + 1;
     if (!quality.report.polish_prompt.trim() && !hasGoldenInstructions) break;
     if (!params.json) {
-      log(`attempt ${nextAttempt}/${params.maxPolishAttempts} -> score: ${finalScore} -> polishing...`);
+      log(`attempt ${nextAttempt}/${effectiveMaxAttempts} -> score: ${finalScore} -> polishing...`);
     }
     const polishedPath = await writeFanqiePolishedChapter({
       bookDir: params.bookDir,
@@ -4216,9 +4689,24 @@ async function polishFanqieQualityChapter(params: {
       model: params.model,
       polishPrompt: quality.report.polish_prompt,
       inputFile: quality.sourceFile,
+      lengthConstraint: `${lengthConstraint}\n\n${signalsScopeConstraint}`,
+      scopeConstraint,
     });
     usedPolishedFile = relative(params.bookDir, polishedPath);
     attempts = nextAttempt;
+
+    // Length gate: check if polished output exceeds hardMax
+    const polishedText = await readFile(polishedPath, "utf-8");
+    const spec = buildLengthSpec(targetWords, lang as "zh" | "en");
+    const polishedCount = countChapterLength(polishedText, spec.countingMode);
+    if (polishedCount > spec.hardMax) {
+      if (!params.json) {
+        log(`polish attempt ${nextAttempt}: output ${formatLengthCount(polishedCount, spec.countingMode)} exceeds hardMax ${formatLengthCount(spec.hardMax, spec.countingMode)}. Blocking further polish.`);
+      }
+      lengthBlocked = true;
+      break;
+    }
+
     quality = await checkFanqieQualityChapter({
       bookId: params.bookId,
       bookDir: params.bookDir,
@@ -4259,6 +4747,7 @@ async function polishFanqieQualityChapter(params: {
     finalReportJsonPath: paths.jsonPath,
     finalReportMarkdownPath: paths.markdownPath,
     blockedByContinuity: false,
+    blockedByLength: lengthBlocked,
   };
 }
 
@@ -4350,15 +4839,24 @@ async function writeFanqiePolishedChapter(params: {
   readonly model: string;
   readonly polishPrompt: string;
   readonly inputFile: string;
+  readonly lengthConstraint?: string;
+  readonly scopeConstraint?: string;
 }): Promise<string> {
   const numericExpressionGuidance = buildNumericExpressionGuidance(
     await readBookNumericExpressionMode(params.bookDir),
     "zh",
     "polish",
   );
-  
+
   const goldenInstructions = await getGolden3ChapterInstructions(params.bookDir, params.chapter);
   let finalPrompt = params.polishPrompt.trim();
+
+  // Inject length and scope constraints
+  const constraintBlocks: string[] = [];
+  if (params.lengthConstraint) constraintBlocks.push(params.lengthConstraint);
+  if (params.scopeConstraint) constraintBlocks.push(params.scopeConstraint);
+  const constraintText = constraintBlocks.join("\n\n");
+
   if (goldenInstructions.length > 0) {
     if (!finalPrompt) {
       const chapterText = await readFile(params.inputFile, "utf-8");
@@ -4376,6 +4874,11 @@ ${goldenInstructions.map(line => `- ${line}`).join("\n")}
     } else {
       finalPrompt = `${finalPrompt}\n\n同时，针对前三章黄金开篇的特殊质量要求，你必须在润色中严格落实以下优化改进，以提升开篇的节奏与吸引力：\n${goldenInstructions.map(line => `- ${line}`).join("\n")}`;
     }
+  }
+
+  // Append length/scope constraints to the prompt
+  if (constraintText && finalPrompt) {
+    finalPrompt = `${finalPrompt}\n\n${constraintText}`;
   }
 
   const response = await chatCompletion(params.client, params.model, [
@@ -5014,8 +5517,19 @@ async function resolveReviewedChapterSource(
 
 async function findChapterFile(bookDir: string, chapter: number): Promise<ContinuityChapterFile> {
   const roots = [join(bookDir, "chapters"), bookDir];
+  const systemDirs = [
+    "reviews",
+    "story",
+    "chapters-reviewed",
+    "chapters-fixed",
+    "chapters-polished",
+    "chapters-quality-fixed",
+    "chapters-plot-fixed",
+    "chapters-salvaged",
+  ];
   for (const root of roots) {
-    const files = await listFiles(root).catch(() => []);
+    const isBookDir = root === bookDir;
+    const files = await listFiles(root, isBookDir ? systemDirs : []).catch(() => []);
     const found = files
       .filter((file) => /\.(md|txt)$/i.test(file))
       .filter((file) => !isContinuityBackupChapterFile(file))
@@ -5582,13 +6096,19 @@ function isContinuityPublishPass(report: ContinuityReport): boolean {
     && report.final_status !== "DROP";
 }
 
-async function listFiles(dir: string): Promise<string[]> {
+async function listFiles(dir: string, excludeDirs: string[] = []): Promise<string[]> {
   const entries = await readdir(dir, { withFileTypes: true });
   const files: string[] = [];
   for (const entry of entries) {
-    const file = join(dir, entry.name);
-    if (entry.isDirectory()) files.push(...await listFiles(file));
-    else files.push(file);
+    if (entry.isDirectory()) {
+      if (excludeDirs.includes(entry.name)) {
+        continue;
+      }
+      const file = join(dir, entry.name);
+      files.push(...await listFiles(file, excludeDirs));
+    } else {
+      files.push(join(dir, entry.name));
+    }
   }
   return files;
 }
@@ -6319,7 +6839,7 @@ function findOriginalChapterFileSync(bookDir: string, chapter: number): string |
 }
 
 function buildSearchHints(issues: ReadonlyArray<string>, fallbacks: ReadonlyArray<string>): string[] {
-  const quoted = issues.flatMap((issue) => [...issue.matchAll(/[“"']([^“”"'\n]{2,24})[”"']/gu)].map((match) => match[1] ?? ""));
+  const quoted = issues.flatMap((issue) => [...issue.matchAll(/[""']([^"""'\n]{2,24})[""']/gu)].map((match) => match[1] ?? ""));
   const chineseTerms = issues.flatMap((issue) => [...issue.matchAll(/[\p{Script=Han}A-Za-z0-9_-]{2,16}/gu)].map((match) => match[0] ?? ""))
     .filter((term) => !/warning|critical|info|state|resource|consistency|validation|chapter/u.test(term))
     .slice(0, 8);
@@ -6403,6 +6923,7 @@ reviewCommand
   .description("Approve a chapter and commit its state: approve [book-id] <chapter>")
   .argument("<args...>", "Book ID (optional) and chapter number")
   .option("--json", "Output JSON")
+  .option("--skip-sync", "Skip syncing state and snapshot via LLM re-analysis")
   .action(async (args: ReadonlyArray<string>, opts) => {
     try {
       const root = findProjectRoot();
@@ -6416,6 +6937,12 @@ reviewCommand
         throw new Error(`Chapter ${chapterNum} not found in "${bookId}"`);
       }
 
+      const chapter = index[idx]!;
+      const blockedStatuses = ["audit-failed", "state-degraded", "blocked-resource-plan", "planning-degraded"];
+      if (blockedStatuses.includes(chapter.status)) {
+        throw new Error(`Chapter ${chapterNum} has status "${chapter.status}". Approval is blocked due to validation errors or degradation.`);
+      }
+
       index[idx] = {
         ...index[idx]!,
         status: "approved",
@@ -6425,12 +6952,14 @@ reviewCommand
 
       // Re-analyze and sync chapter state upon approval to guarantee
       // that the final text is settled and snapshotted correctly.
-      if (!opts.json) {
-        log(`Syncing state and snapshot for approved chapter ${chapterNum}...`);
+      if (!opts.skipSync) {
+        if (!opts.json) {
+          log(`Syncing state and snapshot for approved chapter ${chapterNum}...`);
+        }
+        const config = await loadConfig({ requireApiKey: false });
+        const pipeline = new PipelineRunner(buildPipelineConfig(config, root));
+        await pipeline.resyncChapterArtifacts(bookId, chapterNum);
       }
-      const config = await loadConfig({ requireApiKey: false });
-      const pipeline = new PipelineRunner(buildPipelineConfig(config, root));
-      await pipeline.resyncChapterArtifacts(bookId, chapterNum);
 
       if (opts.json) {
         log(JSON.stringify({ bookId, chapter: chapterNum, status: "approved" }));
@@ -6464,11 +6993,17 @@ reviewCommand
       const index = [...(await state.loadChapterIndex(bookId))];
       let count = 0;
       const now = new Date().toISOString();
+      const blockedStatuses = ["audit-failed", "state-degraded", "blocked-resource-plan", "planning-degraded"];
 
       const updated = index.map((ch) => {
-        if (ch.status === "ready-for-review" || ch.status === "audit-failed") {
+        if (ch.status === "ready-for-review") {
           count++;
           return { ...ch, status: "approved" as const, updatedAt: now };
+        }
+        if (blockedStatuses.includes(ch.status)) {
+          if (!opts.json) {
+            log(`Warning: Skipped chapter ${ch.number} from approve-all due to blocked status "${ch.status}".`);
+          }
         }
         return ch;
       });

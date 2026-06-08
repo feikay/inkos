@@ -9,7 +9,7 @@ export interface ChapterPersistenceUsage {
   readonly totalTokens: number;
 }
 
-export type ChapterPersistenceStatus = "ready-for-review" | "audit-failed" | "state-degraded" | "blocked-resource-plan";
+export type ChapterPersistenceStatus = "ready-for-review" | "audit-failed" | "state-degraded" | "blocked-resource-plan" | "planning-degraded";
 
 export async function persistChapterArtifacts(params: {
   readonly chapterNumber: number;
@@ -33,7 +33,7 @@ export async function persistChapterArtifacts(params: {
   readonly now?: () => string;
 }): Promise<{ readonly entry: ChapterMeta }> {
   await params.saveChapter();
-  const blocksTruthPersistence = params.status === "state-degraded" || params.status === "blocked-resource-plan";
+  const blocksTruthPersistence = params.status === "state-degraded" || params.status === "blocked-resource-plan" || params.status === "planning-degraded";
   if (!blocksTruthPersistence) {
     await params.saveTruthFiles();
   }

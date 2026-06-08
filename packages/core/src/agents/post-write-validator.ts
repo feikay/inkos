@@ -13,7 +13,7 @@ import {
   isInvalidTitleReplacement,
 } from "../utils/chapter-title-engine.js";
 import type { BookRules } from "../models/book-rules.js";
-import type { GenreProfile } from "../models/genre-profile.js";
+import type { GenreProfile, ContentSafetyProfile } from "../models/genre-profile.js";
 import type { ChapterGoal, EndingHookType, EndingType, MoodDirective, PayoffDirective } from "../models/input-governance.js";
 import type { RuntimeStateDelta } from "../models/runtime-state.js";
 import type { RuntimeStateSnapshot } from "../state/state-reducer.js";
@@ -495,6 +495,7 @@ export function validatePostWrite(
   genreProfile: GenreProfile,
   bookRules: BookRules | null,
   languageOverride?: "zh" | "en",
+  contentSafetyProfile?: ContentSafetyProfile,
 ): ReadonlyArray<PostWriteViolation> {
   const violations: PostWriteViolation[] = [];
 
@@ -502,7 +503,7 @@ export function validatePostWrite(
   const isEnglish = (languageOverride ?? genreProfile.language) === "en";
   if (isEnglish) {
     // For English, only run book-specific prohibitions and paragraph length check
-    return validatePostWriteEnglish(content, genreProfile, bookRules);
+    return validatePostWriteEnglish(content, genreProfile, bookRules, contentSafetyProfile);
   }
 
   // 1. 硬性禁令: "不是…而是…" 句式
@@ -749,9 +750,9 @@ export function validatePostWrite(
   violations.push(...detectParagraphShapeWarnings(content, "zh"));
 
   // 12. Book-level prohibitions
-  // Short prohibitions (2-30 chars): exact substring match
-  // Long prohibitions (>30 chars): skip — these are conceptual rules for prompt-level enforcement only
-  if (bookRules?.prohibitions) {
+  if (contentSafetyProfile) {
+    violations.push(...validateSafetyProfile(content, contentSafetyProfile, "zh"));
+  } else if (bookRules?.prohibitions) {
     for (const prohibition of bookRules.prohibitions) {
       if (prohibition.length >= 2 && prohibition.length <= 30 && content.includes(prohibition)) {
         violations.push({
@@ -879,6 +880,7 @@ function validatePostWriteEnglish(
   content: string,
   genreProfile: GenreProfile,
   bookRules: BookRules | null,
+  contentSafetyProfile?: ContentSafetyProfile,
 ): ReadonlyArray<PostWriteViolation> {
   const violations: PostWriteViolation[] = [];
 
@@ -927,7 +929,9 @@ function validatePostWriteEnglish(
   }
 
   // 3. Book-specific prohibitions
-  if (bookRules?.prohibitions) {
+  if (contentSafetyProfile) {
+    violations.push(...validateSafetyProfile(content, contentSafetyProfile, "en"));
+  } else if (bookRules?.prohibitions) {
     for (const prohibition of bookRules.prohibitions) {
       if (prohibition.length >= 2 && prohibition.length <= 50 && content.toLowerCase().includes(prohibition.toLowerCase())) {
         violations.push({
@@ -3360,4 +3364,200 @@ function extractChineseTitleTerms(text: string): string[] {
 
 function capitalize(word: string): string {
   return word.length === 0 ? word : `${word[0]!.toUpperCase()}${word.slice(1)}`;
+}
+
+function validateSafetyProfile(
+  content: string,
+  profile: ContentSafetyProfile | undefined,
+  language: "zh" | "en",
+): PostWriteViolation[] {
+  if (!profile) return [];
+  const violations: PostWriteViolation[] = [];
+  const isEnglish = language === "en";
+
+  // 1. Check terms
+  if (profile.terms) {
+    for (const item of profile.terms) {
+      if (item.disabled) continue;
+      const { term, exceptions } = item;
+      if (!term) continue;
+
+      let index = content.indexOf(term);
+      let matched = false;
+      while (index !== -1) {
+        if (!matchesExceptionAt(content, term, index, exceptions || [])) {
+          matched = true;
+          break;
+        }
+        index = content.indexOf(term, index + 1);
+      }
+
+      if (matched) {
+        let severity: "error" | "warning" = item.severity || "error";
+        if (term.length === 1) {
+          if (item.dangerousContextWords && item.dangerousContextWords.length > 0) {
+            const hasDangerousContext = item.dangerousContextWords.some((word) =>
+              isEnglish
+                ? content.toLowerCase().includes(word.toLowerCase())
+                : content.includes(word)
+            );
+            if (!hasDangerousContext) {
+              severity = "warning";
+            }
+          } else {
+            severity = "warning";
+          }
+        }
+
+        const id = item.id;
+        violations.push({
+          rule: id || (isEnglish ? "content-safety" : "内容安全"),
+          severity,
+          description: isEnglish
+            ? (id ? `${id} matched term: "${term}"` : `Matched content safety forbidden term: "${term}"`)
+            : (id ? `${id} 命中 ${term}` : `命中了内容安全违禁词："${term}"`),
+          suggestion: isEnglish
+            ? "Modify or ensure it matches contextual exemptions."
+            : "修改违禁词或确保符合上下文豁免规则",
+        });
+      }
+    }
+  }
+
+  // 2. Check prohibitions
+  if (profile.prohibitions) {
+    const threshold = isEnglish ? 30 : 20;
+    for (const item of profile.prohibitions) {
+      const isString = typeof item === "string";
+      const id = isString ? undefined : item.id;
+      const prohibition = isString ? item : item.text;
+      const severity = isString ? "error" : (item.severity ?? "error");
+      const disabled = isString ? false : item.disabled;
+
+      if (disabled) continue;
+
+      if (prohibition.length >= 2 && prohibition.length <= threshold) {
+        const matched = isEnglish
+          ? content.toLowerCase().includes(prohibition.toLowerCase())
+          : content.includes(prohibition);
+        if (matched) {
+          if (id === "本书禁忌") {
+            violations.push({
+              rule: isEnglish ? "Book prohibition" : "本书禁忌",
+              severity,
+              description: isEnglish
+                ? `Found banned content: "${prohibition}"`
+                : `出现了本书禁忌内容："${prohibition}"`,
+              suggestion: isEnglish ? "Remove or rewrite this content" : "删除或改写该内容",
+            });
+          } else {
+            violations.push({
+              rule: id || (isEnglish ? "safety-prohibition" : "安全禁忌"),
+              severity,
+              description: isEnglish
+                ? (id ? `${id} matched prohibition: "${prohibition}"` : `Matched safety prohibition: "${prohibition}"`)
+                : (id ? `${id} 命中 ${prohibition}` : `命中了安全禁忌规则："${prohibition}"`),
+              suggestion: isEnglish ? "Avoid using this expression." : "请避免使用该表达",
+            });
+          }
+        }
+      } else if (prohibition.length > threshold) {
+        const keywords = extractKeywords(prohibition);
+        for (const keyword of keywords) {
+          const matched = isEnglish
+            ? content.toLowerCase().includes(keyword.toLowerCase())
+            : content.includes(keyword);
+          if (matched) {
+            if (id === "本书禁忌") {
+              violations.push({
+                rule: isEnglish ? "Book prohibition" : "本书禁忌",
+                severity,
+                description: isEnglish
+                  ? `Found banned content: "${keyword}" (original: "${prohibition}")`
+                  : `出现了本书禁忌内容："${keyword}" (规则原文: "${prohibition}")`,
+                suggestion: isEnglish ? "Remove or rewrite this content" : "删除或改写该内容",
+              });
+            } else {
+              const rule = severity === "error"
+                ? (id || (isEnglish ? "safety-prohibition" : "安全禁忌"))
+                : (id ? `${id}-warning` : (isEnglish ? "safety-prohibition-warning" : "安全禁忌警告"));
+              violations.push({
+                rule,
+                severity,
+                description: isEnglish
+                  ? (id ? `${id} matched keyword from long prohibition: "${keyword}" (original: "${prohibition}")` : `Matched keyword from long prohibition: "${keyword}" (original: "${prohibition}")`)
+                  : (id ? `${id} 命中 ${keyword} (规则原文: "${prohibition}")` : `命中了长禁忌规则拆分出的关键字："${keyword}" (规则原文: "${prohibition}")`),
+                suggestion: isEnglish
+                  ? "Ensure content does not violate the rule description."
+                  : "确保内容不违反上述长禁忌规则",
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return violations;
+}
+
+function matchesExceptionAt(content: string, term: string, index: number, exceptions: ReadonlyArray<string>): boolean {
+  for (const exception of exceptions) {
+    const termIndexInException = exception.indexOf(term);
+    if (termIndexInException === -1) continue;
+
+    const matchStart = index - termIndexInException;
+    if (matchStart >= 0 && matchStart + exception.length <= content.length) {
+      const candidate = content.substring(matchStart, matchStart + exception.length);
+      if (candidate === exception) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function extractKeywords(phrase: string): string[] {
+  const chineseStopWords = /任何时候|时候|不得|不能|不许|严禁|禁止|出现|使用|进行|相关|剧情|内容|元素|任何|[的了在是着与和或及以由于为之而也得但且将被从去往到时使]/gu;
+  const normalized = phrase.replace(chineseStopWords, " ");
+  const chineseStopTokens = new Set([
+    "主角",
+    "角色",
+    "所有",
+    "矛盾",
+    "冲突",
+    "层面",
+    "规则",
+    "必须",
+    "允许",
+    "核心",
+    "情节",
+  ]);
+  
+  const englishStopWords = new Set([
+    "prohibit", "forbid", "must", "not", "any", "time", "use", "is", "are",
+    "was", "were", "be", "been", "have", "has", "had", "do", "does", "did",
+    "the", "a", "an", "of", "to", "in", "for", "on", "with", "at", "by",
+    "from", "up", "about", "into", "over", "after", "and", "or", "but", "so"
+  ]);
+
+  const rawTokens = normalized.split(/[\s,，。！!?、:：()（）\[\]【】"“”'‘’\-]+/u);
+  const keywords: string[] = [];
+
+  for (const token of rawTokens) {
+    const trimmed = token.trim();
+    if (!trimmed) continue;
+    
+    if (/^[a-zA-Z]+$/.test(trimmed)) {
+      if (trimmed.length >= 3 && !englishStopWords.has(trimmed.toLowerCase())) {
+        keywords.push(trimmed);
+      }
+    } else {
+      if (trimmed.length >= 2 && !chineseStopTokens.has(trimmed)) {
+        keywords.push(trimmed);
+      }
+    }
+  }
+
+  return Array.from(new Set(keywords));
 }

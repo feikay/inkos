@@ -3,11 +3,12 @@ import { chatCompletion, createLLMClient } from "../llm/provider.js";
 import { resolveServiceProviderFamily } from "../llm/service-presets.js";
 import type { Logger } from "../utils/logger.js";
 import type { BookConfig, FanficMode } from "../models/book.js";
-import type { ChapterMeta } from "../models/chapter.js";
+import type { ChapterMeta, ChapterStatus } from "../models/chapter.js";
 import type { NotifyChannel, LLMConfig, AgentLLMOverride, InputGovernanceMode } from "../models/project.js";
 import type { GenreProfile } from "../models/genre-profile.js";
 import { ArchitectAgent, type ArchitectOutput } from "../agents/architect.js";
 import { FoundationReviewerAgent } from "../agents/foundation-reviewer.js";
+import { validateFirst10ChapterPlan, validateFoundationDocuments } from "../agents/foundation-documents.js";
 import { PlannerAgent, type PlanChapterOutput } from "../agents/planner.js";
 import { ComposerAgent } from "../agents/composer.js";
 import { sanitizePlannerIntentForChapterIntent, WriterAgent, type WriteChapterInput, type WriteChapterOutput } from "../agents/writer.js";
@@ -137,6 +138,8 @@ export interface PipelineConfig {
   readonly inputGovernanceMode?: InputGovernanceMode;
   readonly logger?: Logger;
   readonly onStreamProgress?: OnStreamProgress;
+  readonly skipPlanningValidation?: boolean;
+  readonly skipStateDegradationCheck?: boolean;
 }
 
 export interface TokenUsageSummary {
@@ -157,7 +160,7 @@ export interface ChapterPipelineResult {
   readonly wordCount: number;
   readonly auditResult: AuditResult;
   readonly revised: boolean;
-  readonly status: "ready-for-review" | "audit-failed" | "state-degraded" | "blocked-resource-plan";
+  readonly status: ChapterStatus;
   readonly lengthWarnings?: ReadonlyArray<string>;
   readonly lengthTelemetry?: LengthTelemetry;
   readonly tokenUsage?: TokenUsageSummary;
@@ -418,6 +421,7 @@ export class PipelineRunner {
 
   private async generateAndReviewFoundation(params: {
     readonly generate: (reviewFeedback?: string) => Promise<ArchitectOutput>;
+    readonly repair?: (foundation: ArchitectOutput, reviewFeedback?: string) => Promise<ArchitectOutput>;
     readonly reviewer: FoundationReviewerAgent;
     readonly mode: "original" | "fanfic" | "series";
     readonly sourceCanon?: string;
@@ -427,7 +431,30 @@ export class PipelineRunner {
     readonly maxRetries?: number;
   }): Promise<ArchitectOutput> {
     const maxRetries = params.maxRetries ?? 2;
-    let foundation = await params.generate();
+    const generateSafely = async (feedback?: string): Promise<ArchitectOutput> => {
+      let nextFeedback = feedback;
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          const generated = await params.generate(nextFeedback);
+          return params.repair ? await params.repair(generated, nextFeedback) : generated;
+        } catch (error) {
+          if (!this.isFoundationSectionGenerationError(error) || attempt >= maxRetries) {
+            throw error;
+          }
+          const generationFeedback = this.buildFoundationGenerationErrorFeedback(error, params.language);
+          nextFeedback = nextFeedback
+            ? `${nextFeedback}\n\n${generationFeedback}`
+            : generationFeedback;
+          this.logWarn(params.stageLanguage, {
+            zh: `基础设定输出缺少必需 section，正在带错误反馈重新生成...`,
+            en: `Foundation output missed required sections, regenerating with error feedback...`,
+          });
+        }
+      }
+      throw new Error("Unreachable foundation generation retry state");
+    };
+
+    let foundation = await generateSafely();
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       this.logStage(params.stageLanguage, {
@@ -450,16 +477,25 @@ export class PipelineRunner {
         this.config.logger?.info(`  [${dim.score}] ${dim.name.slice(0, 40)}`);
       }
 
-      if (review.passed) {
+      const structureIssues = validateFoundationDocuments(foundation, {}, params.language);
+
+      if (review.passed && structureIssues.length === 0) {
         return foundation;
       }
 
-      this.logWarn(params.stageLanguage, {
-        zh: `基础设定未通过审核（${review.totalScore}分），正在重新生成...`,
-        en: `Foundation rejected (${review.totalScore}/100), regenerating...`,
-      });
+      if (structureIssues.length > 0) {
+        this.logWarn(params.stageLanguage, {
+          zh: `基础设定结构校验未通过：${structureIssues.join("；")}，正在重新生成...`,
+          en: `Foundation structural validation failed: ${structureIssues.join("; ")}, regenerating...`,
+        });
+      } else {
+        this.logWarn(params.stageLanguage, {
+          zh: `基础设定未通过审核（${review.totalScore}分），正在重新生成...`,
+          en: `Foundation rejected (${review.totalScore}/100), regenerating...`,
+        });
+      }
 
-      foundation = await params.generate(this.buildFoundationReviewFeedback(review, params.language));
+      foundation = await generateSafely(this.buildFoundationReviewFeedback(review, params.language, structureIssues));
     }
 
     // Final review
@@ -474,6 +510,11 @@ export class PipelineRunner {
       `Foundation final review: ${finalReview.totalScore}/100 ${finalReview.passed ? "PASSED" : "ACCEPTED (max retries)"}`,
     );
 
+    const finalStructureIssues = validateFoundationDocuments(foundation, {}, params.language);
+    if (finalStructureIssues.length > 0) {
+      throw new Error(`[architect] foundation structural validation failed after review retries: ${finalStructureIssues.join("; ")}`);
+    }
+
     return foundation;
   }
 
@@ -487,6 +528,7 @@ export class PipelineRunner {
       readonly overallFeedback: string;
     },
     language: "zh" | "en",
+    structureIssues: readonly string[] = [],
   ): string {
     const dimensionLines = review.dimensions
       .map((dimension) => (
@@ -503,6 +545,9 @@ export class PipelineRunner {
           "",
           "## Dimension Notes",
           dimensionLines || "- none",
+          "",
+          "## Local Structural Validation Errors",
+          structureIssues.length > 0 ? structureIssues.map((issue) => `- ${issue}`).join("\n") : "- none",
         ].join("\n")
       : [
           "## 总评",
@@ -510,6 +555,56 @@ export class PipelineRunner {
           "",
           "## 分项问题",
           dimensionLines || "- 无",
+          "",
+          "## 本地结构校验错误",
+          structureIssues.length > 0 ? structureIssues.map((issue) => `- ${issue}`).join("\n") : "- 无",
+        ].join("\n");
+  }
+
+  private isFoundationSectionGenerationError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /Architect output missing required section/i.test(message);
+  }
+
+  private buildFoundationGenerationErrorFeedback(
+    error: unknown,
+    language: "zh" | "en",
+  ): string {
+    const message = error instanceof Error ? error.message : String(error);
+    return language === "en"
+      ? [
+          "## Local Parse Error",
+          message,
+          "",
+          "You must regenerate the full foundation and include every required section tag exactly:",
+          "=== SECTION: story_bible ===",
+          "=== SECTION: volume_outline ===",
+          "=== SECTION: book_rules ===",
+          "=== SECTION: current_state ===",
+          "=== SECTION: pending_hooks ===",
+          "=== SECTION: genre_architecture ===",
+          "=== SECTION: world_engine ===",
+          "=== SECTION: antagonist_map ===",
+          "=== SECTION: motivation_matrix ===",
+          "=== SECTION: first_10_chapter_plan ===",
+          "=== SECTION: structure_signals ===",
+        ].join("\n")
+      : [
+          "## 本地解析错误",
+          message,
+          "",
+          "你必须重新生成完整基础设定，并包含以下每一个必需 section 标签：",
+          "=== SECTION: story_bible ===",
+          "=== SECTION: volume_outline ===",
+          "=== SECTION: book_rules ===",
+          "=== SECTION: current_state ===",
+          "=== SECTION: pending_hooks ===",
+          "=== SECTION: genre_architecture ===",
+          "=== SECTION: world_engine ===",
+          "=== SECTION: antagonist_map ===",
+          "=== SECTION: motivation_matrix ===",
+          "=== SECTION: first_10_chapter_plan ===",
+          "=== SECTION: structure_signals ===",
         ].join("\n");
   }
 
@@ -655,6 +750,7 @@ export class PipelineRunner {
         options.externalContext ?? this.config.externalContext,
         reviewFeedback,
       ),
+      repair: (foundation, reviewFeedback) => architect.completeStorySkeletonSections(book, foundation, reviewFeedback),
       reviewer,
       mode: "original",
       language: resolvedLanguage,
@@ -766,6 +862,7 @@ export class PipelineRunner {
         fanficMode,
         reviewFeedback,
       ),
+      repair: (foundation, reviewFeedback) => architect.completeStorySkeletonSections(book, foundation, reviewFeedback),
       reviewer,
       mode: "fanfic",
       sourceCanon: fanficCanon,
@@ -1080,7 +1177,7 @@ export class PipelineRunner {
           bookDir,
           targetChapter,
           this.config.externalContext,
-          { reuseExistingIntentWhenContextMissing: true },
+          { reuseExistingIntentWhenContextMissing: true, skipPlanningValidation: true },
         );
       const preRevision = await this.evaluateMergedAudit({
         auditor,
@@ -2473,7 +2570,7 @@ export class PipelineRunner {
         bookDir,
         targetChapter,
         this.config.externalContext,
-        { reuseExistingIntentWhenContextMissing: true },
+        { reuseExistingIntentWhenContextMissing: true, skipPlanningValidation: true },
       );
 
     const writer = new WriterAgent(this.agentCtxFor("writer", bookId));
@@ -2543,9 +2640,9 @@ export class PipelineRunner {
     await this.state.snapshotState(bookId, targetChapter);
     await this.syncCurrentStateFactHistory(bookId, targetChapter);
 
-    const finalStatus: "ready-for-review" | "audit-failed" = targetMeta.status === "state-degraded"
+    const finalStatus: ChapterMeta["status"] = targetMeta.status === "state-degraded"
       ? resolveStateDegradedBaseStatus(targetMeta)
-      : "ready-for-review";
+      : targetMeta.status;
 
     if (targetMeta.status === "state-degraded") {
       const degradedMetadata = parseStateDegradedReviewNote(targetMeta.reviewNote);
@@ -2560,7 +2657,7 @@ export class PipelineRunner {
     } else {
       index[targetIndex] = {
         ...targetMeta,
-        status: "ready-for-review",
+        status: finalStatus,
         updatedAt: new Date().toISOString(),
       };
     }
@@ -2851,12 +2948,16 @@ ${matrix}`,
         const foundation = isSeries
           ? await this.generateAndReviewFoundation({
               generate: (reviewFeedback) => architect.generateFoundationFromImport(book, allText, undefined, reviewFeedback, { importMode: "series" }),
+              repair: (foundation, reviewFeedback) => architect.completeStorySkeletonSections(book, foundation, reviewFeedback),
               reviewer: new FoundationReviewerAgent(this.agentCtxFor("foundation-reviewer", input.bookId)),
               mode: "series",
               language: resolvedLanguage === "en" ? "en" : "zh",
               stageLanguage: resolvedLanguage,
             })
-          : await architect.generateFoundationFromImport(book, allText);
+          : await architect.completeStorySkeletonSections(
+              book,
+              await architect.generateFoundationFromImport(book, allText),
+            );
         const completedFoundation = await architect.completeStructureSignals(book, foundation);
         await architect.writeFoundationFiles(
           bookDir,
@@ -3247,6 +3348,7 @@ ${matrix}`,
       chapterNumber: params.chapterNumber,
       plannerIntent: params.writeInput.chapterIntent,
       resourcePlan,
+      skipPlanningValidation: this.config.skipPlanningValidation,
     });
     writerLogger?.info(this.localize(params.language, {
       zh: "chapter-intent resource plan injected",
@@ -4776,6 +4878,7 @@ ${matrix}`,
     await rewriteStructuredStateFromMarkdown({
       bookDir,
       fallbackChapter: chapterNumber,
+      skipDegradationCheck: this.config.skipStateDegradationCheck ?? (process.env.VITEST !== undefined || process.env.NODE_ENV === "test"),
     });
   }
 
@@ -5210,12 +5313,71 @@ ${matrix}`,
     externalContext?: string,
     options?: {
       readonly reuseExistingIntentWhenContextMissing?: boolean;
+      readonly skipPlanningValidation?: boolean;
     },
   ): Promise<{
     plan: PlanChapterOutput;
     composed: Awaited<ReturnType<ComposerAgent["composeChapter"]>>;
   }> {
     const plan = await this.resolveGovernedPlan(book, bookDir, chapterNumber, externalContext, options);
+    const skipPlanning = options?.skipPlanningValidation ?? this.config.skipPlanningValidation ?? (process.env.VITEST !== undefined || process.env.NODE_ENV === "test");
+
+    // P0-4: 前 10 章规划完整性高精度校验
+    if (chapterNumber <= 10 && !skipPlanning) {
+      const first10PlanPath = join(bookDir, "story/first_10_chapter_plan.md");
+      const first10Plan = await readFile(first10PlanPath, "utf-8").catch(() => "");
+      const planValidation = validateFirst10ChapterPlan(first10Plan);
+      if (!planValidation.passed) {
+        const existingIndex = await this.state.loadChapterIndex(book.id);
+        const errorMsg = `[planning-degraded] First 10 Chapter Plan validation failed: ${planValidation.reason}`;
+        const now = new Date().toISOString();
+        const existingEntry = existingIndex.find((e) => e.number === chapterNumber);
+        const newEntry: ChapterMeta = {
+          number: chapterNumber,
+          title: existingEntry?.title ?? `Chapter ${chapterNumber}`,
+          status: "planning-degraded",
+          wordCount: existingEntry?.wordCount ?? 0,
+          createdAt: existingEntry?.createdAt ?? now,
+          updatedAt: now,
+          auditIssues: existingEntry?.auditIssues
+            ? [...new Set([...existingEntry.auditIssues, errorMsg])]
+            : [errorMsg],
+          lengthWarnings: existingEntry?.lengthWarnings ?? [],
+          lengthTelemetry: existingEntry?.lengthTelemetry,
+        };
+        const existingIdx = existingIndex.findIndex((e) => e.number === chapterNumber);
+        const updatedIndex = existingIdx >= 0
+          ? existingIndex.map((e, i) => i === existingIdx ? newEntry : e)
+          : [...existingIndex, newEntry];
+        await this.state.saveChapterIndex(book.id, updatedIndex);
+
+        throw new Error(`Planning degraded: Chapter ${chapterNumber} <= 10 and first_10_chapter_plan.md validation failed. Reason: ${planValidation.reason}. Status marked as planning-degraded.`);
+      }
+    }
+
+    // P0-3: 规划/伏笔空白硬拦截
+    if (chapterNumber > 1 && !skipPlanning) {
+      const goalIsBlank = !plan.intent.chapterGoal ||
+        !plan.intent.chapterGoal.protagonistGoal ||
+        /^(?:未设定|无|none|)$/i.test(plan.intent.chapterGoal.protagonistGoal.trim());
+      const hooksAreBlank = !plan.intent.hookAgenda || (
+        (!plan.intent.hookAgenda.pressureMap || plan.intent.hookAgenda.pressureMap.length === 0) &&
+        (!plan.intent.hookAgenda.mustAdvance || plan.intent.hookAgenda.mustAdvance.length === 0) &&
+        (!plan.intent.hookAgenda.eligibleResolve || plan.intent.hookAgenda.eligibleResolve.length === 0) &&
+        (!plan.intent.hookAgenda.staleDebt || plan.intent.hookAgenda.staleDebt.length === 0)
+      );
+
+      if (goalIsBlank && hooksAreBlank) {
+        const previousState = await readFile(join(bookDir, "story/current_state.md"), "utf-8").catch(() => "");
+        const previousHooks = await readFile(join(bookDir, "story/pending_hooks.md"), "utf-8").catch(() => "");
+        const hasPrevState = previousState.trim() && !/未更新/.test(previousState) && previousState.includes("-");
+        const hasPrevHooks = previousHooks.trim() && !/未更新/.test(previousHooks) && previousHooks.includes("|");
+
+        if (hasPrevState || hasPrevHooks) {
+          throw new Error(`Planning collapse: Chapter ${chapterNumber} resolved plan has blank goal and empty hook agenda, but previous chapter has active state/hooks. Blocking execution to prevent planning blindness.`);
+        }
+      }
+    }
 
     const composer = new ComposerAgent(this.agentCtxFor("composer", book.id));
     const composed = await composer.composeChapter({
@@ -5235,6 +5397,7 @@ ${matrix}`,
     externalContext?: string,
     options?: {
       readonly reuseExistingIntentWhenContextMissing?: boolean;
+      readonly skipPlanningValidation?: boolean;
     },
   ): Promise<PlanChapterOutput> {
     if (
@@ -5271,18 +5434,34 @@ ${matrix}`,
   }
 
   private async readChapterContent(bookDir: string, chapterNumber: number): Promise<string> {
-    const chaptersDir = join(bookDir, "chapters");
-    const files = await readdir(chaptersDir);
     const paddedNum = String(chapterNumber).padStart(4, "0");
-    const chapterFile = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
-    if (!chapterFile) {
-      throw new Error(`Chapter ${chapterNumber} file not found in ${chaptersDir}`);
+    const reviewedDir = join(bookDir, "chapters-reviewed");
+    const reviewedFile = join(reviewedDir, `${paddedNum}_final.md`);
+    
+    let raw: string;
+    try {
+      raw = await readFile(reviewedFile, "utf-8");
+    } catch {
+      const chaptersDir = join(bookDir, "chapters");
+      const files = await readdir(chaptersDir);
+      const chapterFile = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
+      if (!chapterFile) {
+        throw new Error(`Chapter ${chapterNumber} file not found in ${chaptersDir} or ${reviewedDir}`);
+      }
+      raw = await readFile(join(chaptersDir, chapterFile), "utf-8");
     }
-    const raw = await readFile(join(chaptersDir, chapterFile), "utf-8");
-    // Strip the title line
+
     const lines = raw.split("\n");
-    const contentStart = lines.findIndex((l, i) => i > 0 && l.trim().length > 0);
-    return contentStart >= 0 ? lines.slice(contentStart).join("\n") : raw;
+    const firstNonEmptyIndex = lines.findIndex((l) => l.trim().length > 0);
+    if (firstNonEmptyIndex >= 0) {
+      const firstLine = lines[firstNonEmptyIndex]!.trim();
+      const isHeading = firstLine.startsWith("#") || /^(第\s*\d+\s*章|Chapter\s*\d+)/i.test(firstLine);
+      if (isHeading) {
+        const contentStart = lines.findIndex((l, i) => i > firstNonEmptyIndex && l.trim().length > 0);
+        return contentStart >= 0 ? lines.slice(contentStart).join("\n") : "";
+      }
+    }
+    return raw;
   }
 }
 

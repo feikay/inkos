@@ -377,8 +377,16 @@ export class Scheduler {
     }
     const raw = await readFile(join(chaptersDir, chapterFile), "utf-8");
     const lines = raw.split("\n");
-    const contentStart = lines.findIndex((l, i) => i > 0 && l.trim().length > 0);
-    return contentStart >= 0 ? lines.slice(contentStart).join("\n") : raw;
+    const firstNonEmptyIndex = lines.findIndex((l) => l.trim().length > 0);
+    if (firstNonEmptyIndex >= 0) {
+      const firstLine = lines[firstNonEmptyIndex]!.trim();
+      const isHeading = firstLine.startsWith("#") || /^(第\s*\d+\s*章|Chapter\s*\d+)/i.test(firstLine);
+      if (isHeading) {
+        const contentStart = lines.findIndex((l, i) => i > firstNonEmptyIndex && l.trim().length > 0);
+        return contentStart >= 0 ? lines.slice(contentStart).join("\n") : "";
+      }
+    }
+    return raw;
   }
 
   private cronToMs(cron: string): number {
