@@ -461,6 +461,7 @@ export {
   evaluateChapterScopeGate,
   buildChapterScopeConstraintBlock,
   buildStructureSignalsScopeConstraint,
+  buildChapterRepairBoundaryBlock,
   type ChapterScopeBoundaries,
   type ChapterScopeGateResult,
   type ChapterScopeIssue,

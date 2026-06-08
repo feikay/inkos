@@ -318,19 +318,31 @@ function checkNewEntityOverflow(
   const issues: ChapterScopeIssue[] = [];
 
   // Extract named entities (Chinese names, place names, organization names)
-  // Pattern: 2-4 character sequences that look like Chinese proper nouns
+  // More conservative: filter out surname+verb/particle false positives
   const extractEntities = (text: string): Set<string> => {
     const entities = new Set<string>();
     // Match Chinese proper nouns: surname + given name, place + suffix, org + suffix
-    const patterns = [
-      /(?:[李王张刘陈杨赵黄周吴徐孙马胡朱郭何罗高林郑梁谢唐许冯宋韩邓彭曹曾田萧潘袁蔡蒋余于杜叶程魏苏吕丁任卢姚沈钟姜崔谭陆范汪廖石金贾夏付方白邹孟熊秦邱江尹薛闫段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向汤温芦康])(?:[一-龥]{1,2})/g,
-      /(?:[一-龥]{2,4})(?:公司|集团|工厂|学校|医院|银行|商场|市场|小区|大厦|酒店|饭店|村|镇|县|市|省|区|路|街|巷|胡同)/g,
-    ];
-    for (const pattern of patterns) {
-      const matches = text.matchAll(pattern);
-      for (const m of matches) {
-        entities.add(m[0]);
+    const surnamePattern = /([李王张刘陈杨赵黄周吴徐孙马胡朱郭何罗高林郑梁谢唐许冯宋韩邓彭曹曾田萧潘袁蔡蒋余于杜叶程魏苏吕丁任卢姚沈钟姜崔谭陆范汪廖石金贾夏付方白邹孟熊秦邱江尹薛闫段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向汤温芦康])([一-龥]{1,2})/g;
+    let sm;
+    while ((sm = surnamePattern.exec(text)) !== null) {
+      const full = sm[0];
+      const givenPart = full.slice(1); // the "name" part after surname
+      // Filter out common non-name patterns
+      const commonNonNameEnd = /[边说看去来过回进出在是有的得着嘛吗呢啊吧脑站迎见听见了到上下前后里外中他她它这那什么怎]/;
+      const commonNonNameFull = /^(?:脑海|海上|站定|站起|走向|看向|电视|电话|封条|信任|信心|信用|广播|厂长|经理|主任|科长|组长|队长)$/;
+      if (givenPart.length >= 1 && (
+        commonNonNameEnd.test(givenPart[givenPart.length - 1] ?? "") ||
+        commonNonNameFull.test(givenPart)
+      )) {
+        continue;
       }
+      entities.add(full);
+    }
+    // Place/org suffix matches
+    const placePattern = /(?:[一-龥]{2,4})(?:公司|集团|工厂|学校|医院|银行|商场|市场|小区|大厦|酒店|饭店|村|镇|县|市|省|区|路|街|巷|胡同)/g;
+    let pm;
+    while ((pm = placePattern.exec(text)) !== null) {
+      entities.add(pm[0]);
     }
     return entities;
   };
@@ -340,10 +352,11 @@ function checkNewEntityOverflow(
 
   const newEntities = [...currentEntities].filter((e) => !previousEntities.has(e));
 
+  // Entity overflow: only WARN, never FAIL (heuristic is imprecise)
   if (newEntities.length >= failThreshold) {
     issues.push({
       type: "new_entity_overflow",
-      severity: "FAIL",
+      severity: "WARN",
       detail: `新增${newEntities.length}个疑似计划外专名/实体（阈值${failThreshold}）：${newEntities.slice(0, 10).join("、")}${newEntities.length > 10 ? "等" : ""}`,
     });
   } else if (newEntities.length >= warnThreshold) {
@@ -365,12 +378,20 @@ function checkForbiddenItemViolations(
 
   if (!forbiddenItems || !forbiddenItems.trim()) return issues;
 
-  const forbiddenPhrases = extractKeyPhrases(forbiddenItems);
+  // Strip parenthetical examples before extracting phrases
+  // "禁止大段解释世界观（时代背景通过细节自然带出：BB机、存折）" → "禁止大段解释世界观"
+  // "禁止某事（允许X, Y, Z）" → "禁止某事"
+  const cleaned = forbiddenItems
+    .replace(/[（(][^）)]*(?:示例|如|例如|比如|通过|允许|自然带出)[^）)]*[）)]/gu, "")
+    .replace(/[（(][^）)]*[）)]/gu, "")  // Also strip remaining parens
+    .replace(/[：:]\s*[^、,\n]+(?:[、,][^、,\n]+)*$/gmu, ""); // Strip trailing examples after colon
+
+  const forbiddenPhrases = extractKeyPhrases(cleaned);
   // Also extract content words from negation phrases: "不暴露X" → also check "X"
   const expandedPhrases = new Set(forbiddenPhrases);
   for (const phrase of forbiddenPhrases) {
     expandedPhrases.add(phrase);
-    // Strip negation prefixes and check the content
+    // Strip negation prefixes
     const stripped = phrase.replace(/^(?:不|不得|禁止|严禁|不能|不可|不应)/u, "");
     if (stripped.length >= 2 && stripped !== phrase) {
       expandedPhrases.add(stripped);
@@ -397,44 +418,81 @@ function checkForbiddenItemViolations(
  * short core tokens (2-8 chars, filtered against common stop words).
  */
 function extractNotesKeywords(notes: string): string[] {
-  // Phase 1: Full phrase extraction (existing behavior)
-  const fullPhrases = extractKeyPhrases(notes);
+  // Phase 1: Full phrase extraction (3-30 chars)
+  const fullPhrases = extractKeyPhrases(notes).filter((p) => p.length >= 3 || isHighSignal2Char(p));
 
   // Phase 2: Short core token extraction using sliding window
   const tokens: string[] = [];
 
-  // Split on common delimiters
   const segments = notes.split(/[,，、；;。\s\n]+/u);
   for (const segment of segments) {
-    if (segment.length < 2) continue;
-
-    // For short segments, add directly
+    if (segment.length < 3) continue;
     if (segment.length <= 8) {
       tokens.push(segment);
       continue;
     }
-
-    // For longer segments, extract sliding 2-8 char windows
-    // and also try suffix-based extraction
-    for (let w = 2; w <= 8; w += 1) {
+    // For longer segments, extract 3-8 char windows only (drop 2-char for long segments)
+    for (let w = 3; w <= 8; w += 1) {
       for (let start = 0; start <= segment.length - w; start += 1) {
         const token = segment.slice(start, start + w).trim();
-        if (token.length >= 2) tokens.push(token);
+        if (token.length >= 3) tokens.push(token);
       }
     }
   }
 
-  // Combine and deduplicate
-  const allPhrases = new Set([...fullPhrases, ...tokens.map((t) => t.trim()).filter((t) => t.length >= 2 && t.length <= 8)]);
+  const allPhrases = new Set([...fullPhrases, ...tokens.map((t) => t.trim()).filter((t) => t.length >= 3)]);
 
-  // Filter out overly generic stop words
+  // Comprehensive stop words: generic words that should never be hook keywords
   const stopWords = new Set([
+    // Generic narrative terms
     "主角", "关键", "事情", "线索", "重要", "可能", "需要", "已经", "这个", "那个",
     "一些", "什么", "怎么", "为什么", "在哪里", "人物", "冲突", "资源", "开放",
     "未完成", "已完成", "进行中", "待定", "未知", "备注",
+    // Family / common nouns
+    "家里", "父亲", "母亲", "爸爸", "妈妈", "儿子", "女儿", "哥哥", "姐姐", "弟弟", "妹妹",
+    "厂里", "车间", "家里", "门口", "客厅", "卧室", "厨房",
+    // Generic items / places / background context
+    "电器", "电风扇", "洗衣机", "电视机", "自行车", "摩托车",
+    "棉纺", "纺织", "布料", "衣服", "鞋子", "家具",
+    "棉纺厂", "纺织厂", "服装厂", "食品厂", "机械厂", "化工厂",
+    "家属院", "生活区", "厂房", "车间", "仓库", "办公室",
+    "生产线", "流水线", "技术科", "财务科", "供销科",
+    // Generic titles/roles
+    "厂长", "经理", "主任", "科长", "组长", "队长", "班长",
+    "工人", "员工", "同事", "老板",
+    "东西", "事情", "问题", "办法", "机会", "时间", "地方",
+    // Generic verbs/actions
+    "起来", "出来", "进去", "下来", "过去", "回来", "回去", "过来",
+    // Economic generic terms
+    "倒爷", "倒卖", "批发", "零售", "进货", "出货",
+    "存钱", "赚钱", "赔钱", "借钱", "还钱", "花钱",
+    "八百", "几千", "几万", "万元", "块钱",
   ]);
 
-  return [...allPhrases].filter((p) => !stopWords.has(p));
+  return [...allPhrases].filter((p) => !stopWords.has(p) && (p.length >= 3 || isHighSignal2Char(p)));
+}
+
+/**
+ * Check if a 2-char token is a high-signal word worth keeping as a hook keyword.
+ * High-signal tokens: contain a CJK Unified Ideograph that is not among the
+ * most common 500 characters, suggesting it's part of a proper name or rare term.
+ * Also accepts tokens that match common noun-suffix patterns (e.g. XX厂, XX会).
+ */
+function isHighSignal2Char(token: string): boolean {
+  if (token.length !== 2) return false;
+  // Noun-suffix patterns: organization/event/place suffixes
+  if (/[厂会局院院部组队盟商社网]$/.test(token)) return true;
+  if (/^[局院商社网]/.test(token)) return true;
+  // If either character is outside the top 300 most common CJK characters,
+  // it's likely a name/rare term fragment worth keeping
+  const commonChars = new Set(
+    "的是不我一有人在这他之么下可到你中上个以们为能说也那会主要时出为然没看自日但样还如想去于其前所道将而实之与因从被后等向对已手头把话加点小本新无如里开法此样它理体当相全定度经现力动用产机前都自外家间行种实好明国后道长高你打到学进里能想多天通起都而子那面之如好样和后物从当你又见意从气知手把点前很作小最"
+  );
+  // Not in top common chars → rarer character → likely name fragment
+  for (const ch of token) {
+    if (!commonChars.has(ch)) return true;
+  }
+  return false;
 }
 
 /**
@@ -494,6 +552,8 @@ function parsePendingHooksTable(
   const notesIdx = findColumnIndex(header, ["备注", "notes", "内容", "content", "描述", "description"]);
   const statusIdx = findColumnIndex(header, ["状态", "status"]);
   const hookIdIdx = findColumnIndex(header, ["hook_id", "hook id", "id"]);
+  const startChapterIdx = findColumnIndex(header, ["起始章节", "start chapter", "起始", "start"]);
+  const recentProgressIdx = findColumnIndex(header, ["最近推进", "recent progress", "最近", "recent"]);
 
   if (payoffIdx < 0) return { tableDetected: true, issues }; // Can't determine payoff chapters
 
@@ -507,6 +567,17 @@ function parsePendingHooksTable(
 
     // Skip if payoff is null, 待定, empty, or <= current chapter
     if (payoffChapter === null || payoffChapter <= currentChapter) continue;
+
+    // Check if this hook is naturally in-progress at current chapter.
+    // Only consider it "in-progress" if 最近推进 explicitly mentions current chapter.
+    let isInProgressAtCurrentChapter = false;
+    if (recentProgressIdx >= 0) {
+      const recentRaw = cells[recentProgressIdx]?.trim() ?? "";
+      const chPattern = new RegExp(`[Cc]h[.\\s]*${currentChapter}\\b|第\\s*${currentChapter}\\s*章`, "u");
+      if (chPattern.test(recentRaw)) {
+        isInProgressAtCurrentChapter = true;
+      }
+    }
 
     // Skip closed/resolved hooks
     if (statusIdx >= 0) {
@@ -545,9 +616,14 @@ function parsePendingHooksTable(
           ),
         );
 
+        // If hook is naturally in-progress at current chapter, only flag with completion markers
+        if (isInProgressAtCurrentChapter && !hasCompletion) {
+          continue;
+        }
+
         issues.push({
           type: "premature_hook_fulfillment",
-          severity: hasCompletion ? "FAIL" : "WARN",
+          severity: hasCompletion ? "FAIL" : (isInProgressAtCurrentChapter ? "WARN" : "WARN"),
           detail: `伏笔 keyword "${kw}"（预期回收在第${payoffChapter}章）在第${currentChapter}章${hasCompletion ? "疑似被明显兑现" : "已出现"}`,
         });
         break; // One issue per hook row
@@ -719,4 +795,60 @@ export function buildStructureSignalsScopeConstraint(
     boundaries.surfaceGoal ? `当前章目标：${boundaries.surfaceGoal}` : "",
     "仅使用与上述目标直接相关的结构信号词。",
   ].filter(Boolean).join("\n");
+}
+
+/**
+ * Build a hard input boundary block for repair-stage prompts
+ * (plot-fix, quality-fix, polish). Prevents the LLM from treating
+ * future-chapter material as writable content.
+ */
+export function buildChapterRepairBoundaryBlock(intentContent: string): string {
+  const boundaries = parseChapterScopeBoundaries(intentContent);
+  const parts = [
+    "【修稿输入边界 — 硬性约束】",
+    "",
+    "你只能使用当前章节已有的事件、人物、场景、冲突进行修复。",
+    "",
+  ];
+
+  if (boundaries.surfaceGoal) {
+    parts.push(`本章唯一目标：${boundaries.surfaceGoal}`);
+    parts.push("");
+  }
+
+  parts.push(
+    "== 允许 ==",
+    "- 扩写/重排/润色当前章已有事件和对话。",
+    "- 增强当前章已出现的冲突、反转、代价、收益。",
+    "- 用当前章已有素材补 Hook / Pressure / Payoff / Pull。",
+    "- 强化章尾拉力（基于当前章已有线索）。",
+    "",
+    "== 禁止 ===",
+    "- 禁止从后续章节计划中提取任何新剧情写入当前章。",
+    "- 禁止把 pending_hooks 中预期回收章大于当前章的伏笔，当成可写素材。",
+    "- 禁止把书级 structure_signals 中未出现在当前章 intent §12 的信号词，新增为正文内容。",
+    "- 禁止引入未来人物、未来资源、未来地点、未来势力。",
+    "- 禁止为了补字数而新增后续章节事件。",
+  );
+
+  if (boundaries.forbiddenItems) {
+    parts.push(`- 本章禁止事项：${boundaries.forbiddenItems}`);
+  }
+  if (boundaries.nextChapterDirection) {
+    parts.push(`- 以下方向属于下一章目标，本章不得提前完成：${boundaries.nextChapterDirection}`);
+  }
+  if (boundaries.unresolvedProblems) {
+    parts.push(`- 以下问题不得在本章解决：${boundaries.unresolvedProblems}`);
+  }
+
+  parts.push(
+    "",
+    "== 关于报告/信号的说明 ==",
+    "- structure signals / six-step-plot / story-effectiveness 报告是审核器使用的维度，不是要求你把所有关键词写进正文。",
+    "- 报告中提到的缺失项，只能用当前章已有素材补强。",
+    "- 报告中出现的未来 hook / future signal / 下一章方向，不得写入正文。",
+    "- 如果必须牺牲某项结构维度来守住边界，优先守住边界。",
+  );
+
+  return parts.join("\n");
 }

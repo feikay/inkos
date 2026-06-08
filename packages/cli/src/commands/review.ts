@@ -21,6 +21,7 @@ import {
   evaluateChapterScopeGate,
   buildChapterScopeConstraintBlock,
   buildStructureSignalsScopeConstraint,
+  buildChapterRepairBoundaryBlock,
   type StructureSignals,
   type StructureSignalsReadResult,
   type InspectStructureSignalsResult,
@@ -2618,11 +2619,10 @@ function buildRepairLengthConstraint(params: {
 
   return `【字数约束】
 - 目标字数：${targetText}
-- 允许区间：${softMinText}–${softMaxText}
-- 硬上限：${hardMaxText}（严禁超过）
 - 当前候选字数：${currentText}
-${overSoft ? "- 当前已超过软上限，修复时必须优先压缩，不得继续扩写。\n" : ""}- 修复后输出不得超过硬上限 ${hardMaxText}。
-- 禁止通过增加新支线、新人物、新场景来填充字数。`;
+- 最低字数要求：${softMinText}（不得低于此值）
+${overSoft ? `- 诊断提示：当前已超过软上限 ${softMaxText}，如字数异常增长，应优先检查是否写入后续章节内容，而非简单压缩。\n` : ""}- 字数超出软上限不是错误，但不允许为了凑字数新增后续章节事件、未来人物或支线。
+- 如果字数不足软下限，只能用当前章已有场景的动作、对话、心理、细节来扩展。`;
 }
 
 /**
@@ -2642,8 +2642,7 @@ async function loadChapterIntentContent(bookDir: string, chapter: number): Promi
  */
 function buildRepairScopeConstraint(intentContent: string): string {
   if (!intentContent.trim()) return "";
-  const boundaries = parseChapterScopeBoundaries(intentContent);
-  return buildChapterScopeConstraintBlock(boundaries);
+  return buildChapterRepairBoundaryBlock(intentContent);
 }
 
 /**
@@ -2651,20 +2650,11 @@ function buildRepairScopeConstraint(intentContent: string): string {
  */
 function buildRepairSignalsScopeConstraint(intentContent: string): string {
   if (!intentContent.trim()) return "";
-  return buildStructureSignalsScopeConstraint(intentContent);
-}
-
-/**
- * Check if a repair output exceeds hardMax and should be blocked.
- */
-function isRepairLengthBlocked(params: {
-  readonly outputText: string;
-  readonly targetChapterWords: number;
-  readonly language: "zh" | "en";
-}): boolean {
-  const spec = buildLengthSpec(params.targetChapterWords, params.language);
-  const count = countChapterLength(params.outputText, spec.countingMode);
-  return count > spec.hardMax;
+  const base = buildStructureSignalsScopeConstraint(intentContent);
+  return `${base}
+【重要】以上信号词是审核器使用的维度指标，不是要求你把它们全部写入正文。
+未在当前章 intent §12 中出现的书级信号，不得新增进当前章正文。
+如果你不确定某个信号是否可用于当前章，宁可不用。`;
 }
 
 async function checkPublishReadyFinalLength(params: {
@@ -2686,15 +2676,15 @@ export function applyPublishReadyLengthGate(
 ): { readonly publishStatus: PublishReadyStatus; readonly warnings: ReadonlyArray<string> | undefined } {
   const warnings = [...(existingWarnings ?? [])];
   if (gate.status === "FAIL") {
-    warnings.push(`length_gate: ${gate.summary}`);
-    const hardBlocked = publishStatus === "BLOCKED_BY_RESOURCE"
-      || publishStatus === "BLOCKED_BY_CONTINUITY"
-      || publishStatus === "BLOCKED_BY_QUALITY"
-      || publishStatus === "NEED_REWRITE";
-    return {
-      publishStatus: hardBlocked ? publishStatus : "BLOCKED_BY_LENGTH",
-      warnings: [...new Set(warnings)],
-    };
+    // Length over hardMax is a diagnostic warning, not a hard block.
+    // The root cause is input boundary violations, not length itself.
+    warnings.push(`length_diagnostic: ${gate.summary}`);
+    warnings.push("length_diagnostic: 字数超上限可能是输入越界的症状，请检查 scope_gate 和修稿输入边界。");
+    // Downgrade READY_TO_EXPORT to READY_WITH_WARNINGS if needed
+    if (publishStatus === "READY_TO_EXPORT") {
+      return { publishStatus: "READY_WITH_WARNINGS", warnings: [...new Set(warnings)] };
+    }
+    return { publishStatus, warnings: [...new Set(warnings)] };
   }
   if (gate.status === "WARN") {
     warnings.push(`length_gate: ${gate.summary}`);
@@ -3839,7 +3829,7 @@ async function writeQualityFixedChapter(params: {
   return outputPath;
 }
 
-function buildQualityAutoFixPrompt(currentText: string, report: Partial<FanqieQualityReport>, lengthConstraint?: string, scopeConstraint?: string): string {
+export function buildQualityAutoFixPrompt(currentText: string, report: Partial<FanqieQualityReport>, lengthConstraint?: string, scopeConstraint?: string): string {
   const issues = (report.issues ?? []).map((issue) => `- [${issue.severity}] ${issue.type}: ${issue.detail}`).join("\n") || "- 无";
   const risks = (report.reader_drop_risks ?? []).map((item) => `- ${item}`).join("\n") || "- 无";
   const suggestions = (report.polish_suggestions ?? []).map((item) => `- ${item}`).join("\n") || "- 无";
@@ -3868,7 +3858,7 @@ ${lengthBlock}${scopeBlock}
 6. 保留原文 80% 以上。
 7. 只针对报告中的问题做局部增强。
 8. 输出完整章节正文。
-${lengthConstraint ? "9. 严格遵守字数约束，不得超过硬上限。如当前已超软上限，优先压缩式修复。\n" : ""}${scopeConstraint ? "10. 严格遵守章节作用域约束，不提前完成下一章目标，不引入未来人物/支线。\n" : ""}
+${lengthConstraint ? "9. 不得低于最低字数要求。字数异常增长请检查输入边界，勿为凑字数新增未来事件。\n" : ""}${scopeConstraint ? "10. 严格遵守章节作用域约束，不提前完成下一章目标，不引入未来人物/支线。\n" : ""}
 【增强方向】
 如果问题包含"爽点密度不足"：
 - 增加主角获得收益、反击、压制、突破、信息揭露的细节。
@@ -4100,7 +4090,7 @@ async function writePlotFixedChapter(params: {
   return outputPath;
 }
 
-function buildPlotAutoFixPrompt(
+export function buildPlotAutoFixPrompt(
   currentText: string,
   publishReport: Partial<PublishReadyResult> | null,
   sixStepReport: Record<string, unknown> | null,
@@ -4154,7 +4144,7 @@ ${lengthBlock}${scopeBlock}
 3. 不整章重写，保留原文 70% 以上，只做 3-10 处定点补强。
 4. 不新增无来源 of 系统规则、战力设定、隐藏道具或重大角色关系。
 5. 输出完整章节正文。
-${lengthConstraint ? "6. 严格遵守字数约束，不得超过硬上限。如当前已超软上限，优先压缩式修复。\n" : ""}${scopeConstraint ? "7. 严格遵守章节作用域约束，不提前完成下一章目标，不引入未来人物/支线。\n" : ""}`;
+${lengthConstraint ? "6. 不得低于最低字数要求。字数异常增长请检查输入边界，勿为凑字数新增未来事件。\n" : ""}${scopeConstraint ? "7. 严格遵守章节作用域约束，不提前完成下一章目标，不引入未来人物/支线。\n" : ""}`;
 }
 
 function formatPlotReportForPrompt(report: Record<string, unknown> | null): string {
@@ -4674,7 +4664,6 @@ async function polishFanqieQualityChapter(params: {
     };
   }
 
-  let lengthBlocked = false;
   while ((finalScore < passThreshold || (goldenNeedsFix && attempts === 0)) && attempts < effectiveMaxAttempts) {
     const nextAttempt = attempts + 1;
     if (!quality.report.polish_prompt.trim() && !hasGoldenInstructions) break;
@@ -4694,18 +4683,6 @@ async function polishFanqieQualityChapter(params: {
     });
     usedPolishedFile = relative(params.bookDir, polishedPath);
     attempts = nextAttempt;
-
-    // Length gate: check if polished output exceeds hardMax
-    const polishedText = await readFile(polishedPath, "utf-8");
-    const spec = buildLengthSpec(targetWords, lang as "zh" | "en");
-    const polishedCount = countChapterLength(polishedText, spec.countingMode);
-    if (polishedCount > spec.hardMax) {
-      if (!params.json) {
-        log(`polish attempt ${nextAttempt}: output ${formatLengthCount(polishedCount, spec.countingMode)} exceeds hardMax ${formatLengthCount(spec.hardMax, spec.countingMode)}. Blocking further polish.`);
-      }
-      lengthBlocked = true;
-      break;
-    }
 
     quality = await checkFanqieQualityChapter({
       bookId: params.bookId,
@@ -4747,7 +4724,7 @@ async function polishFanqieQualityChapter(params: {
     finalReportJsonPath: paths.jsonPath,
     finalReportMarkdownPath: paths.markdownPath,
     blockedByContinuity: false,
-    blockedByLength: lengthBlocked,
+    blockedByLength: false,
   };
 }
 
