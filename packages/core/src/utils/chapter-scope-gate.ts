@@ -28,7 +28,7 @@ export interface ChapterScopeGateResult {
 }
 
 export interface ChapterScopeIssue {
-  readonly type: "premature_goal_completion" | "premature_hook_fulfillment" | "new_entity_overflow" | "forbidden_item_violation";
+  readonly type: "premature_goal_completion" | "premature_next_chapter_fulfillment" | "premature_hook_fulfillment" | "new_entity_overflow" | "forbidden_item_violation";
   readonly severity: "WARN" | "FAIL";
   readonly detail: string;
 }
@@ -59,7 +59,7 @@ const DEFAULT_NEW_ENTITY_FAIL_THRESHOLD = 6;
  */
 export function parseChapterScopeBoundaries(intentContent: string): ChapterScopeBoundaries {
   const extract = (sectionLabel: string): string => {
-    // Match "## N. sectionName" headers and capture content until next ## header
+    // Match "## N. sectionName" or "## sectionName" headers
     const patterns = [
       new RegExp(`##\\s*\\d+[.\\s]*${escapeRegex(sectionLabel)}[\\s\\S]*?(?=\\n##\\s|$)`, "u"),
       new RegExp(`##\\s*${escapeRegex(sectionLabel)}[\\s\\S]*?(?=\\n##\\s|$)`, "u"),
@@ -67,30 +67,54 @@ export function parseChapterScopeBoundaries(intentContent: string): ChapterScope
     for (const pattern of patterns) {
       const match = intentContent.match(pattern);
       if (match?.[0]) {
-        return match[0].replace(/^##\s*\d+[.\s]*[^\n]*\n?/u, "").trim();
+        // Strip "##", optional section number, header text, trailing newline
+        return match[0].replace(/^##\s*(?:\d+[.\s]*)?[^\n]*\n?/u, "").trim();
       }
     }
     return "";
   };
 
-  // Extract surface goal from §3 本章主角目标
-  const goalSection = extract("本章主角目标");
-  const surfaceGoalMatch = goalSection.match(/(?:表层目标|主角目标)[：:]\s*(.+)/u);
-  const surfaceGoal = surfaceGoalMatch?.[1]?.trim() ?? "";
+  // Helper: match a field value on a single line, with or without bold/bullet
+  const matchField = (section: string, labels: string[]): string => {
+    for (const label of labels) {
+      const pattern = fieldPattern(label);
+      const m = section.match(new RegExp(pattern + "\\s*(.+)", "u"));
+      if (m?.[1]) return m[1].trim();
+    }
+    return "";
+  };
 
-  // Extract next chapter direction from §9 下一章钩子
+  // Helper: multiline field extraction with bold/bullet support
+  const matchMultilineField = (section: string, labels: string[]): string => {
+    for (const label of labels) {
+      const pattern = fieldPattern(label);
+      const re = new RegExp(pattern + "\\s*", "u");
+      const result = extractMultilineField(section, re);
+      if (result) return result;
+    }
+    return "";
+  };
+
+  // Extract surface goal from §3 本章主角目标, §3 本章目标, or direct header
+  const goalSection = extract("本章主角目标") || extract("本章目标");
+  const surfaceGoal = matchField(goalSection, ["表层目标", "主角目标", "本章目标"]);
+
+  // Extract next chapter direction from §9 下一章钩子 or direct ## header
   const hookSection = extract("下一章钩子");
-  const nextDirMatch = hookSection.match(/(?:下一章自然推进方向)[：:]\s*(.+)/u);
-  const nextChapterDirection = nextDirMatch?.[1]?.trim() ?? "";
-  const unresolvedProblems = extractMultilineField(hookSection, /(?:未解决问题)[：:]\s*/u);
+  const directNextSection = extract("下一章自然推进方向") || extract("Next chapter direction") || extract("Next");
+  const nextChapterDirection = matchField(hookSection, ["下一章自然推进方向", "下一章推进方向", "Next chapter direction"])
+    || (directNextSection ? directNextSection.split("\n")[0]?.trim() ?? "" : "");
+  const unresolvedProblems = matchMultilineField(hookSection, ["未解决问题"]);
 
-  // Extract forbidden items from §11 写作执行提醒
+  // Extract forbidden items from §11 写作执行提醒 or direct header
   const execSection = extract("写作执行提醒");
-  const forbiddenItems = extractMultilineField(execSection, /(?:禁止事项)[：:]\s*/u);
+  const directForbiddenSection = extract("禁止事项");
+  const forbiddenItems = matchMultilineField(execSection, ["禁止事项"])
+    || (directForbiddenSection ? directForbiddenSection.trim() : "");
 
-  // Extract allowed new foreshadowing from §8 (supports multiline)
+  // Extract allowed new foreshadowing from §8
   const endingSection = extract("本章结局反馈");
-  const allowedNewForeshadowing = extractMultilineField(endingSection, /(?:新增伏笔)[：:]\s*/u);
+  const allowedNewForeshadowing = matchMultilineField(endingSection, ["新增伏笔"]);
 
   return {
     surfaceGoal,
@@ -100,6 +124,18 @@ export function parseChapterScopeBoundaries(intentContent: string): ChapterScope
     allowedNewForeshadowing,
     rawIntent: intentContent,
   };
+}
+
+/**
+ * Build a regex pattern that matches a field label with optional Markdown bold,
+ * optional bullet prefix, and colon suffix.
+ * e.g. matches: "表层目标：", "**表层目标**：", "- 表层目标：", "- **表层目标**："
+ */
+function fieldPattern(label: string): string {
+  const escaped = escapeRegex(label);
+  // Match: optional bullet, optional whitespace, optional bold, label, optional bold, colon
+  // Works both in full-section match() and per-line exec()
+  return `\\s*[-*]?\\s*(?:\\*\\*)?\\s*${escaped}\\s*(?:\\*\\*)?[：:]`;
 }
 
 /**
@@ -122,6 +158,14 @@ export function evaluateChapterScopeGate(input: ChapterScopeGateInput): ChapterS
     input.chapterText,
   );
   issues.push(...prematureGoals);
+
+  // 1.5. Check next-chapter fulfillment: are events in "下一章自然推进方向"
+  //      being written as already-happened in current chapter?
+  const nextChapterIssues = checkNextChapterFulfillment(
+    boundaries.nextChapterDirection,
+    input.chapterText,
+  );
+  issues.push(...nextChapterIssues);
 
   // 2. Check premature hook fulfillment: are pending hooks with expected payoff
   //    > current chapter being fulfilled?
@@ -252,6 +296,142 @@ function checkPrematureGoalCompletion(
   return issues;
 }
 
+/**
+ * Check if events described in "下一章自然推进方向" have been prematurely
+ * fulfilled (not just predicted/foreshadowed) in the current chapter.
+ */
+function checkNextChapterFulfillment(
+  nextChapterDirection: string,
+  chapterText: string,
+): ChapterScopeIssue[] {
+  const issues: ChapterScopeIssue[] = [];
+  if (!nextChapterDirection || !nextChapterDirection.trim()) return issues;
+
+  // Extract concrete event noun phrases (2-15 chars) from the direction text
+  const directionPhrases = extractKeyPhrases(nextChapterDirection);
+  // Also extract shorter sub-phrases for partial matching
+  const subPhrases: string[] = [];
+  for (const phrase of directionPhrases) {
+    if (phrase.length <= 6) continue;
+    for (let w = 2; w <= 6; w += 1) {
+      for (let s = 0; s <= phrase.length - w; s += 1) {
+        const sub = phrase.slice(s, s + w).trim();
+        if (sub.length >= 2 && !/^(?:需要|展示|建立|形成|确保|提升|增强|实现|宋言|需要|初步|可信|金手指)$/.test(sub)) {
+          subPhrases.push(sub);
+        }
+      }
+    }
+  }
+  // Also extract 2-char tokens from the full direction text (for concept matching)
+  const allTokens = nextChapterDirection.split(/[,，、；;。\s\n（）()：:]+/u);
+  for (const token of allTokens) {
+    if (token.length >= 2 && token.length <= 6 && !/^(?:如|例如|比如|需要|展示|建立|形成|确保|提升|增强|实现|宋言|初步|可信)$/.test(token)) {
+      subPhrases.push(token);
+    }
+  }
+  const allDirectionPhrases = [...new Set([...directionPhrases, ...subPhrases])];
+
+  // Prediction/foreshadowing markers — if these appear near the keyword,
+  // the event is merely predicted, not fulfilled
+  const predictionMarkers = /可能会|也许会|大概会|应该会|或许会|也许|可能|如果|要是|等两天|先别|先不|再看|过几天|过两天|三天后|几天后|将来|预计|估计|说不准|不一定/;
+
+  // Fulfillment/completion markers — if these appear near the keyword,
+  // the event has been written as already-happened
+  const fulfillmentMarkers = /已经|果然|真的|当场|立即|立刻|马上|就|现在|话音未落|话音落下|话音刚落|啪地|猛地|突然|一下子|终于|真的|确实|竟然|居然/;
+
+  for (const phrase of allDirectionPhrases) {
+    if (phrase.length < 2 || phrase.length > 15) continue;
+
+    // Skip phrases that are clearly meta-descriptions, not concrete events
+    if (/^(?:宋言|需要|展示|建立|形成|确保|提升|增强|实现)$/.test(phrase)) continue;
+
+    // Check if phrase appears in chapter text
+    const idx = chapterText.indexOf(phrase);
+    if (idx < 0) continue;
+
+    // Get nearby context
+    const ctxStart = Math.max(0, idx - 30);
+    const ctxEnd = Math.min(chapterText.length, idx + phrase.length + 30);
+    const context = chapterText.slice(ctxStart, ctxEnd);
+
+    // If prediction marker is nearby → this is just foreshadowing, not fulfillment
+    if (predictionMarkers.test(context)) {
+      continue;
+    }
+
+    // If fulfillment marker is nearby → this is premature fulfillment
+    if (fulfillmentMarkers.test(context)) {
+      issues.push({
+        type: "premature_next_chapter_fulfillment",
+        severity: "FAIL",
+        detail: `下一章方向"${phrase}"在当前章被提前兑现（检测到完成/发生语义）`,
+      });
+    }
+  }
+
+  // Also check: if the entire direction text mentions a concrete action-template
+  // like "如X" or "例如X" patterns, extract the X and check for it
+  const examplePattern = /[（(]?(?:如|例如|比如)\s*([^，,。.\n）)]{3,20})/gu;
+  let em;
+  while ((em = examplePattern.exec(nextChapterDirection)) !== null) {
+    const example = em[1]?.trim() ?? "";
+    if (example.length < 2) continue;
+
+    // Check if the example text OR its 2-char sub-tokens appear in the chapter
+    const exampleTokens = [example];
+    for (let i = 0; i <= example.length - 2; i += 1) {
+      exampleTokens.push(example.slice(i, i + 2));
+    }
+    for (const et of [...new Set(exampleTokens)]) {
+      if (et.length < 2) continue;
+      const idx2 = chapterText.indexOf(et);
+      if (idx2 < 0) continue;
+
+      const ctxStart2 = Math.max(0, idx2 - 30);
+      const ctxEnd2 = Math.min(chapterText.length, idx2 + et.length + 30);
+      const ctx2 = chapterText.slice(ctxStart2, ctxEnd2);
+
+      if (predictionMarkers.test(ctx2)) continue;
+      if (fulfillmentMarkers.test(ctx2)) {
+        issues.push({
+          type: "premature_next_chapter_fulfillment",
+          severity: "FAIL",
+          detail: `下一章方向概念"${et}"（来自示例"${example}"）在当前章被提前兑现`,
+        });
+        break;
+      }
+    }
+  }
+
+  // Self-contained prediction→fulfillment detection:
+  // If chapter text contains a prediction pattern ("X天内会Y/可能Y") followed
+  // shortly by the actual event happening with fulfillment markers, flag it.
+  const selfFulfillPattern = /([^，。！？\n]{2,20})(?:可能会|也许会|三天?内|几天?内|过几天|过两|即将|快要|将要|定会|一定会)([^，。！？\n]{2,20})[^。！？\n]*[。！？]/gu;
+  let sf;
+  while ((sf = selfFulfillPattern.exec(chapterText)) !== null) {
+    const subject = (sf[1] ?? "").trim();
+    const event = (sf[2] ?? "").trim();
+    if (subject.length < 2 || event.length < 2) continue;
+
+    // Search forward from this prediction: does the event happen within 200 chars?
+    const afterPrediction = chapterText.slice(sf.index + sf[0].length, sf.index + sf[0].length + 200);
+    // Extract the core content word from the event (strip modal/tense particles)
+    const eventCore = event.replace(/^(?:会|将|要|可能|也许|大概)/u, "").replace(/(?:了|的|地|得)$/u, "");
+    const eventWord = eventCore.slice(0, Math.min(4, eventCore.length));
+    if (eventWord.length >= 1 && fulfillmentMarkers.test(afterPrediction) &&
+        (afterPrediction.includes(eventWord) || afterPrediction.includes(eventCore))) {
+      issues.push({
+        type: "premature_next_chapter_fulfillment",
+        severity: "FAIL",
+        detail: `文本中出现预测模式并随后兑现（"${subject}...${eventWord}"），疑似提前完成下一章验证事件`,
+      });
+      break; // One issue per chapter is enough
+    }
+  }
+
+  return issues;
+}
+
 function checkPrematureHookFulfillment(
   pendingHooksContent: string,
   currentChapter: number,
@@ -328,8 +508,8 @@ function checkNewEntityOverflow(
       const full = sm[0];
       const givenPart = full.slice(1); // the "name" part after surname
       // Filter out common non-name patterns
-      const commonNonNameEnd = /[边说看去来过回进出在是有的得着嘛吗呢啊吧脑站迎见听见了到上下前后里外中他她它这那什么怎]/;
-      const commonNonNameFull = /^(?:脑海|海上|站定|站起|走向|看向|电视|电话|封条|信任|信心|信用|广播|厂长|经理|主任|科长|组长|队长)$/;
+      const commonNonNameEnd = /[边说看去来过回进出在是有的得着嘛吗呢啊吧脑站迎见听见了到上下前后里外中他她它这那什么怎把张嘴咽撕一脸老]/;
+      const commonNonNameFull = /^(?:脑海|海上|站定|站起|走向|看向|电视|电话|封条|信任|信心|信用|广播|厂长|经理|主任|科长|组长|队长|张嘴|了一|脸撕|言把|言面|言张|言咽|的老|快等|一张|脸上|你快|家交|言低|言走|门口|钱家)$/;
       if (givenPart.length >= 1 && (
         commonNonNameEnd.test(givenPart[givenPart.length - 1] ?? "") ||
         commonNonNameFull.test(givenPart)
@@ -835,7 +1015,8 @@ export function buildChapterRepairBoundaryBlock(intentContent: string): string {
     parts.push(`- 本章禁止事项：${boundaries.forbiddenItems}`);
   }
   if (boundaries.nextChapterDirection) {
-    parts.push(`- 以下方向属于下一章目标，本章不得提前完成：${boundaries.nextChapterDirection}`);
+    parts.push(`- 以下方向是下一章目标，本章只能埋钩子/预测/暗示，不得在本章兑现、完成、证实：${boundaries.nextChapterDirection}`);
+    parts.push("- 下一章自然推进方向中的验证/兑现/回收事件，本章只能预告或埋钩，不得写成已发生/已解决/已证实。");
   }
   if (boundaries.unresolvedProblems) {
     parts.push(`- 以下问题不得在本章解决：${boundaries.unresolvedProblems}`);

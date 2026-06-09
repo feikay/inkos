@@ -532,7 +532,7 @@ describe("buildChapterRepairBoundaryBlock (Fix A)", () => {
     expect(block).toContain("禁止从后续章节计划中提取任何新剧情");
     expect(block).toContain("禁止把 pending_hooks 中预期回收章大于当前章的伏笔，当成可写素材");
     expect(block).toContain("禁止把书级 structure_signals 中未出现在当前章 intent §12 的信号词，新增为正文内容");
-    expect(block).toContain("以下方向属于下一章目标，本章不得提前完成");
+    expect(block).toContain("以下方向是下一章目标");
     expect(block).toContain("以下问题不得在本章解决");
   });
 
@@ -608,5 +608,144 @@ describe("两字高信号 future hook 检测", () => {
     });
     const hookIssues = result.issues.filter((i) => i.type === "premature_hook_fulfillment");
     expect(hookIssues).toHaveLength(0);
+  });
+});
+
+// ---- PUB-001-FIX-D tests ----
+
+describe("next-chapter fulfillment detection (Fix A+B)", () => {
+  it("FAILs when next-chapter verification event is written as happened", () => {
+    const intent = "## 9. 下一章钩子\n- 下一章自然推进方向：预言显像管损坏，建立信用";
+    const result = evaluateChapterScopeGate({
+      intentContent: intent,
+      chapterNumber: 1,
+      chapterText: "话音落下，显像管果然损坏，电视啪地黑了屏。父亲愣住：你说中了。",
+      pendingHooksContent: "",
+    });
+    expect(result.status).toBe("FAIL");
+    expect(result.issues.some((i) => i.type === "premature_next_chapter_fulfillment")).toBe(true);
+  });
+
+  it("does NOT flag mere prediction/foreshadowing", () => {
+    const intent = "## 9. 下一章钩子\n- 下一章自然推进方向：预言显像管损坏，建立信用";
+    const result = evaluateChapterScopeGate({
+      intentContent: intent,
+      chapterNumber: 1,
+      chapterText: "宋言说电视三天内可能会坏，提醒父亲先别急着修，等两天再看。",
+      pendingHooksContent: "",
+    });
+    const ncIssues = result.issues.filter((i) => i.type === "premature_next_chapter_fulfillment");
+    expect(ncIssues).toHaveLength(0);
+  });
+
+  it("FAILs on generic next-chapter event fulfillment (账本)", () => {
+    const intent = "## 9. 下一章钩子\n- 下一章自然推进方向：拿到账本证明厂长转移资金";
+    const result = evaluateChapterScopeGate({
+      intentContent: intent,
+      chapterNumber: 1,
+      chapterText: "他当场拿到账本，直接证明了厂长转移了资金。",
+      pendingHooksContent: "",
+    });
+    expect(result.issues.some((i) => i.type === "premature_next_chapter_fulfillment")).toBe(true);
+  });
+
+  it("prediction of 账本 does not fire", () => {
+    const intent = "## 9. 下一章钩子\n- 下一章自然推进方向：拿到账本证明厂长转移资金";
+    const result = evaluateChapterScopeGate({
+      intentContent: intent,
+      chapterNumber: 1,
+      chapterText: "他可能需要拿到账本，也许能证明厂长转移资金。",
+      pendingHooksContent: "",
+    });
+    const ncIssues = result.issues.filter((i) => i.type === "premature_next_chapter_fulfillment");
+    expect(ncIssues).toHaveLength(0);
+  });
+});
+
+describe("fake entity overflow reduction (Fix D)", () => {
+  it("does not produce fake fragments like 宋言把/张嘴/白了一", () => {
+    const result = evaluateChapterScopeGate({
+      intentContent: "",
+      chapterNumber: 1,
+      chapterText: "宋言把东西放下。宋言面不改色。宋言张嘴说话。宋言咽了口唾沫。白了一眼前方。一张脸撕裂开。",
+      pendingHooksContent: "",
+      previousChapterText: "",
+      newEntityWarnThreshold: 3,
+    });
+    const entityIssues = result.issues.filter((i) => i.type === "new_entity_overflow");
+    const detail = entityIssues.map((i) => i.detail).join();
+    expect(detail).not.toContain("宋言把");
+    expect(detail).not.toContain("宋言面");
+    expect(detail).not.toContain("张嘴");
+    expect(detail).not.toContain("宋言咽");
+    expect(detail).not.toContain("白了一");
+    expect(detail).not.toContain("脸撕");
+  });
+});
+
+// ---- PUB-001-FIX-D-2: bold field format tests ----
+
+describe("Markdown bold field parsing (Fix A)", () => {
+  const BOLD_INTENT = `## 3. 本章主角目标
+- **表层目标**：阻止父亲交集资款。
+
+## 9. 下一章钩子
+- **未解决问题**：
+  1. 宋言如何解释自己知道厂长贪污？
+  2. 800元怎么从保住变成启动资金？
+- **下一章自然推进方向**：宋言必须立下军令状，同时用电视机显像管损坏的预言来建立初步信任。
+
+## 11. 写作执行提醒
+- **禁止事项**：
+  - 禁止本章出现赵启明。`;
+
+  it("extracts surfaceGoal from bold format", () => {
+    const b = parseChapterScopeBoundaries(BOLD_INTENT);
+    expect(b.surfaceGoal).toContain("阻止父亲");
+  });
+
+  it("extracts nextChapterDirection from bold format", () => {
+    const b = parseChapterScopeBoundaries(BOLD_INTENT);
+    expect(b.nextChapterDirection).toContain("电视机显像管损坏");
+  });
+
+  it("extracts unresolvedProblems from bold multiline format", () => {
+    const b = parseChapterScopeBoundaries(BOLD_INTENT);
+    expect(b.unresolvedProblems).toContain("800元");
+  });
+
+  it("extracts forbiddenItems from bold multiline format", () => {
+    const b = parseChapterScopeBoundaries(BOLD_INTENT);
+    expect(b.forbiddenItems).toContain("赵启明");
+  });
+
+  it("bold format intent + fulfillment text → FAIL with premature_next_chapter_fulfillment", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: BOLD_INTENT,
+      chapterNumber: 1,
+      chapterText: "话音落下，电视机显像管突然损坏了，屏幕啪地黑了。",
+      pendingHooksContent: "",
+    });
+    expect(r.status).toBe("FAIL");
+    expect(r.issues.some((i) => i.type === "premature_next_chapter_fulfillment")).toBe(true);
+  });
+
+  it("bold format intent + prediction text → no premature_next_chapter_fulfillment", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: BOLD_INTENT,
+      chapterNumber: 1,
+      chapterText: "宋言说电视机显像管三天内可能会损坏，先等等看。",
+      pendingHooksContent: "",
+    });
+    const ncIssues = r.issues.filter((i) => i.type === "premature_next_chapter_fulfillment");
+    expect(ncIssues).toHaveLength(0);
+  });
+});
+
+describe("direct section header (Fix B)", () => {
+  it("extracts nextChapterDirection from direct ## header", () => {
+    const intent = "## 下一章自然推进方向\n拿到账本证明厂长转移资金";
+    const b = parseChapterScopeBoundaries(intent);
+    expect(b.nextChapterDirection).toContain("拿到账本");
   });
 });
