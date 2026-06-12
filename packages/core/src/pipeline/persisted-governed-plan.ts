@@ -107,8 +107,22 @@ function readChapterGoal(sections: Map<string, string[]>) {
   const mainConflict = entries.get("mainConflict");
   const protagonistGoal = entries.get("protagonistGoal");
   const payoffToDeliver = entries.get("payoffToDeliver");
-  const endingHookType = entries.get("endingHookType");
+  let endingHookType = entries.get("endingHookType");
   const nextChapterPull = entries.get("nextChapterPull");
+
+  if (!endingHookType) {
+    const endingType = entries.get("endingType");
+    if (endingType === "reveal_end") {
+      endingHookType = "reveal";
+    } else if (endingType === "unresolved_end") {
+      endingHookType = "danger";
+    } else if (endingType) {
+      endingHookType = "choice";
+    } else {
+      endingHookType = "reveal"; // Default fallback
+    }
+  }
+
   if (!mainConflict || !protagonistGoal || !payoffToDeliver || !endingHookType || !nextChapterPull) {
     return undefined;
   }

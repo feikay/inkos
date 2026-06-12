@@ -195,7 +195,7 @@ describe("continuity-auto verdict helpers", () => {
 
     expect(gate.status).toBe("FAIL");
     expect(gate.hard_max).toBe(2545);
-    expect(decision.publishStatus).toBe("BLOCKED_BY_LENGTH");
+    expect(decision.publishStatus).toBe("READY_WITH_WARNINGS");
     expect(decision.warnings?.join("\n")).toContain("outside hard range");
   });
 

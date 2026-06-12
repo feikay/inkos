@@ -4,6 +4,7 @@ import {
   evaluateChapterScopeGate,
   buildChapterScopeConstraintBlock,
   buildStructureSignalsScopeConstraint,
+  buildChapterRepairBoundaryBlock,
 } from "../utils/chapter-scope-gate.js";
 
 const SAMPLE_INTENT = `# 第1章 Chapter Intent
@@ -532,8 +533,8 @@ describe("buildChapterRepairBoundaryBlock (Fix A)", () => {
     expect(block).toContain("禁止从后续章节计划中提取任何新剧情");
     expect(block).toContain("禁止把 pending_hooks 中预期回收章大于当前章的伏笔，当成可写素材");
     expect(block).toContain("禁止把书级 structure_signals 中未出现在当前章 intent §12 的信号词，新增为正文内容");
-    expect(block).toContain("以下方向是下一章目标");
-    expect(block).toContain("以下问题不得在本章解决");
+    expect(block).toContain("不得使用其具体事件");
+    expect(block).toContain("未解决问题必须保持未解决");
   });
 
   it("includes forbidden items and next-chapter direction", () => {
@@ -544,7 +545,7 @@ describe("buildChapterRepairBoundaryBlock (Fix A)", () => {
 ## 11. 写作执行提醒
 - 禁止事项：禁止引入李秀莲`;
     const block = buildChapterRepairBoundaryBlock(intent);
-    expect(block).toContain("拿钱、去市场");
+    expect(block).toContain("不得使用其具体事件");
     expect(block).toContain("禁止引入李秀莲");
   });
 
@@ -747,5 +748,677 @@ describe("direct section header (Fix B)", () => {
     const intent = "## 下一章自然推进方向\n拿到账本证明厂长转移资金";
     const b = parseChapterScopeBoundaries(intent);
     expect(b.nextChapterDirection).toContain("拿到账本");
+  });
+});
+
+// ---- PUB-001-FIX-E tests ----
+
+describe("low-signal word filter for next-chapter fulfillment (Fix A)", () => {
+  const DIR = "宋言必须趁热打铁，用更具体的预言证明自己的能力（如预言家里电视显像管寿命），并立下军令状——用800元在3天内赚到1000元";
+
+  it("foreshadowing text does not trigger premature_next_chapter_fulfillment", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: `## 9. 下一章钩子\n- 下一章自然推进方向：${DIR}`,
+      chapterNumber: 1,
+      chapterText: "这台十四寸熊猫电视，前世在回归庆典播完后的第三天，显像管烧了。三天后。如果他能让父亲相信，他连这台电视什么时候坏都知道——",
+      pendingHooksContent: "",
+    });
+    const ncIssues = r.issues.filter((i) => i.type === "premature_next_chapter_fulfillment");
+    expect(ncIssues).toHaveLength(0);
+    // Also ensure no low-signal words appear in any issue details
+    for (const issue of r.issues) {
+      expect(issue.detail).not.toContain("自己");
+      expect(issue.detail).not.toContain("己的");
+      expect(issue.detail).not.toContain("家里");
+      expect(issue.detail).not.toContain("自己的");
+    }
+  });
+
+  it("fulfillment text with TV breaking triggers FAIL", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: `## 9. 下一章钩子\n- 下一章自然推进方向：${DIR}`,
+      chapterNumber: 1,
+      chapterText: "话音刚落，电视屏幕啪地黑了，显像管烧坏了。父亲愣住：你说电视三天后坏，它现在就坏了。",
+      pendingHooksContent: "",
+    });
+    expect(r.status).toBe("FAIL");
+    expect(r.issues.some((i) => i.type === "premature_next_chapter_fulfillment")).toBe(true);
+  });
+});
+
+describe("hard constraints in repair boundary (Fix B)", () => {
+  it("boundary block includes 禁止临时开挂 constraints", () => {
+    const intent = `## 6. 本章解决方法
+- 禁止临时开挂：主角只能说出模糊信息，不能精确说出金额、账户、密码、车票等细节。
+
+## 10. 人物行为约束
+- 主角本章不能违背：
+  - 不能全知全能，只能说出模糊信息。
+- 系统/金手指规则不能违背：记忆盲区，不能补出内部账本、密码、车票。`;
+    const block = buildChapterRepairBoundaryBlock(intent);
+    expect(block).toContain("本章硬性约束");
+    expect(block).toContain("不得补出金额、账户、密码、车票");
+  });
+
+  it("parses hardConstraints from intent §6 and §10", () => {
+    const intent = `## 6. 本章解决方法
+- 禁止临时开挂：主角只能说出模糊信息，不能精确说出金额、账户。
+## 10. 人物行为约束
+- 主角本章不能违背：不能全知全能。
+- 系统/金手指规则不能违背：记忆盲区`;
+    const b = parseChapterScopeBoundaries(intent);
+    expect(b.hardConstraints).toContain("模糊信息");
+    expect(b.hardConstraints).toContain("不能全知全能");
+  });
+});
+
+// ---- PUB-001-FIX-E-2 tests ----
+
+describe("Fix A: no 宋言 in production code", () => {
+  it("source code does not contain 宋言", () => {
+    const fs = require("fs");
+    const src = fs.readFileSync(
+      require("path").resolve(__dirname, "../utils/chapter-scope-gate.ts"),
+      "utf-8",
+    );
+    expect(src).not.toContain("宋言");
+    expect(src).not.toContain("重生1997");
+  });
+});
+
+describe("Fix B: 现在 fulfillment tightening", () => {
+  const makeIntent = (dir: string) => `## 9. 下一章钩子\n- 下一章自然推进方向：${dir}`;
+  const DIR = "用电视故障证明能力";
+
+  it("电视现在还亮着 → no fulfillment", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: makeIntent(DIR),
+      chapterNumber: 1,
+      chapterText: "电视现在还亮着，没有坏。",
+      pendingHooksContent: "",
+    });
+    expect(r.issues.filter((i) => i.type === "premature_next_chapter_fulfillment")).toHaveLength(0);
+  });
+
+  it("电视现在还没坏 → no fulfillment", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: makeIntent(DIR),
+      chapterNumber: 1,
+      chapterText: "电视现在还没坏，三天后再看。",
+      pendingHooksContent: "",
+    });
+    expect(r.issues.filter((i) => i.type === "premature_next_chapter_fulfillment")).toHaveLength(0);
+  });
+
+  it("话音刚落电视啪地黑了 → FAIL", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: makeIntent(DIR),
+      chapterNumber: 1,
+      chapterText: "话音刚落，电视啪地黑了屏，它现在就坏了。",
+      pendingHooksContent: "",
+    });
+    expect(r.status).toBe("FAIL");
+    expect(r.issues.some((i) => i.type === "premature_next_chapter_fulfillment")).toBe(true);
+  });
+
+  it("电视现在已经黑屏了 → FAIL", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: makeIntent(DIR),
+      chapterNumber: 1,
+      chapterText: "电视现在已经黑屏了，父亲终于相信。",
+      pendingHooksContent: "",
+    });
+    expect(r.status).toBe("FAIL");
+  });
+
+  // ---- ordinary state changes should NOT trigger ----
+  it("电视现在摆在客厅里声音小了 → no fulfillment", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: makeIntent(DIR),
+      chapterNumber: 1,
+      chapterText: "电视现在摆在客厅里，声音小了点。",
+      pendingHooksContent: "",
+    });
+    expect(r.issues.filter((i) => i.type === "premature_next_chapter_fulfillment")).toHaveLength(0);
+  });
+
+  it("电视现在放在桌边了 → no fulfillment", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: makeIntent(DIR),
+      chapterNumber: 1,
+      chapterText: "电视现在放在桌边了。",
+      pendingHooksContent: "",
+    });
+    expect(r.issues.filter((i) => i.type === "premature_next_chapter_fulfillment")).toHaveLength(0);
+  });
+
+  it("电视现在声音小了点 → no fulfillment", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: makeIntent(DIR),
+      chapterNumber: 1,
+      chapterText: "电视现在声音小了点。",
+      pendingHooksContent: "",
+    });
+    expect(r.issues.filter((i) => i.type === "premature_next_chapter_fulfillment")).toHaveLength(0);
+  });
+
+  it("电视现在只是闪了一下还没坏 → no fulfillment", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: makeIntent(DIR),
+      chapterNumber: 1,
+      chapterText: "电视现在只是闪了一下，还没有坏。",
+      pendingHooksContent: "",
+    });
+    expect(r.issues.filter((i) => i.type === "premature_next_chapter_fulfillment")).toHaveLength(0);
+  });
+
+  // Source code checks
+  it("source code check: no current-book literals or broad now wildcard", () => {
+    const fs = require("fs");
+    const src = fs.readFileSync(
+      require("path").resolve(__dirname, "../utils/chapter-scope-gate.ts"),
+      "utf-8",
+    );
+    expect(src).not.toContain("宋言");
+    expect(src).not.toContain("重生1997");
+    // broad now wildcard absence verified by rg check
+  });
+});
+
+// ---- PUB-001-FIX-F tests ----
+
+describe("unresolved problem detection (Fix 2)", () => {
+  it("question resolved → FAIL", () => {
+    const intent = "## 9. 下一章钩子\n- 未解决问题：\n  1. 父亲会不会把钱给主角？";
+    const r = evaluateChapterScopeGate({
+      intentContent: intent,
+      chapterNumber: 1,
+      chapterText: '父亲说："钱给你了，三天后还我。"',
+      pendingHooksContent: "",
+    });
+    const issues = r.issues.filter((i) => i.type === "premature_goal_completion");
+    expect(issues.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("question asked but not resolved → PASS", () => {
+    const intent = "## 9. 下一章钩子\n- 未解决问题：\n  1. 父亲会不会把钱给主角？";
+    const r = evaluateChapterScopeGate({
+      intentContent: intent,
+      chapterNumber: 1,
+      chapterText: '主角说："这笔钱给我，我三天后还你。"父亲嘴唇动了动，没说话。',
+      pendingHooksContent: "",
+    });
+    const issues = r.issues.filter((i) => i.type === "premature_goal_completion");
+    expect(issues).toHaveLength(0);
+  });
+
+  it("本金到手 → resolved", () => {
+    const intent = "## 9. 下一章钩子\n- 未解决问题：\n  1. 主角能不能拿到本金？";
+    const r = evaluateChapterScopeGate({
+      intentContent: intent,
+      chapterNumber: 1,
+      chapterText: "本金终于到手。",
+      pendingHooksContent: "",
+    });
+    expect(r.issues.some((i) => i.type === "premature_goal_completion")).toBe(true);
+  });
+
+  it("还没拿到本金 → not resolved", () => {
+    const intent = "## 9. 下一章钩子\n- 未解决问题：\n  1. 主角能不能拿到本金？";
+    const r = evaluateChapterScopeGate({
+      intentContent: intent,
+      chapterNumber: 1,
+      chapterText: "他还没拿到本金，只能继续谈。",
+      pendingHooksContent: "",
+    });
+    const issues = r.issues.filter((i) => i.type === "premature_goal_completion");
+    expect(issues).toHaveLength(0);
+  });
+});
+
+describe("sub-phrase noise reduction (Fix 3)", () => {
+  const DIR = "主角前往火车站批发市场寻找VCD机会";
+
+  it("planning/thinking text does not produce fragment noise FAIL", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: `## 9. 下一章钩子\n- 下一章自然推进方向：${DIR}`,
+      chapterNumber: 1,
+      chapterText: "他想到火车站批发市场和VCD，但现在还不能去。",
+      pendingHooksContent: "",
+    });
+    const ncIssues = r.issues.filter((i) => i.type === "premature_next_chapter_fulfillment");
+    // Should not produce fragment-based issues
+    for (const issue of ncIssues) {
+      expect(issue.detail).not.toContain("站批");
+      expect(issue.detail).not.toContain("发市");
+      expect(issue.detail).not.toContain("VC");
+      expect(issue.detail).not.toContain("CD");
+    }
+  });
+
+  it("fulfillment text detects issue and includes meaningful phrase", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: `## 9. 下一章钩子\n- 下一章自然推进方向：${DIR}`,
+      chapterNumber: 1,
+      chapterText: "他已经到了火车站批发市场，拿到了VCD进货单。",
+      pendingHooksContent: "",
+    });
+    const ncIssues = r.issues.filter((i) => i.type === "premature_next_chapter_fulfillment");
+    // Should detect fulfillment
+    expect(ncIssues.length).toBeGreaterThanOrEqual(1);
+    // At least one issue should contain a meaningful high-signal phrase
+    const hasMeaningful = ncIssues.some((i) =>
+      i.detail.includes("批发市场") || i.detail.includes("火车站") || i.detail.includes("VCD")
+    );
+    expect(hasMeaningful).toBe(true);
+  });
+});
+
+// ---- PUB-001-FIX-F-2 tests ----
+
+describe("unresolved problem: resource pattern not global false positive (Fix 2)", () => {
+  it("钱给你了 does NOT trigger non-money unresolved problem", () => {
+    const intent = "## 9. 下一章钩子\n- 未解决问题：\n  1. 父亲会不会追问主角为什么知道内幕？";
+    const r = evaluateChapterScopeGate({
+      intentContent: intent,
+      chapterNumber: 1,
+      chapterText: '父亲说："钱给你了，三天后还我。"',
+      pendingHooksContent: "",
+    });
+    const issues = r.issues.filter((i) => i.type === "premature_goal_completion");
+    expect(issues).toHaveLength(0);
+  });
+
+  it("本金到手 still triggers money-related unresolved problem", () => {
+    const intent = "## 9. 下一章钩子\n- 未解决问题：\n  1. 主角能不能拿到本金？";
+    const r = evaluateChapterScopeGate({
+      intentContent: intent,
+      chapterNumber: 1,
+      chapterText: "本金终于到手。",
+      pendingHooksContent: "",
+    });
+    expect(r.issues.some((i) => i.type === "premature_goal_completion")).toBe(true);
+  });
+});
+
+// ---- PUB-001-FIX-G tests ----
+
+describe("current-chapter allowed words not flagged (Goal 2)", () => {
+  const intent = `## 9. 下一章钩子
+- 下一章自然推进方向：用前世记忆识别商机
+
+## 4. 本章解决方法
+- 前世记忆碎片撞进脑海`;
+
+  it("前世/记忆 used in current chapter context does NOT trigger NC fulfillment", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: intent,
+      chapterNumber: 1,
+      chapterText: "前世记忆碎片撞进脑海。",
+      pendingHooksContent: "",
+    });
+    const ncIssues = r.issues.filter((i) => i.type === "premature_next_chapter_fulfillment");
+    expect(ncIssues).toHaveLength(0);
+  });
+
+  it("火车站 as lie context does NOT trigger NC fulfillment", () => {
+    const intent2 = `## 9. 下一章钩子
+- 下一章自然推进方向：前往批发市场寻找商机
+
+## 4. 本章解决方法
+- 主角用"在车站听说的"圆谎`;
+    const r = evaluateChapterScopeGate({
+      intentContent: intent2,
+      chapterNumber: 1,
+      chapterText: "他说自己是在车站听来的。",
+      pendingHooksContent: "",
+    });
+    const ncIssues = r.issues.filter((i) => i.type === "premature_next_chapter_fulfillment");
+    expect(ncIssues).toHaveLength(0);
+  });
+});
+
+describe("detailed planning detection (Goal 3)", () => {
+  it("specific prices + methods → FAIL (original sample)", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "## 9. 下一章钩子\n- 下一章自然推进方向：前往批发市场寻找低价货源，识别商品优劣",
+      chapterNumber: 1,
+      chapterText: "他知道哪里有货，知道谁会急着出手，知道怎么分辨机器有没有翻新过，两百收一千二卖。",
+      pendingHooksContent: "",
+    });
+    expect(r.issues.some((i) => i.type === "premature_next_chapter_fulfillment")).toBe(true);
+  });
+
+  it("no specific prices → no detailed planning trigger", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "## 9. 下一章钩子\n- 下一章自然推进方向：前往批发市场寻找低价货源",
+      chapterNumber: 1,
+      chapterText: "他可能需要去批发市场看看有什么货源。",
+      pendingHooksContent: "",
+    });
+    const ncIssues = r.issues.filter((i) => i.type === "premature_next_chapter_fulfillment");
+    // May have other issues but not from detailed planning
+    const detailIssues = ncIssues.filter((i) => i.detail.includes("具体数值/方法/路线"));
+    expect(detailIssues).toHaveLength(0);
+  });
+
+  it("legitimate current-chapter transaction does not trigger NC detail detection", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "## 3. 本章主角目标\n- 买药给父亲退烧，预算三百元\n\n## 9. 下一章钩子\n- 下一章自然推进方向：前往市场寻找新货源",
+      chapterNumber: 1,
+      chapterText: "他拿着三百元去买药，问清药价后回了家。",
+      pendingHooksContent: "",
+    });
+    const ncIssues = r.issues.filter((i) => i.type === "premature_next_chapter_fulfillment");
+    // Should not flag legitimate current-chapter spending as NC detail
+    const detailIssues = ncIssues.filter((i) => i.detail.includes("商业") || i.detail.includes("数值/方法"));
+    expect(detailIssues).toHaveLength(0);
+  });
+});
+
+describe("neighbor crying vs confronting (Goal 4D)", () => {
+  const intent = `## 9. 下一章钩子
+- 结尾画面：窗外传来邻居家的哭骂声
+- 未解决问题：厂长跑路后，职工愤怒会指向谁？`;
+
+  it("ending scene cry as atmosphere → PASS", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: intent,
+      chapterNumber: 1,
+      chapterText: "窗外传来邻居家的哭骂声。",
+      pendingHooksContent: "",
+    });
+    expect(r.status).not.toBe("FAIL");
+  });
+
+  it("neighbors confronting at door → FAIL (original sample)", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "## 9. 下一章钩子\n- 结尾画面：窗外传来邻居家的哭骂声\n- 未解决问题：厂长跑路后，职工愤怒会指向谁？",
+      chapterNumber: 1,
+      chapterText: "邻居们堵在门口，质问他是不是早知道消息。",
+      pendingHooksContent: "",
+    });
+    expect(r.status).toBe("FAIL");
+    expect(r.issues.some((i) => i.type === "premature_next_chapter_fulfillment")).toBe(true);
+  });
+
+  it("ending scene cry atmosphere → PASS", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: intent,
+      chapterNumber: 1,
+      chapterText: "窗外传来邻居家的哭骂声。",
+      pendingHooksContent: "",
+    });
+    expect(r.status).not.toBe("FAIL");
+  });
+
+  it("door announcement without direct confrontation → PASS", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "## 9. 下一章钩子\n- 结尾画面：窗外传来邻居家的哭骂声\n- 未解决问题：厂长跑路后，职工愤怒会指向谁？",
+      chapterNumber: 1,
+      chapterText: "门外老王敲了两下门喊了一嗓子就跑了，声音从巷口飘进来：老宋快出来看通知。",
+      pendingHooksContent: "",
+    });
+    expect(r.status).not.toBe("FAIL");
+  });
+
+  it("带上门/合上门 door-closing does NOT trigger FAIL", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "## 9. 下一章钩子\n- 结尾画面：窗外传来邻居家的哭骂声\n- 未解决问题：厂长跑路后，职工愤怒会指向谁？",
+      chapterNumber: 1,
+      chapterText: "他转身带上门，把门合上，木门上锁咔嗒一声。",
+      pendingHooksContent: "",
+    });
+    expect(r.status).not.toBe("FAIL");
+  });
+
+  it("债主找上门 → FAIL (direct confrontation)", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "## 9. 下一章钩子\n- 结尾画面：窗外传来哭骂声\n- 未解决问题：债主会不会找上门来？",
+      chapterNumber: 1,
+      chapterText: "债主找上门来，堵在门口逼问钱什么时候还。",
+      pendingHooksContent: "",
+    });
+    expect(r.status).toBe("FAIL");
+  });
+
+  it("unrelated group noun does NOT trigger", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "## 9. 下一章钩子\n- 未解决问题：父亲会不会把钱给主角？",
+      chapterNumber: 1,
+      chapterText: "同学堵在教室门口等老师发卷。",
+      pendingHooksContent: "",
+    });
+    expect(r.status).not.toBe("FAIL");
+  });
+});
+
+describe("execution detail detection (Fix 2 Bug 2)", () => {
+  it("已到市场 + 联系人 + 谈好价格 → FAIL", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "## 9. 下一章钩子\n- 下一章自然推进方向：去市场寻找货源",
+      chapterNumber: 1,
+      chapterText: "他已到了市场，找到暗门联系人，谈好价格准备拿货。",
+      pendingHooksContent: "",
+    });
+    expect(r.issues.some((i) => i.type === "premature_next_chapter_fulfillment")).toBe(true);
+  });
+});
+
+// ---- PUB-002-FIX-F tests ----
+
+describe("hook context classification (question vs payoff)", () => {
+  const hookTable = "| hook_id | 预期回收 | 备注 |\n|---|---|---|\n| h1 | 25 | 主角重生的秘密被识破 |";
+
+  it("question continuation (你咋知道) → not flagged", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "",
+      chapterNumber: 1,
+      chapterText: '父亲盯着他：你咋知道厂长要跑？你怎么会提前知道？',
+      pendingHooksContent: hookTable,
+    });
+    const hookIssues = r.issues.filter((i) => i.type === "premature_hook_fulfillment");
+    expect(hookIssues).toHaveLength(0);
+  });
+
+  it("evasive answer (做梦/梦到的) → WARN not FAIL", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "",
+      chapterNumber: 1,
+      chapterText: "他含糊地说：我梦到的，可能是碰巧吧。",
+      pendingHooksContent: hookTable,
+    });
+    // May produce warning about mention but must NOT FAIL
+    expect(r.status).not.toBe("FAIL");
+    const failIssues = r.issues.filter((i) => i.type === "premature_hook_fulfillment" && i.severity === "FAIL");
+    expect(failIssues).toHaveLength(0);
+  });
+
+  it("true payoff (揭示真相) → FAIL", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "",
+      chapterNumber: 1,
+      chapterText: "他深吸一口气：其实我就是你要找的那个人，真相我一直都知道。",
+      pendingHooksContent: hookTable,
+    });
+    const failIssues = r.issues.filter((i) => i.type === "premature_hook_fulfillment" && i.severity === "FAIL");
+    expect(failIssues.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("真相还没揭开 → PASS (negation)", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "",
+      chapterNumber: 1,
+      chapterText: "真相还没揭开，他只能继续隐瞒。",
+      pendingHooksContent: hookTable,
+    });
+    expect(r.status).not.toBe("FAIL");
+  });
+
+  it("终于证实身份 → FAIL", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "",
+      chapterNumber: 1,
+      chapterText: "他终于说清楚原因，身份来源被彻底证实。",
+      pendingHooksContent: hookTable,
+    });
+    const failIssues = r.issues.filter((i) => i.type === "premature_hook_fulfillment" && i.severity === "FAIL");
+    expect(failIssues.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("录音证据已经拿到 → FAIL", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "",
+      chapterNumber: 1,
+      chapterText: "录音证据已经拿到。",
+      pendingHooksContent: hookTable,
+    });
+    const failIssues = r.issues.filter((i) => i.type === "premature_hook_fulfillment" && i.severity === "FAIL");
+    expect(failIssues.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("身份来源仍未证实 → PASS (negation 仍未)", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "",
+      chapterNumber: 1,
+      chapterText: "身份来源仍未证实。",
+      pendingHooksContent: hookTable,
+    });
+    expect(r.status).not.toBe("FAIL");
+  });
+
+  it("身份来源终于确认 → FAIL", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "",
+      chapterNumber: 1,
+      chapterText: "身份来源终于确认。",
+      pendingHooksContent: hookTable,
+    });
+    const failIssues = r.issues.filter((i) => i.type === "premature_hook_fulfillment" && i.severity === "FAIL");
+    expect(failIssues.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("身份来源未确认 → PASS (negation 未)", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "",
+      chapterNumber: 1,
+      chapterText: "身份来源未确认。",
+      pendingHooksContent: hookTable,
+    });
+    expect(r.status).not.toBe("FAIL");
+  });
+
+  it("原因已经解释清楚 → FAIL", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "",
+      chapterNumber: 1,
+      chapterText: "原因已经解释清楚。",
+      pendingHooksContent: hookTable,
+    });
+    const failIssues = r.issues.filter((i) => i.type === "premature_hook_fulfillment" && i.severity === "FAIL");
+    expect(failIssues.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("原因终于说明清楚 → FAIL", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "",
+      chapterNumber: 1,
+      chapterText: "原因终于说明清楚。",
+      pendingHooksContent: hookTable,
+    });
+    const failIssues = r.issues.filter((i) => i.type === "premature_hook_fulfillment" && i.severity === "FAIL");
+    expect(failIssues.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("business detail token binding (Goal 4)", () => {
+  it("sell bike does NOT trigger NC business detail", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "## 3. 本章主角目标\n- 表层目标：卖掉旧自行车\n## 9. 下一章钩子\n- 下一章自然推进方向：前往市场寻找新货源",
+      chapterNumber: 1,
+      chapterText: "他把旧自行车推到修车铺，讲价半天卖了两百元。",
+      pendingHooksContent: "",
+    });
+    const ncIssues = r.issues.filter((i) => i.type === "premature_next_chapter_fulfillment");
+    const detailIssues = ncIssues.filter((i) => i.detail.includes("商业"));
+    expect(detailIssues).toHaveLength(0);
+  });
+
+  it("找到医生 does NOT trigger NC business detail (no commercial object)", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "## 3. 本章主角目标\n- 表层目标：找到医生救人\n## 6. 本章解决方法\n- 当前章允许：打听哪里有医生\n## 9. 下一章钩子\n- 下一章自然推进方向：前往市场寻找新货源",
+      chapterNumber: 1,
+      chapterText: "他知道哪里有医生，背起父亲就往诊所跑。",
+      pendingHooksContent: "",
+    });
+    expect(r.status).not.toBe("FAIL");
+    const ncIssues = r.issues.filter((i) => i.type === "premature_next_chapter_fulfillment");
+    const detailIssues = ncIssues.filter((i) => i.detail.includes("商业"));
+    expect(detailIssues).toHaveLength(0);
+  });
+});
+
+describe("endingScene parsing (Goal 1)", () => {
+  it("parses endingScene from 结尾画面", () => {
+    const b = parseChapterScopeBoundaries("## 9. 下一章钩子\n- 结尾画面：窗外传来邻居哭骂声");
+    expect(b.endingScene).toBe("窗外传来邻居哭骂声");
+  });
+
+  it("surfaceGoal ≠ endingScene", () => {
+    const b = parseChapterScopeBoundaries("## 3. 本章主角目标\n- 表层目标：阻止\n## 9. 下一章钩子\n- 结尾画面：窗外");
+    expect(b.surfaceGoal).toBe("阻止");
+    expect(b.endingScene).toBe("窗外");
+  });
+});
+
+// ---- PUB-001-FIX-L tests ----
+
+describe("显像管预言不被误判为兑现 (Goal 1+2)", () => {
+  const intent = `## 6. 本章解决方法
+- 指出家里那台14寸黑白电视的显像管寿命只剩3天
+
+## 8. 本章结局反馈
+- 新增伏笔：电视显像管寿命只剩3天，为下一章预言成真埋线
+
+## 9. 下一章钩子
+- 下一章自然推进方向：电视显像管预言成真，父亲震惊`;
+
+  it("提出预言/赌约不触发 NC fulfillment", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: intent,
+      chapterNumber: 1,
+      chapterText: "咱们家那台十四寸黑白电视，显像管已经坏透了，三天之内肯定不出图像，我拿这个跟你赌。",
+      pendingHooksContent: "",
+    });
+    const ncIssues = r.issues.filter((i) => i.type === "premature_next_chapter_fulfillment");
+    expect(ncIssues).toHaveLength(0);
+    expect(r.status).not.toBe("FAIL");
+  });
+
+  it("电视当场黑屏兑现 → FAIL", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: intent,
+      chapterNumber: 1,
+      chapterText: "话音刚落，电视屏幕啪地黑了，父亲愣住，显像管预言当场成真。",
+      pendingHooksContent: "",
+    });
+    expect(r.status).toBe("FAIL");
+    expect(r.issues.some((i) => i.type === "premature_next_chapter_fulfillment")).toBe(true);
+  });
+});
+
+describe("business detail not triggered for non-commercial NC direction (Goal 3)", () => {
+  it("non-commercial NC direction does NOT produce business detail issues", () => {
+    const r = evaluateChapterScopeGate({
+      intentContent: "## 9. 下一章钩子\n- 下一章自然推进方向：电视显像管预言成真，父亲震惊",
+      chapterNumber: 1,
+      chapterText: "显像管已经老化了，寿命只剩三天。",
+      pendingHooksContent: "",
+    });
+    const ncIssues = r.issues.filter((i) => i.type === "premature_next_chapter_fulfillment");
+    // May have basic NC fulfillment from keyword matching, but must NOT have
+    // business detail issues (since direction is not commercial)
+    const bizIssues = ncIssues.filter((i) => i.detail.includes("商业") || i.detail.includes("执行模板"));
+    expect(bizIssues).toHaveLength(0);
   });
 });

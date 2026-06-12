@@ -74,3 +74,19 @@ describe("PUB-001-FIX-C-1 prompt boundary tests (Fix A+B)", () => {
     expect(prompt).not.toContain("不得超过硬上限");
   });
 });
+
+describe("Goal 1: boundary block contains concrete intent fields (Fix H)", () => {
+  const intent = "## 3. 本章主角目标\n- 表层目标：阻止父亲交集资款\n\n## 9. 下一章钩子\n- 结尾画面：窗外传来邻居哭骂声\n- 未解决问题：父亲会不会把钱交给主角\n- 下一章自然推进方向：前往市场寻找商机";
+
+  it("contains concrete boundary fields from intent", () => {
+    const block = buildChapterRepairBoundaryBlock(intent);
+    // surfaceGoal as 本章目标
+    // New boundary block uses generic text, not verbatim future info
+    expect(block).toContain("本章目标");
+    expect(block).toContain("阻止父亲交集资款");
+    expect(block).toContain("本章结尾画面是当前章可写内容终点");
+    expect(block).toContain("不得使用其具体事件");
+    expect(block).toContain("未解决问题必须保持未解决");
+    expect(block).toContain("章节结束边界");
+  });
+});

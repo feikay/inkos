@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   ChapterSummariesStateSchema,
@@ -8,7 +8,7 @@ import {
   type RuntimeStateDelta,
 } from "../models/runtime-state.js";
 import type { Fact, StoredHook, StoredSummary } from "./memory-db.js";
-import { bootstrapStructuredStateFromMarkdown, parseCurrentStateFacts } from "./state-bootstrap.js";
+import { bootstrapStructuredStateFromMarkdown, parseCurrentStateFacts, pathExists } from "./state-bootstrap.js";
 import { renderChapterSummariesProjection, renderCurrentStateProjection, renderHooksProjection } from "./state-projections.js";
 import { applyRuntimeStateDelta, type RuntimeStateSnapshot } from "./state-reducer.js";
 import { validateRuntimeState } from "./state-validator.js";
@@ -29,7 +29,13 @@ export interface NarrativeMemorySeed {
 
 export async function loadRuntimeStateSnapshot(bookDir: string, fallbackChapter?: number): Promise<RuntimeStateSnapshot> {
   await bootstrapStructuredStateFromMarkdown({ bookDir, fallbackChapter });
-  const stateDir = join(bookDir, "story", "state");
+  let stateDir = join(bookDir, "story", "state");
+  if (fallbackChapter !== undefined) {
+    const snapshotDir = join(bookDir, "story", "snapshots", String(fallbackChapter));
+    if (await pathExists(snapshotDir)) {
+      stateDir = join(snapshotDir, "state");
+    }
+  }
 
   const [manifest, currentState, hooks, chapterSummaries] = await Promise.all([
     readJson(join(stateDir, "manifest.json"), StateManifestSchema),

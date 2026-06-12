@@ -46,7 +46,13 @@ export async function bootstrapStructuredStateFromMarkdown(params: {
   readonly bookDir: string;
   readonly fallbackChapter?: number;
 }): Promise<BootstrapStructuredStateResult> {
-  const storyDir = join(params.bookDir, "story");
+  let storyDir = join(params.bookDir, "story");
+  if (params.fallbackChapter !== undefined) {
+    const snapshotDir = join(params.bookDir, "story", "snapshots", String(params.fallbackChapter));
+    if (await pathExists(snapshotDir)) {
+      storyDir = snapshotDir;
+    }
+  }
   const stateDir = join(storyDir, "state");
   const manifestPath = join(stateDir, "manifest.json");
   const currentStatePath = join(stateDir, "current_state.json");
@@ -561,7 +567,7 @@ async function loadDurableArtifactChapterNumbers(bookDir: string, limit?: number
   return [...allNumbers].sort((a, b) => a - b);
 }
 
-async function pathExists(path: string): Promise<boolean> {
+export async function pathExists(path: string): Promise<boolean> {
   try {
     await stat(path);
     return true;
@@ -569,6 +575,7 @@ async function pathExists(path: string): Promise<boolean> {
     return false;
   }
 }
+
 
 function deduplicateSummaryRows<T extends { chapter: number }>(rows: ReadonlyArray<T>): T[] {
   const byChapter = new Map<number, T>();

@@ -57,6 +57,9 @@ import {
   writeSixStepPlotReportFiles,
   type AgentContext,
   PipelineRunner,
+  parseResourceRules,
+  LengthNormalizerAgent,
+  isOutsideSoftRange,
 } from "@actalk/inkos-core";
 import { existsSync, readdirSync, type Dirent } from "node:fs";
 import { mkdir, readdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
@@ -2534,6 +2537,50 @@ function sanitizeReviewedFinalChapter(raw: string, chapter: number): string {
   return `${body}\n`;
 }
 
+export async function evaluateCandidateAndMaybePromoteReviewedFinal(params: {
+  readonly bookDir: string;
+  readonly chapter: number;
+  readonly candidateFile: string;
+  readonly originalFile?: string;
+  readonly language: "zh" | "en";
+}): Promise<{
+  readonly finalFile: string;
+  readonly finalCandidateFile: string;
+  readonly promoted: boolean;
+  readonly scopeGate: ChapterScopeGateResult;
+}> {
+  const candidateText = await readFile(params.candidateFile, "utf-8");
+  const originalText = params.originalFile
+    ? await readFile(params.originalFile, "utf-8").catch(() => undefined)
+    : undefined;
+  const scopeGate = await evaluatePublishReadyScopeGate({
+    bookDir: params.bookDir,
+    chapter: params.chapter,
+    finalText: candidateText,
+    originalText,
+    language: params.language,
+  });
+
+  if (scopeGate.status === "FAIL") {
+    // Do NOT promote blocked candidate to reviewed final
+    return {
+      finalFile: params.candidateFile,
+      finalCandidateFile: "",
+      promoted: false,
+      scopeGate,
+    };
+  }
+
+  // Scope PASS or WARN: promote to reviewed final
+  const written = await writeReviewedFinalChapter(params.bookDir, params.chapter, params.candidateFile);
+  return {
+    finalFile: written,
+    finalCandidateFile: relative(params.bookDir, written),
+    promoted: true,
+    scopeGate,
+  };
+}
+
 async function writeReviewedFinalChapter(bookDir: string, chapter: number, sourceFile: string): Promise<string> {
   const outDir = join(bookDir, "chapters-reviewed");
   const outFile = join(outDir, `${chapterNumberPrefix(chapter)}_final.md`);
@@ -2614,14 +2661,21 @@ function buildRepairLengthConstraint(params: {
   const targetText = formatLengthCount(spec.target, spec.countingMode);
   const softMinText = formatLengthCount(spec.softMin, spec.countingMode);
   const softMaxText = formatLengthCount(spec.softMax, spec.countingMode);
-  const hardMaxText = formatLengthCount(spec.hardMax, spec.countingMode);
   const overSoft = currentCount > spec.softMax;
+  const countAdequate = currentCount >= spec.softMin;
+
+  let extraLines = "";
+  if (overSoft) {
+    extraLines = `- 诊断提示：当前已超过软上限 ${softMaxText}。本次修复严禁以任何形式增加字数，严禁新增段落或场景。请精简啰嗦的字句，在修改时进行微调压缩，确保字数不再膨胀。\n`;
+  } else if (countAdequate) {
+    extraLines = `- 诊断提示：当前字数已达到 ${currentText}，完全满足最低字数要求 ${softMinText}。本次修复只需做局部的微调与定点补强，保持行文紧凑，坚决避免大幅增加字数或新增段落！\n`;
+  }
 
   return `【字数约束】
 - 目标字数：${targetText}
 - 当前候选字数：${currentText}
 - 最低字数要求：${softMinText}（不得低于此值）
-${overSoft ? `- 诊断提示：当前已超过软上限 ${softMaxText}，如字数异常增长，应优先检查是否写入后续章节内容，而非简单压缩。\n` : ""}- 字数超出软上限不是错误，但不允许为了凑字数新增后续章节事件、未来人物或支线。
+${extraLines}- 字数超出软上限不是错误，但不允许为了凑字数新增后续章节事件、未来人物或支线。
 - 如果字数不足软下限，只能用当前章已有场景的动作、对话、心理、细节来扩展。`;
 }
 
@@ -3972,6 +4026,33 @@ async function runPlotAutoFixChapter(params: {
     inputFile = outputFile;
   }
 
+  // Word count check and normalization
+  const finalFixedText = await readFile(outputFile, "utf-8");
+  const spec = buildLengthSpec(targetWords, lang as "zh" | "en");
+  const finalFixedCount = countChapterLength(finalFixedText, spec.countingMode);
+
+  if (isOutsideSoftRange(finalFixedCount, spec)) {
+    if (!params.json) log(`Chapter length ${finalFixedCount} is outside soft range [${spec.softMin}, ${spec.softMax}]. Running LengthNormalizerAgent...`);
+    const normalizer = new LengthNormalizerAgent({
+      client: params.client,
+      model: params.model,
+      projectRoot: findProjectRoot(),
+      bookId: params.bookId,
+    });
+    const normalized = await normalizer.normalizeChapter({
+      chapterContent: finalFixedText,
+      lengthSpec: spec,
+      chapterIntent: plotScopeContent || undefined,
+    });
+
+    if (normalized.applied && normalized.finalCount >= finalFixedCount * 0.25) {
+      if (!params.json) log(`Length normalization applied successfully: ${finalFixedCount} -> ${normalized.finalCount}`);
+      await writeFile(outputFile, normalized.normalizedContent, "utf-8");
+    } else {
+      if (!params.json) log(`Length normalization skipped or safety net triggered (final count: ${normalized.finalCount})`);
+    }
+  }
+
   const finalFile = await writeReviewedFinalChapter(params.bookDir, params.chapter, outputFile);
   await deletePublishReadyStructureReportsIfExists(params.bookDir, params.chapter);
   return writePlotFixReport(params.bookDir, {
@@ -4100,7 +4181,80 @@ export function buildPlotAutoFixPrompt(
 ): string {
   const lengthBlock = lengthConstraint ? `\n${lengthConstraint}\n` : "";
   const scopeBlock = scopeConstraint ? `\n${scopeConstraint}\n` : "";
-  return `你正在修复一章 publish-ready 的 six_step_plot=FAIL_STRUCTURAL 问题。
+
+  const failedCheckers: string[] = [];
+  if (publishReport) {
+    const checkers = [
+      { name: "six_step_plot", report: publishReport.six_step_plot },
+      { name: "story_effectiveness", report: publishReport.story_effectiveness },
+      { name: "opening_hook", report: publishReport.opening_hook },
+      { name: "antagonist_intelligence", report: publishReport.antagonist_intelligence },
+      { name: "transition_quality", report: publishReport.transition_quality },
+    ];
+    for (const { name, report } of checkers) {
+      if (report && (report.status === "FAIL_STRUCTURAL" || report.status === "FAIL_REPORT_ONLY" || report.status === "FAIL")) {
+        failedCheckers.push(name);
+      }
+    }
+  }
+
+  if (failedCheckers.length === 0) {
+    failedCheckers.push("six_step_plot");
+  }
+
+  const intro = `你正在修复一章 publish-ready 的 ${failedCheckers.join(", ")} 问题。`;
+
+  const targets: string[] = [];
+  if (failedCheckers.includes("six_step_plot") || failedCheckers.includes("story_effectiveness")) {
+    targets.push(
+      "1. 让章节具备清晰的 Hook / Pressure / Attempt / Twist / Payoff / Pull。",
+      "2. 开头 1-3 段补出明确情绪事件或即时危机，不要空泛铺陈。",
+      "3. 中段明确主角目标、压力升级、主动尝试和阶段反馈。",
+      "4. 中后段补一个预期偏差或信息反转，不要只平推动作。",
+      "5. 结尾保留下一章拉力：新危机、新信息、新选择或未解决问题。"
+    );
+  } else {
+    targets.push(
+      "1. 针对报告中指出失败的具体维度进行定点补强或微调，严禁大范围重写故事结构。",
+      "2. 本次修复不要破坏已有且通过的六步情节（Six-step Plot）结构，保持行文连贯性。"
+    );
+  }
+
+  let ohSection = "";
+  if (failedCheckers.includes("opening_hook") || (publishReport?.warnings?.some(w => w.includes("emotion_event")))) {
+    ohSection = `\n【如果报告提到 emotion_event / 情绪事件 / 开头钩子】
+1. 必须改写或补强前 300 字。
+2. 开头必须出现一个可被读者立刻感知的外部事件，例如：有人当众压价/羞辱、关键物品被夺走、交易条件突然变卦、敌人逼近、门被封死、倒计时压迫。
+3. 这个事件必须迫使主角立刻做选择，不能只是环境描写、设定说明或心理独白。
+4. 第一屏必须同时有"目标 + 阻碍 + 情绪压力"。\n`;
+  }
+
+  let seSection = "";
+  if (failedCheckers.includes("story_effectiveness")) {
+    seSection = `\n【如果报告提到 story_effectiveness / 主角目标 / 结尾钩子】
+1. 必须在前 500 字明确主角本章目标，目标要能被读者复述，例如"用[本书核心道具]换取[资源]，保住[重要据点]"。
+2. 必须让目标遇到具体阻碍，例如盟友不信任、资源不足、敌对势力逼近、权限威胁。
+3. 结尾必须留下一个未解决问题或下一章选择，不能只列状态数值。
+4. 章末钩子要和本章目标直接相连，例如更高代价、权限掠夺、是否接受支线任务、防御即将失守。\n`;
+  }
+
+  let aiSection = "";
+  if (failedCheckers.includes("antagonist_intelligence")) {
+    aiSection = `\n【如果报告提到 antagonist_intelligence / 反派/对手智商】
+1. 优化反派/竞争对手/NPC 的动机与行为逻辑，使其合理、符合自身立场与利益，坚决避免无脑挑衅或降智行为。
+2. 确保反派做出的反应是自我一致且现实的，他们的博弈决策、反应和对峙应当构成合理的冲突闭环。
+3. 突出反派的威信、智商或力量，哪怕主角占优，也必须让冲突看起来有来有回，体现博弈感，而非单方面碾压。\n`;
+  }
+
+  let tqSection = "";
+  if (failedCheckers.includes("transition_quality")) {
+    tqSection = `\n【如果报告提到 transition_quality / 场景转折/过渡质量】
+1. 优化场景与场景之间的转折与衔接，避免生硬的场景切换，确保叙事连续性。
+2. 补充清晰的过渡指示，例如空间位置的变化、时间的推移或人物心境的合理转变。
+3. 检查段落/章节之间的情感过渡标记，确保角色心理变化有铺垫、有落脚，使情节流畅过渡。\n`;
+  }
+
+  return `${intro}
 
 【当前章节】
 ${currentText}
@@ -4120,23 +4274,7 @@ ${formatPlotReportForPrompt(sixStepReport)}
 ${formatStoryEffectivenessReportForPrompt(storyEffectivenessReport)}
 ${lengthBlock}${scopeBlock}
 【修复目标】
-1. 让章节具备清晰的 Hook / Pressure / Attempt / Twist / Payoff / Pull。
-2. 开头 1-3 段补出明确情绪事件或即时危机，不要空泛铺陈。
-3. 中段明确主角目标、压力升级、主动尝试和阶段反馈。
-4. 中后段补一个预期偏差或信息反转，不要只平推动作。
-5. 结尾保留下一章拉力：新危机、新信息、新选择或未解决问题。
-
-【如果报告提到 emotion_event / 情绪事件】
-1. 必须改写或补强前 300 字。
-2. 开头必须出现一个可被读者立刻感知的外部事件，例如：有人当众压价/羞辱、关键物品被夺走、交易条件突然变卦、敌人逼近、门被封死、倒计时压迫。
-3. 这个事件必须迫使主角立刻做选择，不能只是环境描写、设定说明或心理独白。
-4. 第一屏必须同时有"目标 + 阻碍 + 情绪压力"。
-
-【如果报告提到 story_effectiveness / 主角目标 / 结尾钩子】
-1. 必须在前 500 字明确主角本章目标，目标要能被读者复述，例如"用[本书核心道具]换取[资源]，保住[重要据点]"。
-2. 必须让目标遇到具体阻碍，例如盟友不信任、资源不足、敌对势力逼近、权限威胁。
-3. 结尾必须留下一个未解决问题或下一章选择，不能只列状态数值。
-4. 章末钩子要和本章目标直接相连，例如更高代价、权限掠夺、是否接受支线任务、防御即将失守。
+${targets.join("\n")}${ohSection}${seSection}${aiSection}${tqSection}
 
 【硬性要求】
 1. 保留原剧情主线、人物关系、资源数值、物品、地点和章尾方向。
