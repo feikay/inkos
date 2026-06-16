@@ -1,6 +1,7 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { BaseAgent } from "./base.js";
+import { readGenreProfile } from "./rules-reader.js";
 import type { BookConfig } from "../models/book.js";
 import { parseBookRules } from "../models/book-rules.js";
 import { CurrentStateStateSchema } from "../models/runtime-state.js";
@@ -164,7 +165,18 @@ export class PlannerAgent extends BaseAgent {
     });
     const currentState = resolvedCurrentState.markdown;
     const preferLatestStateAnchor = resolvedCurrentState.sourcePath !== sourcePaths.currentState;
-    const genreProfile = summarizeGenreProfile(genreProfileRaw, language);
+    const genreProfileBase = summarizeGenreProfile(genreProfileRaw, language);
+    const parsedGenreResult = await readGenreProfile(this.ctx.projectRoot, input.book.genre).catch(() => null);
+    const genreProfileMeta = parsedGenreResult?.profile;
+    const genreProfile: typeof genreProfileBase = genreProfileMeta
+      ? {
+        ...genreProfileBase,
+        concretePayoffObjects: genreProfileMeta.concretePayoffObjects ?? genreProfileBase.concretePayoffObjects,
+        defaultPayoffActions: genreProfileMeta.structuralSignals?.defaultPayoffActions ?? genreProfileBase.defaultPayoffActions,
+        numericalSystem: genreProfileMeta.numericalSystem ?? genreProfileBase.numericalSystem,
+        powerScaling: genreProfileMeta.powerScaling ?? genreProfileBase.powerScaling,
+      }
+      : genreProfileBase;
     const arcMap = summarizeArcMap(arcMapRaw, input.chapterNumber, language);
     const powerSystem = summarizePowerSystem(powerSystemRaw, language);
 
@@ -242,10 +254,20 @@ export class PlannerAgent extends BaseAgent {
       mustKeep: mustKeepBase,
     });
     const activeHookCount = memorySelection.activeHooks.filter(
-      (hook) => hook.status !== "resolved" && hook.status !== "deferred",
+      (hook) => this.isActiveHookAtChapter(hook, input.chapterNumber),
     ).length;
+    const chapterSupportedHooks = memorySelection.activeHooks.filter((hook) =>
+      this.isHookSupportedByChapterContext({
+        hook,
+        chapterNumber: input.chapterNumber,
+        currentFocus,
+        currentState,
+        outlineNode: resolvedOutlineNode,
+        goal,
+      }),
+    );
     let hookAgenda = buildPlannerHookAgenda({
-      hooks: memorySelection.activeHooks,
+      hooks: chapterSupportedHooks,
       chapterNumber: input.chapterNumber,
       targetChapters: input.book.targetChapters,
       language: input.book.language ?? "zh",
@@ -257,7 +279,7 @@ export class PlannerAgent extends BaseAgent {
       hookAgenda,
     });
     let hookEmergence = this.buildHookEmergenceDirective({
-      hooks: memorySelection.activeHooks,
+      hooks: chapterSupportedHooks,
       chapterNumber: input.chapterNumber,
       targetChapters: input.book.targetChapters,
     });
@@ -326,12 +348,13 @@ export class PlannerAgent extends BaseAgent {
       pendingHooksRaw,
       foreshadowRegistryRaw,
       hookAgenda,
-      selectedHooks: memorySelection.activeHooks,
+      selectedHooks: chapterSupportedHooks,
+      protagonistName: parsedRules.rules.protagonist?.name,
       arcMap,
       genreProfile,
       powerSystem,
     });
-    const cadenceAdjustedChapterGoal = this.applyCadenceChapterGoalOverrides(rawChapterGoal, cadence);
+    const cadenceAdjustedChapterGoal = this.applyCadenceChapterGoalOverrides(rawChapterGoal, cadence, genreProfileMeta);
     const resilientChapterGoal = this.ensureChapterGoalFallback({
       chapterGoal: cadenceAdjustedChapterGoal,
       goal,
@@ -350,7 +373,10 @@ export class PlannerAgent extends BaseAgent {
       chapterGoal: singlePayoffGovernance.chapterGoal,
       language,
       currentState,
+      currentFocus,
+      chapterNumber: input.chapterNumber,
       parsedRules,
+      genreProfile: genreProfileMeta,
     });
     const revealExecutablePayoffGovernance = this.enforceExecutableRevealPayoff({
       chapterGoal: concreteEventPayoffGovernance.chapterGoal,
@@ -368,9 +394,19 @@ export class PlannerAgent extends BaseAgent {
       chapterGoal: breathPayoffGovernance.chapterGoal,
       language,
       currentState,
+      genreProfile: genreProfileMeta,
     });
     const payoffGovernance = this.applyPayoffDirectiveGovernance(breakthroughPayoffGovernance.chapterGoal, language);
-    const chapterGoal = payoffGovernance.chapterGoal;
+    const chapterGoal = this.repairChapterPlanControlMainConflict({
+      chapterGoal: payoffGovernance.chapterGoal,
+      goal,
+      currentState,
+      chapterSummaries,
+      pendingHooksRaw,
+      chapterNumber: input.chapterNumber,
+      language,
+      moodDirective: directives.moodDirective,
+    });
     const payoffHookGovernance = this.applyPayoffHookGovernance({
       chapterGoal,
       directives,
@@ -1190,13 +1226,77 @@ export class PlannerAgent extends BaseAgent {
       language: input.language,
       moodDirective: input.moodDirective,
     });
-    const mainConflict = this.normalizeMeaningfulText(input.chapterGoal.mainConflict) ?? fallbackMainConflict;
+    const normalizedMainConflict = this.normalizeMeaningfulText(input.chapterGoal.mainConflict);
+    const mainConflict = normalizedMainConflict && !this.isChapterPlanControlText(normalizedMainConflict)
+      ? normalizedMainConflict
+      : fallbackMainConflict;
     const protagonistGoal = this.normalizeMeaningfulText(input.chapterGoal.protagonistGoal) ?? fallbackProtagonistGoal;
     return {
       ...input.chapterGoal,
       mainConflict,
       protagonistGoal,
     };
+  }
+
+  private repairChapterPlanControlMainConflict(input: {
+    readonly chapterGoal: ChapterGoal;
+    readonly goal: string;
+    readonly currentState: string;
+    readonly chapterSummaries: string;
+    readonly pendingHooksRaw: string;
+    readonly chapterNumber: number;
+    readonly language: "zh" | "en";
+    readonly moodDirective?: MoodDirective;
+  }): ChapterGoal {
+    const payoffConflict = this.deriveConflictFromPayoff(input.chapterGoal.payoffToDeliver);
+    if (
+      payoffConflict
+      && (this.isChapterPlanControlText(input.chapterGoal.mainConflict)
+        || !this.hasConflictPayoffOverlap(input.chapterGoal.mainConflict, input.chapterGoal.payoffToDeliver))
+    ) {
+      return {
+        ...input.chapterGoal,
+        mainConflict: payoffConflict,
+      };
+    }
+    if (!this.isChapterPlanControlText(input.chapterGoal.mainConflict)) {
+      return input.chapterGoal;
+    }
+    const primaryHookConflict = this.findPrimaryHookConflict(input.chapterGoal.foreshadowToTouch, input.pendingHooksRaw);
+    return {
+      ...input.chapterGoal,
+      mainConflict: primaryHookConflict ?? this.deriveMinimalMainConflictFromStateContext(input),
+    };
+  }
+
+  private hasConflictPayoffOverlap(conflict: string | undefined, payoff: string | undefined): boolean {
+    const combined = `${conflict ?? ""} ${payoff ?? ""}`;
+    // Generic family-crisis overlap detection — uses abstract role/event categories only.
+    if (/(父亲|爸爸|母亲|妈妈|家人|家庭).{0,24}(失业|危机|变故|困难|经济压力)/u.test(combined)) {
+      return /(父亲|爸爸|母亲|妈妈|家人|家庭).{0,24}(失业|危机|变故|困难|经济压力)/u.test(conflict ?? "");
+    }
+    return true;
+  }
+
+  private deriveConflictFromPayoff(payoff: string | undefined): string | undefined {
+    const normalized = this.normalizeMeaningfulText(payoff);
+    if (!normalized) return undefined;
+    // Generic family-economic-crisis derivation — no hardcoded book/character names.
+    if (/(父亲|爸爸|母亲|妈妈|家人|家庭).{0,16}(失业|危机|变故|困难|经济)/u.test(normalized)) {
+      return "家庭经济危机被确认，主角必须寻找出路。";
+    }
+    return undefined;
+  }
+
+  private findPrimaryHookConflict(
+    foreshadowToTouch: ReadonlyArray<string>,
+    pendingHooksRaw: string,
+  ): string | undefined {
+    const primaryHookId = foreshadowToTouch[0];
+    if (!primaryHookId) return undefined;
+    const hook = parsePendingHooksMarkdown(pendingHooksRaw).find((item) => item.hookId === primaryHookId);
+    return this.normalizeMeaningfulText(hook?.notes)
+      ?? this.normalizeMeaningfulText(hook?.expectedPayoff);
   }
 
   private deriveMinimalGoalFromStateContext(input: {
@@ -1252,7 +1352,13 @@ export class PlannerAgent extends BaseAgent {
       .filter((hook) => !/^(resolved|deferred|closed|done|已解决|已回收)$/i.test(hook.status.trim()))
       .sort((left, right) => left.lastAdvancedChapter - right.lastAdvancedChapter || left.startChapter - right.startChapter)[0];
 
-    const stateConflict = this.findStateFactValue(stateFacts, ["current conflict", "当前冲突"]);
+    const stateConflict = this.findFirstUsableStateFactValue(stateFacts, [
+      "current conflict",
+      "当前冲突",
+      "first conflict",
+      "第一个冲突",
+      "首个冲突",
+    ]);
     const summaryConflict = this.normalizeMeaningfulText(latestSummary?.stateChanges)
       ?? this.normalizeMeaningfulText(latestSummary?.events);
     const hookPressure = this.normalizeMeaningfulText(pendingHook?.notes)
@@ -1273,6 +1379,29 @@ export class PlannerAgent extends BaseAgent {
     ]) ?? genericDefault;
   }
 
+  private isChapterPlanControlText(value: string): boolean {
+    const compact = value.replace(/\s+/g, "");
+    return compact.includes("章必须完成")
+      || compact.includes("前500字冲突")
+      || compact.includes("主钩子类型")
+      || compact.includes("核心功能")
+      || compact.includes("章节结尾钩子")
+      || /golden\s*three|opening\s*hook/i.test(value);
+  }
+
+  private findFirstUsableStateFactValue(
+    facts: ReadonlyArray<{ predicate: string; object: string }>,
+    labels: ReadonlyArray<string>,
+  ): string | undefined {
+    for (const label of labels) {
+      const value = this.findStateFactValue(facts, [label]);
+      if (value && !this.isChapterPlanControlText(value)) {
+        return value;
+      }
+    }
+    return undefined;
+  }
+
   private findStateFactValue(
     facts: ReadonlyArray<{ predicate: string; object: string }>,
     labels: ReadonlyArray<string>,
@@ -1289,7 +1418,7 @@ export class PlannerAgent extends BaseAgent {
     if (!trimmed) return undefined;
     if (this.isTemplatePlaceholder(trimmed)) return undefined;
     if (
-      /^(?:\(|（)?\s*(todo|tbd|none|null|n\/a|无|空白|待补充|未定义|状态未同步)\s*(?:\)|）)?$/iu.test(trimmed)
+      /^(?:\(|（)?\s*(todo|tbd|none|null|n\/a|无|空白|待补充|未定义|状态未同步|未设定|未填写|待定)\s*(?:\)|）)?$/iu.test(trimmed)
     ) {
       return undefined;
     }
@@ -1369,7 +1498,7 @@ export class PlannerAgent extends BaseAgent {
         .map((line) => line.trim())
         .filter((line) =>
           line.startsWith("-") &&
-          /avoid|don't|do not|不要|别|禁止/i.test(line),
+          /^(?:avoid\b|don't\b|do not\b|never\b|禁止|严禁|不要|避免|不得)/i.test(line.replace(/^[-*]\s*/, "").trim()),
         )
         .map((line) => this.cleanListItem(line))
         .filter((line): line is string => Boolean(line));
@@ -1604,6 +1733,7 @@ export class PlannerAgent extends BaseAgent {
   private applyCadenceChapterGoalOverrides(
     chapterGoal: ChapterGoal,
     cadence: ReturnType<typeof analyzeChapterCadence>,
+    genreProfile?: { readonly powerScaling?: boolean },
   ): ChapterGoal {
     if (!cadence.breathingCollapse) {
       return chapterGoal;
@@ -1615,7 +1745,7 @@ export class PlannerAgent extends BaseAgent {
 
     return {
       ...chapterGoal,
-      endingHookType: this.pickEscalationEndingHookType(chapterGoal),
+      endingHookType: this.pickEscalationEndingHookType(chapterGoal, genreProfile),
     };
   }
 
@@ -1748,14 +1878,17 @@ export class PlannerAgent extends BaseAgent {
     readonly chapterGoal: ChapterGoal;
     readonly language: "zh" | "en";
     readonly currentState: string;
+    readonly currentFocus?: string;
+    readonly chapterNumber?: number;
     readonly parsedRules?: ReturnType<typeof parseBookRules>;
+    readonly genreProfile?: any;
   }): {
     readonly chapterGoal: ChapterGoal;
     readonly directiveNote?: string;
     readonly conflict?: ChapterConflict;
   } {
     const payoff = this.normalizeMeaningfulText(input.chapterGoal.payoffToDeliver);
-    if (!payoff || this.isConcreteEventPayoff(payoff)) {
+    if (!payoff || this.isConcreteEventPayoff(payoff, input.genreProfile)) {
       return {
         chapterGoal: input.chapterGoal,
       };
@@ -1766,6 +1899,7 @@ export class PlannerAgent extends BaseAgent {
       currentState: input.currentState,
       language: input.language,
       parsedRules: input.parsedRules,
+      genreProfile: input.genreProfile,
     });
     if (!rewrittenPayoff || rewrittenPayoff === payoff) {
       return {
@@ -1777,11 +1911,20 @@ export class PlannerAgent extends BaseAgent {
       chapterGoal: {
         ...input.chapterGoal,
         payoffToDeliver: rewrittenPayoff,
+        nextChapterPull: this.composeConcretePayoffRewritePull({
+          language: input.language,
+          originalPayoff: payoff,
+          rewrittenPayoff,
+          existingPull: input.chapterGoal.nextChapterPull,
+          currentFocus: input.currentFocus,
+          chapterNumber: input.chapterNumber,
+        }),
         ...(input.chapterGoal.payoffDirective
           ? {
             payoffDirective: {
               ...input.chapterGoal.payoffDirective,
               promisedPayoff: rewrittenPayoff,
+              payoffType: this.inferLowPressurePayoffType(rewrittenPayoff),
             },
           }
           : {}),
@@ -1795,6 +1938,39 @@ export class PlannerAgent extends BaseAgent {
         detail: `${payoff} -> ${rewrittenPayoff}`,
       },
     };
+  }
+
+  private composeConcretePayoffRewritePull(input: {
+    readonly language: "zh" | "en";
+    readonly originalPayoff: string;
+    readonly rewrittenPayoff: string;
+    readonly existingPull: string;
+    readonly currentFocus?: string;
+    readonly chapterNumber?: number;
+  }): string {
+    const existing = this.normalizeMeaningfulText(input.existingPull);
+    const endingHook = this.extractCurrentFocusChapterEndingHook(input.currentFocus ?? "", input.chapterNumber ?? 0);
+    const shouldReplaceExisting = !existing
+      || existing.includes(input.originalPayoff)
+      || this.isWeakNextChapterPull(existing);
+    if (endingHook && shouldReplaceExisting) {
+      const sanitizedEnding = this.normalizeMeaningfulText(endingHook);
+      if (sanitizedEnding) {
+        return input.language === "zh"
+          ? `结尾钩子不能悬空，下章要承接并升级：${sanitizedEnding}`
+          : `The ending hook cannot hang loose; the next chapter must carry and escalate it: ${sanitizedEnding}`;
+      }
+    }
+    if (shouldReplaceExisting) {
+      return input.language === "zh"
+        ? `本章兑现“${input.rewrittenPayoff}”后，下章要把这个结果转成新的行动压力。`
+        : `After delivering "${input.rewrittenPayoff}", the next chapter must turn that result into new action pressure.`;
+    }
+    return existing;
+  }
+
+  private isWeakNextChapterPull(value: string): boolean {
+    return /(发现异常|关键线索|一条线索|一层表皮|下章升级冲突|更大威胁|真正危险|next chapter escalation|key clue|first layer|real danger)/iu.test(value);
   }
 
   private enforceExecutableRevealPayoff(input: {
@@ -2025,15 +2201,33 @@ export class PlannerAgent extends BaseAgent {
     return this.unique([existing, deferred].filter((value): value is string => Boolean(value))).join(input.language === "zh" ? " " : " ");
   }
 
-  private isConcreteEventPayoff(payoff: string): boolean {
+  private isConcreteEventPayoff(payoff: string, genreProfile?: any): boolean {
     const trimmed = payoff.trim();
     if (!trimmed) {
       return false;
     }
 
+    const defaultActions = genreProfile?.structuralSignals?.defaultPayoffActions ?? [
+      "触发", "打开", "拿到", "夺下", "获得", "压住", "觉醒", "突破", "点亮", "揭开", "解开", "发现", "找到", "锁定", "启动", "扯开", "击碎", "稳住", "显现", "亮起", "拿回", "取到", "激活", "开启",
+      "awaken", "breakthrough", "get", "gain", "discover", "find", "open", "unlock", "trigger", "stabilize", "ignite", "activate"
+    ];
+    const customObjects = genreProfile?.concretePayoffObjects ?? [
+      "目标", "道具", "钥匙", "门", "线索", "奖励", "文件", "凭证", "物品", "材料", "设备"
+    ];
+
+
+    const customPattern = customObjects.length > 0
+      ? new RegExp(`(${customObjects.map((o: string) => this.escapeRegex(o)).join("|")})`, "u")
+      : null;
+
     if (
       /(关键线索|明确线索|逃生线索|具体线索|第一条线索|first concrete clue|clear escape clue|key clue|concrete clue)/i.test(trimmed)
-      || /(拿到黑市腰牌|逃离追捕|暂时脱离当前压制|压住第一次反噬|地图锁孔第一次打开|玉简核心机制被触发)/u.test(trimmed)
+      || this.isExploratoryPayoff(trimmed)
+      || this.isPassiveConfirmationPayoff(trimmed)
+      || /(?:发现|确认|意识到|确定).{0,12}(?:重生|回到|回了|时间点|年份|199\d|20\d{2})/u.test(trimmed)
+      || /(?:重生|回到|回了|时间点|年份|199\d|20\d{2}).{0,12}(?:被)?(?:当场)?(?:确认|坐实)/u.test(trimmed)
+      || /(危机|事实|名单|通知|裁员).{0,12}(被)?(?:当场)?(坐实|确认)|(?:坐实|确认).{0,12}(危机|事实|名单|通知|裁员)/u.test(trimmed)
+      || (customPattern !== null && customPattern.test(trimmed))
       || /(?:获得|拿到|揭开|发现|显现).{0,10}(关键线索|明确线索|逃生线索|地图信息)/u.test(trimmed)
     ) {
       return true;
@@ -2061,7 +2255,13 @@ export class PlannerAgent extends BaseAgent {
       return false;
     }
 
-    return /(触发|打开|拿到|夺下|获得|压住|觉醒|突破|点亮|揭开|解开|发现|找到|锁定|启动|扯开|击碎|稳住|显现|亮起|拿回|取到|激活|开启|awaken|breakthrough|get|gain|discover|find|open|unlock|trigger|stabilize|ignite|activate)/i.test(trimmed)
+    const actionsPattern = defaultActions.length > 0
+      ? new RegExp(`(${defaultActions.map((action: string) => this.escapeRegex(action)).join("|")})`, "i")
+      : null;
+    if (!actionsPattern) {
+      return false;
+    }
+    return actionsPattern.test(trimmed)
       && !/(获得优势|形成优势|阶段推进|有所推进|局势推进)/u.test(trimmed);
   }
 
@@ -2070,6 +2270,7 @@ export class PlannerAgent extends BaseAgent {
     readonly currentState: string;
     readonly language: "zh" | "en";
     readonly parsedRules?: ReturnType<typeof parseBookRules>;
+    readonly genreProfile?: any;
   }): string {
     const source = [
       input.chapterGoal.protagonistGoal,
@@ -2078,44 +2279,36 @@ export class PlannerAgent extends BaseAgent {
       input.currentState,
     ].join(" ");
 
-    const matchedObject = this.extractPayoffEventObject(source);
-    if (matchedObject) {
-      if (/地图锁孔/u.test(matchedObject)) {
-        return input.language === "zh" ? "地图锁孔第一次打开" : "the map lock opens for the first time";
-      }
-      if (/玉简/u.test(matchedObject)) {
-        return input.language === "zh" ? "玉简核心机制被触发" : "the jade slip core mechanism is triggered";
-      }
-      if (/(地图|残图)/u.test(matchedObject)) {
-        return input.language === "zh" ? "地图关键路线第一次显现" : "the map's key route appears for the first time";
-      }
-      if (/(锁孔|机关|阵纹|禁纹|法阵)/u.test(matchedObject)) {
-        return input.language === "zh" ? `${matchedObject}第一次打开` : `the ${matchedObject} opens for the first time`;
-      }
-      if (/(腰牌|令牌|钥匙)/u.test(matchedObject)) {
-        if (input.language === "zh" && /黑市/u.test(source)) {
-          return `拿到黑市${matchedObject}`;
-        }
-        return input.language === "zh" ? `拿到${matchedObject}` : `secure the ${matchedObject}`;
-      }
-      if (/(卷轴|古卷|残卷|残页)/u.test(matchedObject)) {
-        return input.language === "zh" ? `${matchedObject}核心线索被揭开` : `a core clue in the ${matchedObject} is uncovered`;
-      }
-      if (/(石碑|古碑|碑纹)/u.test(matchedObject)) {
-        return input.language === "zh" ? `${matchedObject}第一次亮起` : `the ${matchedObject} lights up for the first time`;
-      }
-      if (/(入口|门|祭坛)/u.test(matchedObject)) {
-        return input.language === "zh" ? `${matchedObject}被强行打开` : `the ${matchedObject} is forced open`;
-      }
+    const payoff = this.normalizeMeaningfulText(input.chapterGoal.payoffToDeliver);
+    if (payoff && this.isAwakeningPayoff(payoff)) {
+      return this.deriveRevealEventPayoff(source, input.language);
     }
+    if (payoff && this.isExploratoryPayoff(payoff)) {
+      return this.deriveExploratoryPayoff(source, input.language);
+    }
+
+    const matchedObject = this.extractPayoffEventObject(source, input.genreProfile);
+    const defaultActions = input.genreProfile?.structuralSignals?.defaultPayoffActions ?? (input.language === "zh" ? ["拿到", "保住", "夺回"] : ["secure", "protect", "reclaim"]);
+    const actionsPattern = new RegExp(`(${defaultActions.map((a: string) => this.escapeRegex(a)).join('|')})`, 'iu');
+    const matchedAction = source.match(actionsPattern)?.[1] ?? defaultActions[0];
 
     const inferredType = input.chapterGoal.payoffDirective?.payoffType;
     const customResources = input.parsedRules?.rules?.numericalSystemOverrides?.resourceTypes || [];
-    const systemResourceName = customResources.find(res => /(积分|点数|能量|试用期|权限)/.test(res));
+    const systemResourceName = customResources.find((res: string) => /(积分|点数|能量|试用期|权限)/.test(res));
+
+    if (inferredType === "reveal") {
+      return this.deriveRevealEventPayoff(source, input.language);
+    }
+
+    if (matchedObject) {
+      return input.language === "zh" ? `${matchedAction}${matchedObject}` : `${matchedAction} the ${matchedObject}`;
+    }
+
+    if (this.hasExploratorySourceSignal(source, input.language)) {
+      return this.deriveExploratoryPayoff(source, input.language);
+    }
 
     switch (inferredType) {
-      case "reveal":
-        return input.language === "zh" ? "一条关键线索被当场揭开" : "a key clue is revealed on the spot";
       case "resource":
         if (systemResourceName) {
           return input.language === "zh"
@@ -2124,12 +2317,134 @@ export class PlannerAgent extends BaseAgent {
         }
         return input.language === "zh" ? "一份可立刻使用的关键资源被拿到" : "a usable key resource is secured";
       case "breakthrough":
-        return input.language === "zh" ? "第一次觉醒被当场触发" : "the first awakening is triggered on the spot";
+        if (input.genreProfile?.powerScaling === false) {
+          return this.deriveNonPowerBreakthroughPayoff(source, input.language);
+        }
+        return input.language === "zh" ? "第一次突破被当场触发" : "the first breakthrough is triggered on the spot";
       case "relationship":
         return input.language === "zh" ? "与关键人物达成一次明确结盟" : "a concrete alliance with a key character is formed";
       default:
         return input.language === "zh" ? "局势第一次发生明确反转" : "the situation turns in a clear, concrete way";
     }
+  }
+
+  private deriveRevealEventPayoff(source: string, language: "zh" | "en"): string {
+    if (language !== "zh") {
+      if (/(return|back).{0,20}(year|past|timeline)|reborn|reincarnat/i.test(source)) {
+        return "the protagonist confirms the return to the past timeline";
+      }
+      if (/(father|dad).{0,30}(layoff|laid off|job loss|factory cut)/i.test(source)) {
+        return "the father's layoff crisis is confirmed";
+      }
+      const revealMatch = source.match(/(?:discovers?|confirms?|learns?|realizes?)\s+[^.;!?]{4,80}/i);
+      return revealMatch?.[0]?.trim() ?? "a key clue is revealed on the spot";
+    }
+
+    const rebirthConfirmed = /(?:发现|确认|验证|意识到|确定|醒来发现|猛然惊醒).{0,20}(?:重生|回到|回了|时空|199\d|20\d{2}|时间点|年份)/u.test(source)
+      || /(?:重生|回到|回了|时空|199\d|20\d{2}|时间点|年份).{0,20}(?:确认|验证|坐实|确定|发现)/u.test(source);
+    const familyCrisisConfirmed = /(?:父亲|爸爸).{0,20}(?:透露|说出|提到|失业|危机|变故|工厂).{0,12}(?:失业|危机)?/u.test(source)
+      || /(?:失业|危机|变故|工厂).{0,20}(?:父亲|爸爸)/u.test(source);
+    const antagonistThreat = /(?:有人|来人|对方|那人|债主|仇家).{0,20}(?:堵门|警告|威胁|上门|逼迫)|(?:堵门|警告|威胁|上门|逼迫).{0,20}(?:有人|来人|对方|那人|债主|仇家)/u.test(source);
+
+    if (rebirthConfirmed && familyCrisisConfirmed) {
+      return "确认重生事实，并得知家庭危机";
+    }
+    if (rebirthConfirmed) {
+      return "确认重生/穿越事实";
+    }
+    if (familyCrisisConfirmed) {
+      return "家庭经济危机被确认";
+    }
+    if (antagonistThreat) {
+      return "外部威胁被正面引爆";
+    }
+
+    const revealMatch = source.match(/(?:发现|得知|透露|看到|意识到|确认|确定)[^，。；！？,.!?]{2,28}/u);
+    return revealMatch?.[0]?.trim() ?? "一条关键线索被当场揭开";
+  }
+
+  private isAwakeningPayoff(payoff: string): boolean {
+    const normalized = payoff.trim();
+    if (!normalized) return false;
+    return /^(?:觉醒|苏醒|醒来|重生觉醒|确认时空|验证重生|确认重生|确认新现实)$/u.test(normalized)
+      || /\b(?:awakening|awaken|wake up|confirm reality|confirm the new reality|confirm rebirth)\b/i.test(normalized);
+  }
+
+  private isExploratoryPayoff(payoff: string): boolean {
+    const normalized = payoff.trim();
+    if (!normalized) return false;
+    return /(?:找到|锁定|确认|发现|明确|识别|摸清|看清).{0,12}(?:机会|方向|路径|来源|入口|办法|方案|线索|突破口|可行性|信息差|赚钱门路|商机)/u.test(normalized)
+      || /\b(?:find|identify|lock|confirm|discover|locate|pin down).{0,32}(?:opportunity|path|source|route|lead|opening|plan|way|approach|angle|clue)\b/i.test(normalized);
+  }
+
+  private isPassiveConfirmationPayoff(payoff: string): boolean {
+    const normalized = payoff.trim();
+    if (!normalized) return false;
+    return /(?:机会|方向|路径|来源|入口|办法|方案|线索|突破口|可行性|风险|危机|问题|异常|位置|目标|身份|规则|限制).{0,8}(?:被)?(?:确认|锁定|发现|看清|坐实)/u.test(normalized)
+      || /\b(?:opportunity|path|source|route|lead|opening|plan|way|approach|angle|clue|risk|threat|problem|identity|rule|limit)\s+(?:is|gets|has been)?\s*(?:confirmed|identified|located|found|locked|revealed)\b/i.test(normalized);
+  }
+
+  private hasExploratorySourceSignal(source: string, language: "zh" | "en"): boolean {
+    if (language !== "zh") {
+      return /(need|needs|needed|must find|must raise|without|lack|lacks|source|path|route|opportunity|opening|way forward|information gap|business lead|first lead)/i.test(source);
+    }
+    return /(?:需要|无|没有|缺|缺少|至少|想办法|从哪|怎么|来源|路径|机会|商机|赚钱|信息差|门槛最低|可用资源|第一步|下一步|方向|可执行)/u.test(source);
+  }
+
+  private deriveExploratoryPayoff(source: string, language: "zh" | "en"): string {
+    if (language !== "zh") {
+      if (/(fund|cash|money|capital|budget).{0,40}(source|path|route|way|borrow|raise)|(?:source|path|route|way).{0,40}(fund|cash|money|capital)/i.test(source)) {
+        return "identify a realistic funding path";
+      }
+      if (/(business|earn|profit|market|trade|opportunity|information gap|arbitrage)/i.test(source)) {
+        return "identify the first actionable earning opportunity";
+      }
+      if (/(clue|investigat|mystery|truth|lead)/i.test(source)) {
+        return "lock onto the next actionable lead";
+      }
+      if (/(door|gate|entrance|route|path|way in)/i.test(source)) {
+        return "identify the next viable route forward";
+      }
+      return "confirm one actionable next-step path";
+    }
+
+    if (/(启动资金|本钱|借钱|筹钱|筹措|资金来源|五毛钱|五毛|100块|100元)/u.test(source)
+      && /(?:需要|无|没有|缺|至少|想办法|借|筹|来源|路径|从哪|怎么)/u.test(source)) {
+      return "找到启动资金来源";
+    }
+    if (/(商机|赚钱|生意|信息差|碟片|倒卖|市场|价格|批发|差价|门槛最低)/u.test(source)) {
+      return "锁定第一个可执行赚钱方向";
+    }
+    if (/(线索|调查|真相|疑点|证据|谜团|踪迹)/u.test(source)) {
+      return "锁定下一条可执行线索";
+    }
+    if (/(入口|门|路线|路径|通道|去处|办法|方案)/u.test(source)) {
+      return "确认下一步可执行路径";
+    }
+    return "确认一个可执行的下一步路径";
+  }
+
+  private deriveNonPowerBreakthroughPayoff(source: string, language: "zh" | "en"): string {
+    if (language !== "zh") {
+      if (/fund|cash|money|capital|budget/i.test(source)) {
+        return "a realistic funding path is identified";
+      }
+      if (/partner|ally|cooperation|supplier|contact/i.test(source)) {
+        return "a practical cooperation lead is secured";
+      }
+      return "a concrete practical opening is identified";
+    }
+
+    if (/(资金|本钱|现金|钱|筹|借|元|预算)/u.test(source)) {
+      return "找到筹措启动资金的现实路径";
+    }
+    if (/(合作|合伙|老周|人脉|关系|渠道|供应|档口|批发)/u.test(source)) {
+      return "锁定一个可执行的合作突破口";
+    }
+    if (/(线索|信息|报价|价格|批发价|消息)/u.test(source)) {
+      return "确认一条可立刻利用的信息差";
+    }
+    return "找到一个可执行的现实突破口";
   }
 
   private hasExecutableRevealGap(input: {
@@ -2225,20 +2540,31 @@ export class PlannerAgent extends BaseAgent {
       : "discover the cost and limitation behind that reveal";
   }
 
-  private extractPayoffEventObject(source: string): string | undefined {
-    const patterns = [
-      /(地图锁孔)/u,
-      /(玉简)/u,
-      /(地图|残图)/u,
-      /(锁孔|机关|阵纹|禁纹|法阵)/u,
-      /(腰牌|令牌|钥匙)/u,
-      /(卷轴|古卷|残卷|残页)/u,
-      /(石碑|古碑|碑纹)/u,
-      /(入口|门|祭坛)/u,
+  private extractPayoffEventObject(source: string, genreProfile?: any): string | undefined {
+    const customObjects = genreProfile?.concretePayoffObjects ?? [
+      "目标", "道具", "钥匙", "门", "线索", "奖励", "文件", "凭证", "物品", "材料", "设备"
     ];
+    const patterns = customObjects.map((o: string) => new RegExp(`(${this.escapeRegex(o)})`, 'u'));
     return patterns
-      .map((pattern) => source.match(pattern)?.[1])
-      .find((value): value is string => Boolean(value && value.trim().length > 0));
+      .map((pattern: RegExp) => source.match(pattern)?.[1])
+      .filter((value: string | undefined): value is string => Boolean(value && value.trim().length > 0))
+      .find((value: string) => !this.hasUnavailableObjectContext(source, value));
+  }
+
+  private hasUnavailableObjectContext(source: string, object: string): boolean {
+    const escaped = this.escapeRegex(object);
+    const beforeObject = new RegExp(`(?:无|没有|没|缺|缺少|需要|至少|想办法|尚未|还没|未能|无法|不能|得|要|筹|借)[^，。；！？,.!?]{0,16}${escaped}`, "u");
+    const afterObject = new RegExp(`${escaped}[^，。；！？,.!?]{0,16}(?:来源|路径|从哪|怎么|还没|尚未|不足|不够|缺口|需求)`, "u");
+    const backgroundObject = new RegExp(`(?:身上|口袋里|枕头下|桌上|包里|状态|背景|随身)[^，。；！？,.!?]{0,16}(?:有|带着|压着|放着)[^，。；！？,.!?]{0,16}${escaped}`, "u");
+    const englishBefore = new RegExp(`(?:no|without|lack|lacks|need|needs|needed|must raise|must find|source of|path to)[^.;!?]{0,32}${escaped}`, "i");
+    const englishAfter = new RegExp(`${escaped}[^.;!?]{0,32}(?:source|path|needed|required|shortfall|gap|not enough|missing)`, "i");
+    const englishBackground = new RegExp(`(?:has|carries|keeps|lies|sits)[^.;!?]{0,32}${escaped}[^.;!?]{0,32}(?:background|identity|state|status)`, "i");
+    return beforeObject.test(source)
+      || afterObject.test(source)
+      || backgroundObject.test(source)
+      || englishBefore.test(source)
+      || englishAfter.test(source)
+      || englishBackground.test(source);
   }
 
   private extractRevealTarget(payoff: string): string | undefined {
@@ -2464,6 +2790,7 @@ export class PlannerAgent extends BaseAgent {
     readonly chapterGoal: ChapterGoal;
     readonly language: "zh" | "en";
     readonly currentState: string;
+    readonly genreProfile?: { readonly powerScaling?: boolean };
   }): {
     readonly chapterGoal: ChapterGoal;
     readonly directiveNote?: string;
@@ -2474,8 +2801,11 @@ export class PlannerAgent extends BaseAgent {
       input.chapterGoal.protagonistGoal,
       input.chapterGoal.mainConflict,
     ].join(" ");
-    const isBreakthroughPayoff = payoffDirectiveType === "breakthrough"
-      || /(觉醒|突破|破境|晋阶|掌握新能力|血脉苏醒|awaken|breakthrough|advance realm|unlock)/i.test(payoffText);
+    const allowsPowerBreakthrough = input.genreProfile?.powerScaling !== false;
+    const isBreakthroughPayoff = allowsPowerBreakthrough && (
+      payoffDirectiveType === "breakthrough"
+      || /(觉醒|突破|破境|晋阶|掌握新能力|血脉苏醒|awaken|breakthrough|advance realm|unlock)/i.test(payoffText)
+    );
 
     if (!isBreakthroughPayoff) {
       return {
@@ -2605,7 +2935,10 @@ export class PlannerAgent extends BaseAgent {
     return this.unique([existingPull, deferredLine]).join(input.language === "zh" ? " " : " ");
   }
 
-  private pickEscalationEndingHookType(chapterGoal: ChapterGoal): ChapterGoal["endingHookType"] {
+  private pickEscalationEndingHookType(
+    chapterGoal: ChapterGoal,
+    genreProfile?: { readonly powerScaling?: boolean },
+  ): ChapterGoal["endingHookType"] {
     const joined = [
       chapterGoal.mainConflict,
       chapterGoal.protagonistGoal,
@@ -2616,7 +2949,7 @@ export class PlannerAgent extends BaseAgent {
     if (/追|逃|追兵|追杀|追踪|围堵|封锁|pursuit|chase|tracked|escape/i.test(joined)) {
       return "pursuit";
     }
-    if (/突破|破境|掌握|觉醒|晋阶|新能力|breakthrough|awaken|mastered|new ability/i.test(joined)) {
+    if (genreProfile?.powerScaling !== false && /突破|破境|掌握|觉醒|晋阶|新能力|breakthrough|awaken|mastered|new ability/i.test(joined)) {
       return "breakthrough";
     }
     return "danger";
@@ -2780,6 +3113,8 @@ export class PlannerAgent extends BaseAgent {
     return (
       /^\((describe|briefly describe|write)\b[\s\S]*\)$/i.test(normalized)
       || /^（(?:在这里描述|描述|填写|写下)[\s\S]*）$/u.test(normalized)
+      || /^（(?:未设定|未填写|待定|待补充|待填写|暂无|无）)$/u.test(normalized)
+      || /^\((?:not set|unset|tbd|none|n\/a)\)$/iu.test(normalized)
     );
   }
 
@@ -2892,7 +3227,7 @@ export class PlannerAgent extends BaseAgent {
   }
 
   private cleanOutlineContent(content?: string): string | undefined {
-    const cleaned = content?.trim();
+    const cleaned = content?.trim().replace(/^[*_`~:：\-\s]+/u, "").trim();
     if (!cleaned) return undefined;
     if (/^[*_`~:：-]+$/.test(cleaned)) return undefined;
     return cleaned;
@@ -3024,7 +3359,7 @@ export class PlannerAgent extends BaseAgent {
     readonly hookAgenda: ChapterIntent["hookAgenda"];
   }): PlannerHookThrottle {
     const cap = 12;
-    const activeCount = input.activeHooks.filter((hook) => !/^(resolved|deferred)$/i.test(hook.status)).length;
+    const activeCount = input.activeHooks.filter((hook) => this.isActiveHookAtChapter(hook, input.chapterNumber)).length;
     const recentSummaries = parseChapterSummariesMarkdown(input.chapterSummaries)
       .filter((summary) => summary.chapter < input.chapterNumber)
       .sort((left, right) => left.chapter - right.chapter)
@@ -3050,6 +3385,13 @@ export class PlannerAgent extends BaseAgent {
       recentOpenBias,
       pressuredHookIds,
     };
+  }
+
+  private isActiveHookAtChapter(hook: StoredHook, chapterNumber: number): boolean {
+    if (/^(resolved|deferred|closed|done|已解决|已回收)$/i.test(hook.status.trim())) {
+      return false;
+    }
+    return hook.startChapter <= chapterNumber || hook.lastAdvancedChapter > 0;
   }
 
   private buildHookDebtMustAvoid(
@@ -3171,7 +3513,9 @@ export class PlannerAgent extends BaseAgent {
     hookEmergence: HookEmergenceDirective,
   ): string {
     const conflictLines = intent.conflicts.length > 0
-      ? intent.conflicts.map((conflict) => `- ${conflict.type}: ${conflict.resolution}`).join("\n")
+      ? intent.conflicts.map((conflict) =>
+        `- ${conflict.type}: ${conflict.resolution}${conflict.detail ? ` (${conflict.detail})` : ""}`,
+      ).join("\n")
       : "- none";
 
     const mustKeep = intent.mustKeep.length > 0
@@ -3350,13 +3694,97 @@ export class PlannerAgent extends BaseAgent {
     return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
   }
 
+  private isHookSupportedByChapterContext(input: {
+    readonly hook: StoredHook;
+    readonly chapterNumber: number;
+    readonly currentFocus: string;
+    readonly currentState: string;
+    readonly outlineNode?: string;
+    readonly goal: string;
+  }): boolean {
+    const hook = input.hook;
+    if (!this.isActiveHookAtChapter(hook, input.chapterNumber)) {
+      return false;
+    }
+    if (hook.lastAdvancedChapter > 0 || hook.startChapter < input.chapterNumber) {
+      return true;
+    }
+
+    const chapterContext = [
+      input.goal,
+      input.outlineNode,
+      input.currentState,
+      this.extractCurrentFocusChapterBlock(input.currentFocus, input.chapterNumber).join("\n"),
+    ].filter(Boolean).join("\n");
+    if (!chapterContext.trim()) {
+      return true;
+    }
+
+    const terms = this.extractHookSupportTerms([hook.hookId, hook.type, hook.notes, hook.expectedPayoff].join(" "));
+    if (terms.length === 0) {
+      return true;
+    }
+    return terms.some((term) => chapterContext.includes(term));
+  }
+
+  private extractCurrentFocusChapterBlock(currentFocus: string, chapterNumber: number): string[] {
+    const chapterPattern = new RegExp(`第\\s*${chapterNumber}\\s*章`, "u");
+    const anyChapterPattern = /第\s*\d+\s*章/u;
+    const lines = currentFocus.split("\n");
+    const block: string[] = [];
+    let inBlock = false;
+
+    for (const line of lines) {
+      if (!inBlock && chapterPattern.test(line)) {
+        inBlock = true;
+        block.push(line);
+        continue;
+      }
+      if (!inBlock) continue;
+      if ((anyChapterPattern.test(line) && !chapterPattern.test(line)) || /^##\s/u.test(line)) {
+        break;
+      }
+      block.push(line);
+    }
+
+    return block;
+  }
+
+  private extractCurrentFocusChapterEndingHook(currentFocus: string, chapterNumber: number): string | undefined {
+    if (!currentFocus.trim() || !Number.isFinite(chapterNumber) || chapterNumber <= 0) {
+      return undefined;
+    }
+    const block = this.extractCurrentFocusChapterBlock(currentFocus, chapterNumber).join("\n");
+    const match = block.match(/(?:\*\*)?(?:章节结尾钩子|结尾钩子|Ending hook|Chapter ending hook)(?:\*\*)?\s*[：:]\s*(.+)$/imu);
+    const value = this.normalizeMeaningfulText(match?.[1] ?? "");
+    return value || undefined;
+  }
+
+  private extractHookSupportTerms(text: string): string[] {
+    const blocked = new Set([
+      "人物伏笔", "事件伏笔", "情感伏笔", "商业伏笔", "家庭伏笔", "对手伏笔", "关系伏笔", "冲突伏笔",
+      "伏笔", "首次", "出场", "前世", "主角", "认出", "但未", "主动", "接触", "日后", "线索", "中程", "近期", "慢烧",
+    ]);
+    const zhTerms = [...text.matchAll(/[\u4e00-\u9fff]{2,4}/gu)]
+      .map((match) => match[0])
+      .filter((term) => !blocked.has(term))
+      .filter((term) => !/^(?:这个|那个|自己|什么|如何|必须|即将|已经|正在|首次|日后)$/u.test(term));
+    const enTerms = [...text.matchAll(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b/g)]
+      .map((match) => match[0])
+      .filter((term) => !/^(Hook|Chapter|Event|Character)$/i.test(term));
+
+    return this.unique([...zhTerms, ...enTerms])
+      .sort((left, right) => right.length - left.length)
+      .slice(0, 8);
+  }
+
   private buildHookEmergenceDirective(input: {
     readonly hooks: ReadonlyArray<StoredHook>;
     readonly chapterNumber: number;
     readonly targetChapters?: number;
   }): HookEmergenceDirective {
     const pressureStates = input.hooks
-      .filter((hook) => !/^(resolved|closed|done|已回收|已解决)$/i.test(hook.status.trim()))
+      .filter((hook) => this.isActiveHookAtChapter(hook, input.chapterNumber))
       .map((hook) => {
         const lifecycle = describeHookLifecycle({
           payoffTiming: hook.payoffTiming,

@@ -30,6 +30,7 @@ export interface BuildChapterGoalInput {
   readonly foreshadowRegistryRaw: string;
   readonly hookAgenda: HookAgenda;
   readonly selectedHooks?: ReadonlyArray<StoredHook>;
+  readonly protagonistName?: string;
   readonly arcMap: ArcMapSummary;
   readonly genreProfile: GenreProfileSummary;
   readonly powerSystem: PowerSystemSummary;
@@ -73,7 +74,18 @@ export function buildChapterGoal(input: BuildChapterGoalInput): ChapterGoal {
 
   const mainConflict = pickFirstMeaningfulChapterGoalText([
     findStateFact(stateFacts, input.language, ["current conflict", "当前冲突"]),
-    extractLabeledSection(input.currentFocus, input.language, ["active focus", "focus", "当前聚焦", "当前焦点"]),
+    findStateFact(stateFacts, input.language, ["first conflict", "第一个冲突", "首个冲突"]),
+    extractLabeledSection(input.currentFocus, input.language, ["当前冲突来源", "conflict source", "conflict sources"]),
+    extractChapterFocusField(input.currentFocus, input.chapterNumber, input.language, [
+      "核心冲突",
+      "主角困境",
+      "困境",
+      "阻碍困境",
+      "冲突",
+      "core conflict",
+      "dilemma",
+      "obstacle",
+    ]),
     input.outlineNode,
     input.arcMap.goalHint,
     input.goal,
@@ -98,10 +110,11 @@ export function buildChapterGoal(input: BuildChapterGoalInput): ChapterGoal {
     language: input.language,
     chapterSummaries: input.chapterSummaries,
     currentState: input.currentState,
+    protagonistName: input.protagonistName,
     texts: [
       protagonistGoal,
       mainConflict,
-      input.currentFocus,
+      extractChapterFocusBlock(input.currentFocus, input.chapterNumber).join("\n"),
       input.currentState,
       input.outlineNode,
       ...foreshadowToTouch.map((hookId) => hooksById.get(hookId)?.notes),
@@ -119,8 +132,11 @@ export function buildChapterGoal(input: BuildChapterGoalInput): ChapterGoal {
     outlineNode: input.outlineNode,
     currentState: input.currentState,
     chapterSummaries: input.chapterSummaries,
+    currentFocus: input.currentFocus,
+    chapterNumber: input.chapterNumber,
     stateFacts,
     payoffHook,
+    genreProfile: input.genreProfile,
   });
 
   const endingHookType = inferEndingHookType({
@@ -128,6 +144,7 @@ export function buildChapterGoal(input: BuildChapterGoalInput): ChapterGoal {
     protagonistGoal,
     mainConflict,
     payoffToDeliver,
+    genreProfile: input.genreProfile,
   });
   const nextChapterPull = buildNextChapterPull({
     language: input.language,
@@ -136,6 +153,12 @@ export function buildChapterGoal(input: BuildChapterGoalInput): ChapterGoal {
     hooksById,
     payoffToDeliver,
     arcMapDirective: input.arcMap.arcDirective,
+    chapterEndingHook: extractChapterFocusField(input.currentFocus, input.chapterNumber, input.language, [
+      "章节结尾钩子",
+      "结尾钩子",
+      "Ending hook",
+      "Chapter ending hook",
+    ]),
   });
 
   return {
@@ -158,7 +181,7 @@ export function buildChapterGoal(input: BuildChapterGoalInput): ChapterGoal {
       input.outlineNode,
       input.currentState,
       input.chapterSummaries,
-    ]),
+    ], input.genreProfile),
     payoffDirective: buildPayoffDirective(
       sanitizeChapterGoalText(payoffToDeliver) ?? defaultConcretePayoff(input.language, [
         protagonistGoal,
@@ -167,7 +190,8 @@ export function buildChapterGoal(input: BuildChapterGoalInput): ChapterGoal {
         input.outlineNode,
         input.currentState,
         input.chapterSummaries,
-      ]),
+      ], input.genreProfile),
+      input.genreProfile,
     ),
     endingHookType,
     nextChapterPull: sanitizeChapterGoalText(nextChapterPull) ?? defaultSentence(
@@ -178,8 +202,8 @@ export function buildChapterGoal(input: BuildChapterGoalInput): ChapterGoal {
   };
 }
 
-function buildPayoffDirective(promisedPayoff: string, wordBudget?: number): PayoffDirective {
-  const payoffType = inferPayoffType(promisedPayoff);
+function buildPayoffDirective(promisedPayoff: string, genreProfile?: GenreProfileSummary, wordBudget?: number): PayoffDirective {
+  const payoffType = inferPayoffType(promisedPayoff, genreProfile);
   const payoffDepth = inferPayoffDepth(promisedPayoff, payoffType);
   const payoffScope = payoffDepth === "layered" ? "arc" : "chapter";
   const directive: PayoffDirective = {
@@ -194,7 +218,7 @@ function buildPayoffDirective(promisedPayoff: string, wordBudget?: number): Payo
   const budget = wordBudget ?? 1000;
   if (budget <= 1500) {
     const language = /[一-鿿]/.test(promisedPayoff) ? "zh" as const : "en" as const;
-    const compacted = compactPayoffForWordBudget(promisedPayoff, language, budget);
+    const compacted = compactPayoffForWordBudget(promisedPayoff, language, budget, genreProfile);
     if (compacted.payoff !== promisedPayoff) {
       directive.promisedPayoff = compacted.payoff;
       directive.payoffDepth = compacted.depth;
@@ -222,9 +246,10 @@ function compactPayoffForWordBudget(
   payoff: string,
   language: "zh" | "en",
   wordBudget?: number,
+  genreProfile?: GenreProfileSummary,
 ): { payoff: string; depth: PayoffDirective["payoffDepth"]; scope: PayoffDirective["payoffScope"] } {
   const budget = wordBudget ?? 1000;
-  const payoffType = inferPayoffType(payoff);
+  const payoffType = inferPayoffType(payoff, genreProfile);
 
   // Chapters with sufficient word budget can support layered/arc payoffs
   if (budget > 1500) {
@@ -282,14 +307,22 @@ function compactPayoffForWordBudget(
   return { payoff, depth, scope: depth === "layered" ? "arc" : "chapter" };
 }
 
-function inferPayoffType(payoff: string): PayoffType {
-  if (/真相|来历|来源|身份|揭开|揭示|发现|查明|线索|秘密|origin|source|truth|reveal|identity|clue/i.test(payoff)) {
+function inferPayoffType(payoff: string, genreProfile?: GenreProfileSummary): PayoffType {
+  const allowsPowerBreakthrough = genreProfile?.powerScaling !== false;
+  if (
+    /真相|来历|来源|身份|揭开|揭示|发现|查明|确认|坐实|线索|秘密|origin|source|truth|reveal|confirm|confirmed|identity|clue/i.test(payoff)
+    || /(?:找到|锁定|明确|识别|摸清|看清).{0,12}(?:机会|方向|路径|来源|入口|办法|方案|突破口|可行性|信息差|赚钱门路|商机)/u.test(payoff)
+    || /\b(?:find|identify|lock|discover|locate|pin down).{0,32}(?:opportunity|path|source|route|lead|opening|plan|way|approach|angle)\b/i.test(payoff)
+  ) {
     return "reveal";
   }
   if (/获得|拿到|夺得|资源|地图|腰牌|卷轴|残卷|药材|灵石|resource|obtain|gain|map|token|scroll/i.test(payoff)) {
     return "resource";
   }
-  if (/突破|晋阶|掌握|觉醒|学会|压住|稳住|新能力|breakthrough|master|awaken|stabilize|new ability/i.test(payoff)) {
+  if (!allowsPowerBreakthrough && /突破口|缺口|切入口|现实路径|合作入口|practical opening|path/i.test(payoff)) {
+    return "reveal";
+  }
+  if (allowsPowerBreakthrough && /突破|晋阶|掌握|觉醒|学会|压住|稳住|新能力|breakthrough|master|awaken|stabilize|new ability/i.test(payoff)) {
     return "breakthrough";
   }
   if (/信任|和解|关系|告白|结盟|relationship|trust|bond|reconcile|alliance/i.test(payoff)) {
@@ -308,12 +341,16 @@ function resolveChapterGoalHooks(
     return registryHooks;
   }
 
+  if (selectedHooks !== undefined) {
+    return selectedHooks.map(normalizeStoredHook);
+  }
+
   const pendingHooks = parsePendingHooksMarkdown(pendingHooksRaw);
   if (pendingHooks.length > 0) {
     return pendingHooks.map(normalizeStoredHook);
   }
 
-  return (selectedHooks ?? []).map(normalizeStoredHook);
+  return [];
 }
 
 function parseForeshadowRegistry(raw: string): ChapterGoalHook[] {
@@ -385,18 +422,23 @@ function extractLabeledSection(
   const lines = content.split("\n");
   const normalizedHeadings = headings.map((heading) => normalizeText(heading));
   let active = false;
+  let matchedLevel = 0;
   const buffer: string[] = [];
 
   for (const line of lines) {
     const trimmed = line.trim();
-    const headingMatch = trimmed.match(/^#+\s*(.+?)\s*$/);
+    const headingMatch = trimmed.match(/^(#+)\s*(.+?)\s*$/);
     if (headingMatch) {
-      const heading = normalizeText(headingMatch[1] ?? "");
+      const level = headingMatch[1].length;
+      const heading = normalizeText(headingMatch[2] ?? "");
       if (normalizedHeadings.includes(heading)) {
         active = true;
+        matchedLevel = level;
         continue;
       }
-      if (active) break;
+      if (active && level <= matchedLevel) {
+        break;
+      }
     }
 
     if (!active) continue;
@@ -412,6 +454,56 @@ function extractLabeledSection(
   }
 
   return extractFirstDirective(content);
+}
+
+function extractChapterFocusField(
+  currentFocus: string,
+  chapterNumber: number,
+  language: "zh" | "en",
+  labels: ReadonlyArray<string>,
+): string | undefined {
+  const blockLines = extractChapterFocusBlock(currentFocus, chapterNumber);
+  if (blockLines.length === 0) return undefined;
+
+  const normalizedLabels = labels.map((label) => normalizeText(label));
+  const fieldPattern = /^[-*]?\s*(?:\*\*)?([^：:]+?)(?:\*\*)?\s*[：:]\s*(.+)$/u;
+
+  for (const rawLine of blockLines) {
+    const line = rawLine.trim().replace(/^[-*]\s*/, "").trim();
+    const match = line.match(fieldPattern);
+    if (!match) continue;
+    const label = normalizeText(match[1] ?? "");
+    if (!normalizedLabels.includes(label)) continue;
+    const value = sanitizeChapterGoalText(match[2]);
+    if (value) return value;
+  }
+
+  void language;
+  return undefined;
+}
+
+function extractChapterFocusBlock(currentFocus: string, chapterNumber: number): string[] {
+  const chapterPattern = new RegExp(`第\\s*${chapterNumber}\\s*章`, "u");
+  const nextChapterPattern = /第\s*\d+\s*章/u;
+  const lines = currentFocus.split("\n");
+  let inBlock = false;
+  const blockLines: string[] = [];
+
+  for (const line of lines) {
+    if (!inBlock && chapterPattern.test(line)) {
+      inBlock = true;
+      blockLines.push(line);
+      continue;
+    }
+    if (!inBlock) continue;
+
+    if ((nextChapterPattern.test(line) && !chapterPattern.test(line)) || /^##\s/.test(line)) {
+      break;
+    }
+    blockLines.push(line);
+  }
+
+  return blockLines;
 }
 
 function extractFirstDirective(content?: string): string | undefined {
@@ -431,15 +523,21 @@ function selectActiveCharacters(input: {
   readonly language: "zh" | "en";
   readonly chapterSummaries: string;
   readonly currentState: string;
+  readonly protagonistName?: string;
   readonly texts: ReadonlyArray<string | undefined>;
 }): string[] {
+  const protagonistName = sanitizeCharacterCandidateForLanguage(input.protagonistName, input.language);
   const structuredCandidates = input.language === "zh"
     ? extractSummaryCharacterCandidates(input.chapterSummaries)
     : [
       ...extractEnglishSummaryCharacterCandidates(input.chapterSummaries),
       ...extractSummaryCharacterCandidates(input.chapterSummaries),
     ];
-  const structuredUnique = unique(structuredCandidates).slice(0, 4);
+  const structuredUnique = normalizeProtagonistCandidateNames(
+    unique(structuredCandidates),
+    protagonistName,
+    input.language,
+  ).slice(0, 4);
   if (structuredUnique.length > 0) {
     return structuredUnique;
   }
@@ -450,13 +548,47 @@ function selectActiveCharacters(input: {
       ...extractEnglishCharacterCandidates(input.texts),
       ...extractChineseCharacterCandidates(input.texts),
     ];
-  const uniqueCandidates = unique(candidates).slice(0, 4);
+  const uniqueCandidates = normalizeProtagonistCandidateNames(
+    unique(candidates),
+    protagonistName,
+    input.language,
+  ).slice(0, 4);
 
   if (uniqueCandidates.length > 0) {
     return uniqueCandidates;
   }
 
-  return [input.language === "zh" ? "主角" : "protagonist"];
+  return [protagonistName ?? (input.language === "zh" ? "主角" : "protagonist")];
+}
+
+function normalizeProtagonistCandidateNames(
+  candidates: ReadonlyArray<string>,
+  protagonistName: string | undefined,
+  language: "zh" | "en",
+): string[] {
+  if (!protagonistName) {
+    return [...candidates];
+  }
+  const genericRole = language === "zh" ? "主角" : "protagonist";
+  const normalized = unique(candidates.map((candidate) =>
+    candidate.trim().toLowerCase() === genericRole.toLowerCase()
+      ? protagonistName
+      : candidate,
+  ));
+  if (language === "zh" && normalized.length === 0 && protagonistName) {
+    return [protagonistName];
+  }
+  return normalized;
+}
+
+function sanitizeCharacterCandidateForLanguage(
+  candidate: string | undefined,
+  language: "zh" | "en",
+): string | undefined {
+  if (!candidate) return undefined;
+  return language === "zh"
+    ? sanitizeChineseCharacterCandidate(candidate)
+    : sanitizeEnglishCharacterCandidate(candidate) ?? sanitizeChineseCharacterCandidate(candidate);
 }
 
 function extractSummaryCharacterCandidates(chapterSummaries: string): string[] {
@@ -558,9 +690,26 @@ function derivePayoffToDeliver(input: {
   readonly outlineNode?: string;
   readonly currentState: string;
   readonly chapterSummaries: string;
+  readonly currentFocus: string;
+  readonly chapterNumber: number;
   readonly stateFacts: ReturnType<typeof parseCurrentStateFacts>;
   readonly payoffHook?: ChapterGoalHook;
+  readonly genreProfile?: GenreProfileSummary;
 }): string {
+  const chapterHookPayoff = extractChapterEndingPayoff(
+    input.currentFocus,
+    input.chapterNumber,
+    input.language,
+  );
+  if (chapterHookPayoff) {
+    return chapterHookPayoff;
+  }
+
+  const firstConflictPayoff = extractCrisisPayoffFromState(input.stateFacts, input.language);
+  if (firstConflictPayoff) {
+    return firstConflictPayoff;
+  }
+
   const hookPayoff = sanitizePayoffText(input.payoffHook?.expectedPayoff);
   if (hookPayoff) {
     return hookPayoff;
@@ -595,6 +744,15 @@ function derivePayoffToDeliver(input: {
     return outlineSignal;
   }
 
+  const focusPayoff = extractChapterFocusPayoff(
+    input.currentFocus,
+    input.chapterNumber,
+    input.genreProfile,
+  );
+  if (focusPayoff) {
+    return focusPayoff;
+  }
+
   return defaultConcretePayoff(input.language, [
     input.protagonistGoal,
     input.goal,
@@ -602,7 +760,70 @@ function derivePayoffToDeliver(input: {
     input.outlineNode,
     input.currentState,
     input.chapterSummaries,
+  ], input.genreProfile);
+}
+
+function extractChapterEndingPayoff(
+  currentFocus: string,
+  chapterNumber: number,
+  language: "zh" | "en",
+): string | undefined {
+  const ending = extractChapterFocusField(currentFocus, chapterNumber, language, [
+    "章节结尾钩子",
+    "结尾钩子",
+    "ending hook",
+    "chapter ending hook",
   ]);
+  if (!ending) return undefined;
+  return eventPayoffFromText(ending, language);
+}
+
+function extractCrisisPayoffFromState(
+  stateFacts: ReturnType<typeof parseCurrentStateFacts>,
+  language: "zh" | "en",
+): string | undefined {
+  const conflict = findStateFact(stateFacts, language, [
+    "first conflict",
+    "第一个冲突",
+    "首个冲突",
+    "current conflict",
+    "当前冲突",
+  ]);
+  if (!conflict) return undefined;
+  return eventPayoffFromText(conflict, language);
+}
+
+function eventPayoffFromText(text: string, language: "zh" | "en"): string | undefined {
+  const normalized = sanitizeChapterGoalText(text);
+  if (!normalized) return undefined;
+
+  if (language === "zh") {
+    if (/(父亲|爸爸).{0,24}(失业|危机|变故)|(?:失业|危机|变故).{0,24}(父亲|爸爸)/u.test(normalized)) {
+      return "家庭危机被当场坐实";
+    }
+    if (/(名单|通知).{0,12}(出现|摆|放|写着|看到)|(?:看到|发现).{0,16}(名单|通知)/u.test(normalized)) {
+      const target = normalized.match(/(?:名单|通知)/u)?.[0] ?? "关键信息";
+      return `${target}被当场确认`;
+    }
+    if (/(重生|回到|穿越|我回来了|199\d).{0,20}(确认|意识到|不是梦|时间点|年份)|(?:确认|意识到|发现|确定).{0,20}(重生|不是梦|回到|199\d)/u.test(normalized)) {
+      return "重生事实被当场确认";
+    }
+    if (/(商机|赚钱门路|机会|信息差).{0,20}(发现|找到|确认)|(?:发现|找到|确认).{0,20}(商机|赚钱门路|机会|信息差)/u.test(normalized)) {
+      return "第一个赚钱机会被确认";
+    }
+  }
+
+  if (/layoff|laid off|redundancy/i.test(normalized)) {
+    return "the family layoff crisis is confirmed";
+  }
+  if (/reborn|returned to|time travel|not a dream/i.test(normalized)) {
+    return "the rebirth is confirmed as real";
+  }
+  if (/opportunity|business lead|information gap/i.test(normalized)) {
+    return "the first actionable opportunity is confirmed";
+  }
+
+  return undefined;
 }
 
 function pickDirectPayoffSignal(text: string): string | undefined {
@@ -662,11 +883,93 @@ function pickRecentSummaryPayoffSignal(chapterSummaries: string): string | undef
   return undefined;
 }
 
+/**
+ * Extract a chapter-specific payoff from current_focus.md by finding
+ * the block for this chapter and matching genre-specific objects/actions.
+ *
+ * Falls back to a generic action+object construction only if the chapter
+ * block contains a matching concrete object; otherwise returns undefined
+ * so the caller can try other sources.
+ */
+function extractChapterFocusPayoff(
+  currentFocus: string,
+  chapterNumber: number,
+  genreProfile?: GenreProfileSummary,
+): string | undefined {
+  const objects = genreProfile?.concretePayoffObjects ?? [];
+  if (objects.length === 0) return undefined;
+
+  // Locate the chapter-specific block in current_focus.md.
+  // Blocks are introduced by patterns like "第1章必须完成：" or "- 第1章".
+  const chapterPattern = new RegExp(`第\\s*${chapterNumber}\\s*章`, "u");
+  const lines = currentFocus.split("\n");
+  let inBlock = false;
+  const blockLines: string[] = [];
+
+  for (const line of lines) {
+    if (chapterPattern.test(line)) {
+      inBlock = true;
+      blockLines.push(line);
+      continue;
+    }
+    if (inBlock) {
+      // Stop at the next chapter boundary or a new top-level section.
+      if (/第\s*\d+\s*章/.test(line) || /^##\s/.test(line)) {
+        break;
+      }
+      blockLines.push(line);
+    }
+  }
+
+  if (blockLines.length === 0) return undefined;
+  const blockText = blockLines.join(" ");
+
+  // Find which concrete objects appear in this chapter block.
+  // Prefer the longest match (most specific object).
+  const matchedObjects = objects
+    .filter((obj) => blockText.includes(obj))
+    .sort((a, b) => b.length - a.length);
+  if (matchedObjects.length === 0) return undefined;
+
+  const bestObject = matchedObjects[0]!;
+
+  // Pick the best action: prefer one that appears in the block text,
+  // otherwise infer from scene tone (protective vs acquisitive).
+  const actions = genreProfile?.defaultPayoffActions ?? [];
+  const matchedAction = actions.find((act) => blockText.includes(act));
+  if (matchedAction) {
+    return sanitizePayoffText(`${matchedAction}${bestObject}`) ?? undefined;
+  }
+
+  // No action found in text — infer the appropriate action from scene context.
+  const conflictKeywords = /冲突|困境|危险|否则|打水漂|重蹈覆辙|阻止|拦住|救|保|夺回/u;
+  const isProtectiveScene = conflictKeywords.test(blockText);
+  const protectiveActions = actions.filter((a) => /保住|拦下|夺回|避开|阻止|救/u.test(a));
+  const defaultAction = isProtectiveScene && protectiveActions.length > 0
+    ? protectiveActions[0]!
+    : actions[0];
+
+  if (!defaultAction) return undefined;
+
+  // Try to enrich the payoff with context from the sentence containing the object.
+  const sentences = blockText.split(/[。！？.!?]/u).filter((s) => s.trim());
+  const objectSentence = sentences.find((s) => s.includes(bestObject));
+  if (objectSentence) {
+    const quantityMatch = objectSentence.match(/(\d+\s*(?:元|块|万|千|百|张|个|份|台|成|折))/u);
+    if (quantityMatch) {
+      return sanitizePayoffText(`${defaultAction}${quantityMatch[0]}${bestObject}`) ?? undefined;
+    }
+  }
+
+  return sanitizePayoffText(`${defaultAction}${bestObject}`) ?? undefined;
+}
+
 function inferEndingHookType(input: {
   readonly goal: string;
   readonly protagonistGoal: string;
   readonly mainConflict: string;
   readonly payoffToDeliver: string;
+  readonly genreProfile?: GenreProfileSummary;
 }): EndingHookType {
   const combined = [
     input.goal,
@@ -675,7 +978,7 @@ function inferEndingHookType(input: {
     input.payoffToDeliver,
   ].filter(Boolean).join(" ");
 
-  if (/突破|晋阶|破境|觉醒|掌握|realm|breakthrough|ascend/i.test(combined)) {
+  if (input.genreProfile?.powerScaling !== false && /突破|晋阶|破境|觉醒|掌握|realm|breakthrough|ascend/i.test(combined)) {
     return "breakthrough";
   }
   if (/真相|身份|秘密|来历|揭开|发现|reveal|truth|secret|identity/i.test(combined)) {
@@ -697,12 +1000,14 @@ function buildNextChapterPull(input: {
   readonly hooksById: ReadonlyMap<string, ChapterGoalHook>;
   readonly payoffToDeliver: string;
   readonly arcMapDirective?: string;
+  readonly chapterEndingHook?: string;
 }): string {
   const primaryHook = input.foreshadowToTouch
     .map((hookId) => input.hooksById.get(hookId))
     .find((hook): hook is ChapterGoalHook => Boolean(hook));
   const hookSignal = sanitizePayoffText(primaryHook?.expectedPayoff)
     ?? sanitizePayoffText(primaryHook?.notes)
+    ?? sanitizePayoffText(input.chapterEndingHook)
     ?? sanitizePayoffText(input.arcMapDirective)
     ?? sanitizePayoffText(input.payoffToDeliver)
     ?? defaultSentence(
@@ -821,6 +1126,8 @@ function isPlaceholderChapterGoalText(value: string): boolean {
     /^(current focus|todo|none)$/iu.test(value)
     || /^（?描述接下来1-3章[\s\S]*）?$/u.test(value)
     || /^(describe the next 1-3 chapters?|fill this in|placeholder)$/iu.test(value)
+    || /^（(?:未设定|未填写|待定|待补充|暂无|无）)$/u.test(value)
+    || /^\((?:not set|unset|tbd|none|n\/a)\)$/iu.test(value)
   );
 }
 
@@ -842,10 +1149,10 @@ function isTemplateishPayoff(value: string): boolean {
 function isTimingMetadataText(value: string): boolean {
   return (
     /^(短期|中期|长期)(?:\(\d+(?:-\d+|\+)?章\))?$/u.test(value)
-    || /^(short-term|mid-arc|long-term|late-arc)$/i.test(value)
+    || /^(short-term|near-term|mid-arc|long-term|late-arc)$/i.test(value)
     || /^\d+(?:-\d+|\+)?章$/u.test(value)
     || /^(短期|中期|长期)\s*\(\d+(?:-\d+|\+)?章\)$/u.test(value)
-    || /^(short-term|mid-arc|long-term|late-arc)\s*\(\d+(?:-\d+|\+)?\s*chapters?\)$/i.test(value)
+    || /^(short-term|near-term|mid-arc|long-term|late-arc)\s*\(\d+(?:-\d+|\+)?\s*chapters?\)$/i.test(value)
   );
 }
 
@@ -874,25 +1181,32 @@ function compactSpecificPayoff(text: string): string {
 function defaultConcretePayoff(
   language: "zh" | "en",
   sources: ReadonlyArray<string | undefined>,
+  genreProfile?: GenreProfileSummary,
 ): string {
   const combined = sources.filter(Boolean).join(" ");
+  const objects = genreProfile?.concretePayoffObjects ?? [];
+  const actions = genreProfile?.defaultPayoffActions ?? (language === "zh" ? ["拿到", "保住", "夺回"] : ["secure", "protect", "reclaim"]);
+
+  const matchedObject = objects.find((obj) => combined.includes(obj));
+  const matchedAction = actions.find((act) => combined.includes(act)) ?? actions[0];
+
+  if (matchedObject) {
+    return language === "zh" ? `${matchedAction}${matchedObject}` : `${matchedAction} the ${matchedObject}`;
+  }
 
   if (/逃|追捕|追兵|封锁|围堵/u.test(combined)) {
     return language === "zh" ? "暂时脱离当前压制" : "Temporarily break free from the current pressure.";
   }
-  if (/腰牌|令牌|残卷|地图|名册|药瓶|毒囊|资源/u.test(combined)) {
-    return language === "zh" ? "拿到一个可持续使用的资源" : "Secure one durable resource.";
+  if (/(失业|家庭|父亲|母亲|家里|危机|压力|变故)/u.test(combined)) {
+    return language === "zh" ? "确认一个迫在眉睫的现实危机" : "Confirm an urgent real-world crisis.";
   }
-  if (/线索|刻痕|徽记|真相|来历/u.test(combined)) {
-    return language === "zh" ? "获得一条明确逃生线索" : "Gain one concrete clue that changes the next move.";
-  }
-  if (/反噬|伤势|经脉|气血/u.test(combined)) {
-    return language === "zh" ? "压住当前代价并稳住局面" : "Stabilize the cost and regain control.";
+  if (/(商机|赚钱|生意|信息差|批发|价格|渠道|本钱|资金)/u.test(combined)) {
+    return language === "zh" ? "发现一个可执行的赚钱机会" : "Identify an actionable earning opportunity.";
   }
 
   return language === "zh"
-    ? "拿到一条可立即使用的线索"
-    : "Secure one immediately usable clue.";
+    ? "确认一个可执行的现实推进点"
+    : "Confirm one actionable practical step.";
 }
 
 function isStructuredControlText(value: string): boolean {
@@ -915,11 +1229,81 @@ function sanitizeChineseCharacterCandidate(candidate: string | undefined): strin
     "读者",
     "章节",
     "主角",
+    "自己",
+    "我们",
+    "你们",
+    "他们",
+    "她们",
+    "它们",
+    "我不",
+    "我会",
+    "我要",
+    "我想",
+    "他不",
+    "他会",
+    "她不",
+    "她会",
     "安全地点",
     "安全区域",
     "一道身影",
+    "信任",
+    "怀疑",
+    "担忧",
+    "危机",
+    "代价",
+    "秘密",
+    "态度",
+    "关系",
+    "威胁",
+    "困境",
+    "希望",
+    "结果",
+    "瓶颈",
+    "计划",
+    "处境",
+    "情况",
+    "局势",
+    "局面",
+    "细节",
+    "限制",
+    "规则",
+    "障碍",
+    "选择",
+    "行动",
+    "冲突",
+    "目标",
+    "底牌",
+    "原因",
+    "方法",
+    "途径",
+    "过程",
+    "背景",
+    "时间",
+    "空间",
+    "距离",
+    "记忆",
+    "情感",
+    "手段",
+    "事件",
+    "约束",
+    "条件",
+    "分歧",
+    "进展",
+    "成果",
+    "悬念",
+    "动机",
+    "压力",
+    "情绪",
+    "反馈",
+    "回报",
+    "收益",
+    "契机",
+    "痕迹",
+    "金手指",
   ]);
   if (exactStopwords.has(normalized)) return undefined;
+  if (/^[我你他她它咱俺][不也会想要能再已正将]/u.test(normalized)) return undefined;
+  if (/^(?:我们|你们|他们|她们|它们|自己)/u.test(normalized)) return undefined;
 
   const blockedSubstrings = [
     "地点",

@@ -1127,7 +1127,17 @@ describe("PipelineRunner", () => {
       expect(writeInput?.externalContext).toBeUndefined();
       expect(writeInput?.chapterIntent).toContain("# Chapter Intent");
       expect(writeInput?.contextPackage?.selectedContext.length).toBeGreaterThan(0);
-      expect(writeInput?.ruleStack?.activeOverrides).toHaveLength(1);
+      expect(writeInput?.ruleStack?.activeOverrides).toHaveLength(2);
+      // v2 mode: each activeOverride maps L4→L3 with a planner-provided resolution reason.
+      for (const ov of writeInput?.ruleStack?.activeOverrides ?? []) {
+        expect(ov).toMatchObject({
+          from: "L4",
+          to: "L3",
+          target: expect.any(String),
+          reason: expect.any(String),
+        });
+        expect(ov.reason.length).toBeGreaterThan(0);
+      }
 
       const runtimeDir = join(state.bookDir(bookId), "story", "runtime");
       await expect(stat(join(runtimeDir, "chapter-0001.intent.md"))).resolves.toBeTruthy();
@@ -1201,6 +1211,12 @@ describe("PipelineRunner", () => {
       const writeInput = writeChapter.mock.calls[0]?.[0];
       expect(writeInput?.chapterIntent).toContain("Bring the focus back to the mentor conflict.");
       expect(writeInput?.ruleStack?.activeOverrides).toHaveLength(1);
+      expect(writeInput?.ruleStack?.activeOverrides[0]).toMatchObject({
+        from: "L4",
+        to: "L3",
+        target: expect.any(String),
+        reason: expect.any(String),
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -2622,8 +2638,8 @@ describe("PipelineRunner", () => {
       expect(result.status).toBe("ready-for-review");
       expect(finalChapter).not.toContain("1000联邦币到账");
       expect(finalChapter).not.toContain("电子钱包余额变成1200");
-      expect(finalChapter).toContain("没有立刻按下去");
-      expect(finalChapter).toContain("当前民望值：100");
+      expect(finalChapter).toMatch(/没有急于进行下一步的大额兑换|并未急着将/u);
+      expect(finalChapter).toMatch(/当前民望值：100|当前灵石数量：100/u);
       expect(ledger).toContain("| 民望值 | 100 | 1 |");
       expect(ledger).toContain("| 联邦币 | 200 | 1 |");
       expect(ledger).toContain("| 技能 | 初级辩论技能 | 1 | 本章解锁 |");

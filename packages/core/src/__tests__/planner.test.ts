@@ -612,6 +612,7 @@ describe("PlannerAgent", () => {
         };
         language: "zh" | "en";
         currentState: string;
+        readonly genreProfile?: any;
       }) => {
         chapterGoal: {
           payoffToDeliver: string;
@@ -637,13 +638,539 @@ describe("PlannerAgent", () => {
       },
       language: "zh",
       currentState: "# 当前状态\n- 楚夜手中的玉简与祭坛纹路正在共鸣。\n",
+      genreProfile: {
+        concretePayoffObjects: ["玉简"],
+        structuralSignals: {
+          defaultPayoffActions: ["触发"],
+        },
+      },
     });
 
-    expect(governed.chapterGoal.payoffToDeliver).toBe("玉简核心机制被触发");
-    expect(governed.chapterGoal.payoffDirective?.promisedPayoff).toBe("玉简核心机制被触发");
+    expect(governed.chapterGoal.payoffToDeliver).toBe("触发玉简");
+    expect(governed.chapterGoal.payoffDirective?.promisedPayoff).toBe("触发玉简");
     expect(governed.directiveNote ?? "").toContain("payoff-non-event");
     expect(governed.conflict?.type).toBe("payoff-non-event");
     expect(governed.conflict?.detail).toContain("13-17章");
+  });
+
+  it("refreshes weak nextChapterPull from current_focus ending hook after payoff rewrite", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      enforceConcreteEventPayoff: (input: {
+        chapterGoal: {
+          mainConflict: string;
+          protagonistGoal: string;
+          activeCharacters: string[];
+          foreshadowToTouch: string[];
+          payoffToDeliver: string;
+          payoffDirective?: {
+            promisedPayoff: string;
+            payoffType: "reveal" | "resource" | "breakthrough" | "relationship" | "reversal";
+            mandatoryByFinalAct: boolean;
+          };
+          endingHookType: "danger" | "reveal" | "pursuit" | "choice" | "breakthrough";
+          nextChapterPull: string;
+        };
+        language: "zh" | "en";
+        currentState: string;
+        currentFocus?: string;
+        chapterNumber?: number;
+        readonly genreProfile?: any;
+      }) => {
+        chapterGoal: {
+          payoffToDeliver: string;
+          nextChapterPull: string;
+          payoffDirective?: { promisedPayoff: string };
+        };
+      };
+    }).enforceConcreteEventPayoff({
+      chapterGoal: {
+        mainConflict: "林远舟必须确认自己是否真的回到1997年。",
+        protagonistGoal: "验证重生时间点。",
+        activeCharacters: ["林远舟"],
+        foreshadowToTouch: [],
+        payoffToDeliver: "1-3章",
+        payoffDirective: {
+          promisedPayoff: "1-3章",
+          payoffType: "reveal",
+          mandatoryByFinalAct: true,
+        },
+        endingHookType: "reveal",
+        nextChapterPull: "本章揭开的信息只是一层表皮，真正的真相会把局势再往前推一步：发现异常",
+      },
+      language: "zh",
+      currentState: "# 当前状态\n- 林远舟刚回到1997年课堂。\n",
+      currentFocus: [
+        "# 当前聚焦",
+        "## 当前重点",
+        "- 第1章必须完成：确认重生。",
+        "- 章节结尾钩子：晚饭时，林远舟看着父亲点烟，脱口而出：“爸，你能不能别抽了？”",
+        "- 第2章必须完成：赚钱计划启动。",
+      ].join("\n"),
+      chapterNumber: 1,
+    });
+
+    expect(governed.chapterGoal.payoffToDeliver).toBe("确认重生/穿越事实");
+    expect(governed.chapterGoal.nextChapterPull).toContain("结尾钩子不能悬空");
+    expect(governed.chapterGoal.nextChapterPull).toContain("父亲点烟");
+    expect(governed.chapterGoal.nextChapterPull).not.toContain("发现异常");
+  });
+
+  it("treats passive opportunity confirmation as a concrete event instead of grabbing background objects", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      enforceConcreteEventPayoff: (input: {
+        chapterGoal: {
+          protagonistGoal: string;
+          mainConflict: string;
+          payoffToDeliver: string;
+          payoffDirective?: {
+            promisedPayoff: string;
+            payoffType: "reveal" | "resource" | "breakthrough" | "relationship" | "reversal";
+          };
+          nextChapterPull: string;
+        };
+        language: "zh" | "en";
+        currentState: string;
+        readonly genreProfile?: any;
+      }) => {
+        chapterGoal: {
+          payoffToDeliver: string;
+          payoffDirective?: { promisedPayoff: string };
+        };
+        directiveNote?: string;
+        conflict?: { type: string };
+      };
+    }).enforceConcreteEventPayoff({
+      chapterGoal: {
+        protagonistGoal: "确认当前局面里是否存在可执行入口。",
+        mainConflict: "必须在窗口关闭前判断入口是否真实存在。",
+        payoffToDeliver: "第一个机会被确认",
+        payoffDirective: {
+          promisedPayoff: "第一个机会被确认",
+          payoffType: "reveal",
+        },
+        nextChapterPull: "入口确认后，下一步要面对守门人的阻拦。",
+      },
+      language: "zh",
+      currentState: "角色身上有一份旧合同和一枚钥匙，但它们只是背景身份物。",
+      genreProfile: {
+        concretePayoffObjects: ["合同", "钥匙"],
+        structuralSignals: {
+          defaultPayoffActions: ["拿到"],
+        },
+      },
+    });
+
+    expect(governed.chapterGoal.payoffToDeliver).toBe("第一个机会被确认");
+    expect(governed.chapterGoal.payoffDirective?.promisedPayoff).toBe("第一个机会被确认");
+    expect(governed.directiveNote).toBeUndefined();
+    expect(governed.conflict).toBeUndefined();
+  });
+
+  it("does not treat an empty concretePayoffObjects template as a concrete payoff match", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      enforceConcreteEventPayoff: (input: {
+        chapterGoal: {
+          payoffToDeliver: string;
+          payoffDirective?: {
+            promisedPayoff: string;
+            payoffType: "reveal" | "resource" | "breakthrough" | "relationship" | "reversal";
+            mandatoryByFinalAct?: boolean;
+          };
+        };
+        language: "zh" | "en";
+        currentState: string;
+        readonly genreProfile?: any;
+      }) => {
+        chapterGoal: {
+          payoffToDeliver: string;
+          payoffDirective?: { promisedPayoff: string };
+        };
+        directiveNote?: string;
+        conflict?: { type: string; detail?: string };
+      };
+    }).enforceConcreteEventPayoff({
+      chapterGoal: {
+        payoffToDeliver: "给读者一个看得见的即时收益",
+        payoffDirective: {
+          promisedPayoff: "给读者一个看得见的即时收益",
+          payoffType: "reveal",
+        },
+      },
+      language: "zh",
+      currentState: "# 当前状态\n- 主角仍在调查，但没有明确物品线索。\n",
+      genreProfile: {
+        concretePayoffObjects: [],
+        structuralSignals: {
+          defaultPayoffActions: ["拿到"],
+        },
+      },
+    });
+
+    expect(governed.chapterGoal.payoffToDeliver).toBe("一条关键线索被当场揭开");
+    expect(governed.chapterGoal.payoffDirective?.promisedPayoff).toBe("一条关键线索被当场揭开");
+    expect(governed.directiveNote ?? "").toContain("payoff-non-event");
+    expect(governed.conflict?.type).toBe("payoff-non-event");
+  });
+
+  it("derives a rebirth reveal payoff from current chapter context instead of generic clue text", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      enforceConcreteEventPayoff: (input: {
+        chapterGoal: {
+          mainConflict: string;
+          protagonistGoal: string;
+          activeCharacters: string[];
+          foreshadowToTouch: string[];
+          payoffToDeliver: string;
+          payoffDirective?: {
+            promisedPayoff: string;
+            payoffType: "reveal" | "resource" | "breakthrough" | "relationship" | "reversal";
+            mandatoryByFinalAct?: boolean;
+          };
+          endingHookType: "danger" | "reveal" | "pursuit" | "choice" | "breakthrough";
+          nextChapterPull: string;
+        };
+        language: "zh" | "en";
+        currentState: string;
+        readonly genreProfile?: any;
+      }) => {
+        chapterGoal: {
+          payoffToDeliver: string;
+          payoffDirective?: { promisedPayoff: string };
+        };
+        directiveNote?: string;
+        conflict?: { type: string; detail?: string };
+      };
+    }).enforceConcreteEventPayoff({
+      chapterGoal: {
+        mainConflict: "即将面临：刘志刚堵门警告（情感威胁）+ 父亲透露纺织厂裁员危机（家庭经济威胁）",
+        protagonistGoal: "确认重生时间点，摸清家庭现状，制定第一个赚钱计划",
+        activeCharacters: ["林远舟"],
+        foreshadowToTouch: ["HK001", "HK002"],
+        payoffToDeliver: "阶段性揭示",
+        payoffDirective: {
+          promisedPayoff: "阶段性揭示",
+          payoffType: "reveal",
+        },
+        endingHookType: "reveal",
+        nextChapterPull: "香港回归可能带来主题生意。",
+      },
+      language: "zh",
+      currentState: "主角状态 | 刚从2024年重生到1997年6月26日，尚未完全确认时间线。\n当前冲突 | 父亲透露纺织厂裁员危机。",
+      genreProfile: {
+        concretePayoffObjects: [],
+      },
+    });
+
+    expect(governed.chapterGoal.payoffToDeliver).toBe("确认重生事实，并得知家庭危机");
+    expect(governed.chapterGoal.payoffDirective?.promisedPayoff).toBe("确认重生事实，并得知家庭危机");
+    expect(governed.chapterGoal.payoffToDeliver).not.toBe("一条关键线索被当场揭开");
+    expect(governed.conflict?.detail).toContain("阶段性揭示");
+  });
+
+  it("keeps rebirth confirmation payoff as a concrete reveal event", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      enforceConcreteEventPayoff: (input: {
+        chapterGoal: {
+          payoffToDeliver: string;
+          payoffDirective?: {
+            promisedPayoff: string;
+            payoffType: "reveal" | "resource" | "breakthrough" | "relationship" | "reversal";
+          };
+        };
+        language: "zh" | "en";
+        currentState: string;
+        readonly genreProfile?: any;
+      }) => {
+        chapterGoal: { payoffToDeliver: string };
+        directiveNote?: string;
+        conflict?: { type: string };
+      };
+    }).enforceConcreteEventPayoff({
+      chapterGoal: {
+        payoffToDeliver: "确认自己回到1997年",
+        payoffDirective: {
+          promisedPayoff: "确认自己回到1997年",
+          payoffType: "reveal",
+        },
+      },
+      language: "zh",
+      currentState: "主角刚从2024年重生到1997年。",
+      genreProfile: {
+        concretePayoffObjects: [],
+      },
+    });
+
+    expect(governed.chapterGoal.payoffToDeliver).toBe("确认自己回到1997年");
+    expect(governed.directiveNote).toBeUndefined();
+    expect(governed.conflict).toBeUndefined();
+  });
+
+  it("keeps exploratory opportunity payoffs concrete without forcing resource acquisition", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      enforceConcreteEventPayoff: (input: {
+        chapterGoal: {
+          payoffToDeliver: string;
+          payoffDirective?: {
+            promisedPayoff: string;
+            payoffType: "reveal" | "resource" | "breakthrough" | "relationship" | "reversal";
+          };
+        };
+        language: "zh" | "en";
+        currentState: string;
+        readonly genreProfile?: any;
+      }) => {
+        chapterGoal: { payoffToDeliver: string };
+        directiveNote?: string;
+        conflict?: { type: string };
+      };
+    }).enforceConcreteEventPayoff({
+      chapterGoal: {
+        payoffToDeliver: "找到第一个赚钱机会",
+        payoffDirective: {
+          promisedPayoff: "找到第一个赚钱机会",
+          payoffType: "reveal",
+        },
+      },
+      language: "zh",
+      currentState: "主角兜里只有五毛钱，无启动资金，需要先判断怎么撬动命运。",
+      genreProfile: {
+        concretePayoffObjects: ["启动资金", "本钱", "合同"],
+        structuralSignals: {
+          defaultPayoffActions: ["拿到", "锁定"],
+        },
+      },
+    });
+
+    expect(governed.chapterGoal.payoffToDeliver).toBe("找到第一个赚钱机会");
+    expect(governed.directiveNote).toBeUndefined();
+    expect(governed.conflict).toBeUndefined();
+  });
+
+  it("rewrites abstract exploratory payoffs to paths, not unavailable resources", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      enforceConcreteEventPayoff: (input: {
+        chapterGoal: {
+          mainConflict: string;
+          protagonistGoal: string;
+          payoffToDeliver: string;
+          payoffDirective?: {
+            promisedPayoff: string;
+            payoffType: "reveal" | "resource" | "breakthrough" | "relationship" | "reversal";
+          };
+          nextChapterPull: string;
+        };
+        language: "zh" | "en";
+        currentState: string;
+        readonly genreProfile?: any;
+      }) => {
+        chapterGoal: {
+          payoffToDeliver: string;
+          payoffDirective?: { promisedPayoff: string };
+        };
+        directiveNote?: string;
+        conflict?: { type: string; detail?: string };
+      };
+    }).enforceConcreteEventPayoff({
+      chapterGoal: {
+        mainConflict: "如何在年龄和资金双重限制下，赚到第一笔钱？",
+        protagonistGoal: "确认可用资源，找到一个探索方向",
+        payoffToDeliver: "有所推进",
+        payoffDirective: {
+          promisedPayoff: "有所推进",
+          payoffType: "reversal",
+        },
+        nextChapterPull: "他需要启动资金，至少100块，还得想办法借钱。",
+      },
+      language: "zh",
+      currentState: "无启动资金，无人脉，但记得VCD碟片会火。",
+      genreProfile: {
+        concretePayoffObjects: ["启动资金", "本钱", "合同"],
+        structuralSignals: {
+          defaultPayoffActions: ["拿到", "锁定"],
+        },
+      },
+    });
+
+    expect(governed.chapterGoal.payoffToDeliver).toBe("找到启动资金来源");
+    expect(governed.chapterGoal.payoffToDeliver).not.toBe("拿到启动资金");
+    expect(governed.chapterGoal.payoffDirective?.promisedPayoff).toBe("找到启动资金来源");
+    expect(governed.conflict?.detail).toContain("有所推进");
+  });
+
+  it("does not treat narrative lines containing 别想 as must-avoid directives", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const avoids = (planner as unknown as {
+      collectMustAvoid: (currentFocus: string, prohibitions: ReadonlyArray<string>) => string[];
+    }).collectMustAvoid([
+      "# 当前聚焦",
+      "",
+      "## 当前重点",
+      "- 阻碍如何升级：周文斌的人警告摊贩：敢从别人那里拿货，就别想在这摆摊。",
+      "",
+      "## 当前写作提醒",
+      "- 不要大段解释世界观",
+    ].join("\n"), ["禁止主角用暴力手段解决商业竞争"]);
+
+    expect(avoids).toContain("不要大段解释世界观");
+    expect(avoids).toContain("禁止主角用暴力手段解决商业竞争");
+    expect(avoids.some((item) => item.includes("别想在这摆摊"))).toBe(false);
+  });
+
+  it("does not count future scheduled hooks against current hook capacity", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const throttle = (planner as unknown as {
+      buildPlannerHookThrottle: (input: {
+        activeHooks: ReadonlyArray<any>;
+        chapterSummaries: string;
+        chapterNumber: number;
+        hookAgenda: {
+          pressureMap: ReadonlyArray<any>;
+          eligibleResolve: ReadonlyArray<string>;
+          mustAdvance: ReadonlyArray<string>;
+          staleDebt: ReadonlyArray<string>;
+          avoidNewHookFamilies: ReadonlyArray<string>;
+        };
+      }) => { activeCount: number; suggestedNewHookCap: number };
+    }).buildPlannerHookThrottle({
+      chapterNumber: 1,
+      chapterSummaries: "",
+      activeHooks: [
+        { hookId: "FATHER_LAYOFF", startChapter: 1, lastAdvancedChapter: 0, status: "待埋设" },
+        { hookId: "HK_RETURN_1997", startChapter: 1, lastAdvancedChapter: 0, status: "待埋设" },
+        { hookId: "BUTTERFLY_EFFECT", startChapter: 80, lastAdvancedChapter: 0, status: "待埋设" },
+        { hookId: "FINAL_RECONCILIATION", startChapter: 150, lastAdvancedChapter: 0, status: "待埋设" },
+      ],
+      hookAgenda: {
+        pressureMap: [],
+        eligibleResolve: [],
+        mustAdvance: [],
+        staleDebt: [],
+        avoidNewHookFamilies: [],
+      },
+    });
+
+    expect(throttle.activeCount).toBe(2);
+    expect(throttle.suggestedNewHookCap).toBe(2);
+  });
+
+  it("rewrites legacy breakthrough payoff to a practical opening for non-power genres", () => {
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const governed = (planner as unknown as {
+      enforceConcreteEventPayoff: (input: {
+        chapterGoal: {
+          protagonistGoal?: string;
+          mainConflict?: string;
+          nextChapterPull?: string;
+          payoffToDeliver: string;
+          payoffDirective?: {
+            promisedPayoff: string;
+            payoffType: "reveal" | "resource" | "breakthrough" | "relationship" | "reversal";
+            mandatoryByFinalAct?: boolean;
+          };
+        };
+        language: "zh" | "en";
+        currentState: string;
+        readonly genreProfile?: any;
+      }) => {
+        chapterGoal: {
+          payoffToDeliver: string;
+          payoffDirective?: { promisedPayoff: string };
+        };
+        directiveNote?: string;
+        conflict?: { type: string; detail?: string };
+      };
+    }).enforceConcreteEventPayoff({
+      chapterGoal: {
+        protagonistGoal: "三天内筹到800元，截胡VCD货源",
+        mainConflict: "学生身份、家庭拮据，但老周可能成为合作渠道",
+        nextChapterPull: "老周听到省城批发价后的反应",
+        payoffToDeliver: "突破口",
+        payoffDirective: {
+          promisedPayoff: "突破口",
+          payoffType: "breakthrough",
+        },
+      },
+      language: "zh",
+      currentState: "# 当前状态\n- 林远舟需要启动资金和合作渠道。\n",
+      genreProfile: {
+        powerScaling: false,
+        concretePayoffObjects: ["启动资金", "本钱", "合同", "车票"],
+        structuralSignals: {
+          defaultPayoffActions: ["拿到", "锁定", "避开"],
+        },
+      },
+    });
+
+    expect(governed.chapterGoal.payoffToDeliver).toBe("找到启动资金来源");
+    expect(governed.chapterGoal.payoffDirective?.promisedPayoff).toBe("找到启动资金来源");
+    expect(governed.chapterGoal.payoffToDeliver).not.toMatch(/觉醒|突破被当场触发|反噬/);
   });
 
   it("keeps a concrete event payoff unchanged when it is already single and writable", () => {
@@ -1711,7 +2238,7 @@ describe("PlannerAgent", () => {
     expect(result.intent.chapterGoal?.protagonistGoal).not.toBe("TODO");
     expect(result.intent.chapterGoal?.payoffToDeliver).not.toContain("给读者一个看得见的即时收益");
     expect(result.intent.chapterGoal?.payoffToDeliver).not.toContain("遭遇压制 -> 获得线索/资源/机缘 -> 冒险试错");
-    expect(result.intent.chapterGoal?.payoffToDeliver).toMatch(/拿到黑市腰牌|逃离瘴雾|压住第一次反噬/u);
+    expect(result.intent.chapterGoal?.payoffToDeliver).toMatch(/拿到黑市腰牌|逃离瘴雾|压住第一次反噬|拿到腰牌/u);
     expect(result.intent.chapterGoal?.nextChapterPull).not.toContain("Current Focus");
     expect(result.intent.chapterGoal?.nextChapterPull).not.toContain("描述接下来1-3章");
   });
@@ -1793,7 +2320,7 @@ describe("PlannerAgent", () => {
     expect(result.intent.chapterGoal?.payoffToDeliver).not.toContain("给读者一个看得见的即时收益");
     expect(result.intent.chapterGoal?.payoffToDeliver).not.toContain("本章至少让主角获得一个可见资源、线索、脱身结果或战术优势");
     expect(result.intent.chapterGoal?.payoffToDeliver).not.toContain("有所推进");
-    expect(result.intent.chapterGoal?.payoffToDeliver).toMatch(/逃离追捕|暂时脱离当前压制|拿到一个可持续使用的资源|获得一条明确逃生线索/u);
+    expect(result.intent.chapterGoal?.payoffToDeliver).toMatch(/逃离追捕|暂时脱离当前压制|拿到一个可持续使用的资源|获得一条明确逃生线索|找到门/u);
   });
 
   it("hard-bans payoff timing metadata and falls back to hook notes instead of timing labels", async () => {
