@@ -46,4 +46,32 @@ describe("clean narrative artifacts", () => {
       expect.objectContaining({ type: "author-note", severity: "critical" }),
     ]));
   });
+
+  it("preserves neutral ordinary prose sentences and CJK substrings", () => {
+    const sentences = [
+      "我就是听了师父的话，才绕到山路上。",
+      "今早城门开得晚，你跟我去一趟。",
+      "在1997-2005年间，他积累了大量的财富和资源。",
+      "我们需要调整一下战术，以稳定当前的局势并保护我们的队伍人员名单。",
+      "他被临时指派为队长，带队深入险境。",
+    ];
+
+    for (const text of sentences) {
+      const result = cleanNonNarrativeArtifacts(text);
+      expect(result.changed).toBe(false);
+      expect(result.cleanedText).toBe(text);
+    }
+  });
+
+  it("deletes explicit author notes and TODOs", () => {
+    const textToDelete1 = "作者注：这里补一个冲突。";
+    const result1 = cleanNonNarrativeArtifacts(textToDelete1);
+    expect(result1.changed).toBe(true);
+    expect(result1.cleanedText).not.toContain("作者注");
+
+    const textToDelete2 = "TODO：补充一段人物心理。";
+    const result2 = cleanNonNarrativeArtifacts(textToDelete2);
+    expect(result2.changed).toBe(true);
+    expect(result2.cleanedText).not.toContain("TODO");
+  });
 });

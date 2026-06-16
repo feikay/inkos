@@ -2,16 +2,109 @@
 name: Dungeon Core
 id: dungeon-core
 language: en
-chapterTypes: ["Strategy", "Adventurer POV", "Setup", "Transition", "Payoff"]
-fatigueWords: ["delve", "tapestry", "testament", "intricate", "pivotal", "vibrant", "comprehensive", "nuanced", "embark", "foster", "underscore", "bolstered", "crucial"]
+chapterTypes:
+  - Strategy
+  - Adventurer POV
+  - Setup
+  - Transition
+  - Payoff
+fatigueWords:
+  - delve
+  - tapestry
+  - testament
+  - intricate
+  - pivotal
+  - vibrant
+  - comprehensive
+  - nuanced
+  - embark
+  - foster
+  - underscore
+  - bolstered
+  - crucial
 numericalSystem: true
 powerScaling: false
 eraResearch: false
-pacingRule: "Alternate dungeon POV (planning/building) with adventurer POV (exploration/combat) every 1-2 chapters. Expansion milestone every 5-8 chapters."
-satisfactionTypes: ["Trap Success", "Floor Expansion", "Minion Evolution", "Adventurer Defeated", "Resource Milestone", "Core Upgrade"]
-auditDimensions: [1,2,3,4,5,6,7,8,9,10,11,13,14,15,16,17,18,19,24,25,26]
+pacingRule: >-
+  Alternate dungeon POV (planning/building) with adventurer POV
+  (exploration/combat) every 1-2 chapters. Expansion milestone every 5-8
+  chapters.
+satisfactionTypes:
+  - Trap Success
+  - Floor Expansion
+  - Minion Evolution
+  - Adventurer Defeated
+  - Resource Milestone
+  - Core Upgrade
+auditDimensions:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 24
+  - 25
+  - 26
+concretePayoffObjects:
+  - 存折
+  - 集资款
+  - 店铺钥匙
+  - 合同
+  - 营业执照
+  - 账本
+  - 批条
+  - 启动资金
+  - 本钱
+  - 车票
+  - 线索
+  - 证据
+  - 文件
+  - 装备
+  - 道具
+styleGovernance:
+  allowedStyleExamples:
+    - 元
+    - 分
+    - 个
+    - 月
+    - 年
+    - 折
+  forbiddenProseKeywords:
+    - 气血
+    - 境界
+    - 面板
+    - 金手指
+    - 升级
+structuralSignals:
+  defaultPayoffActions:
+    - 拿到
+    - 保住
+    - 夺回
+    - 签署
+    - 避开
+    - 买下
+    - 拦下
+    - 激活
+  lowStatusKeywords:
+    - 下岗
+    - 贫困
+    - 负债
+    - 被裁员
+    - 新手
 ---
-
 ## Genre Prohibitions
 
 - Dungeon leaving its location — immobility is the core constraint, not a bug

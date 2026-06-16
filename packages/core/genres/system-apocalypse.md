@@ -2,16 +2,108 @@
 name: System Apocalypse
 id: system-apocalypse
 language: en
-chapterTypes: ["Survival", "Combat", "Setup", "Transition", "Payoff"]
-fatigueWords: ["delve", "tapestry", "testament", "intricate", "pivotal", "vibrant", "comprehensive", "nuanced", "embark", "foster", "underscore", "bolstered", "crucial"]
+chapterTypes:
+  - Survival
+  - Combat
+  - Setup
+  - Transition
+  - Payoff
+fatigueWords:
+  - delve
+  - tapestry
+  - testament
+  - intricate
+  - pivotal
+  - vibrant
+  - comprehensive
+  - nuanced
+  - embark
+  - foster
+  - underscore
+  - bolstered
+  - crucial
 numericalSystem: true
 powerScaling: true
 eraResearch: false
-pacingRule: "Early (ch 1-15): survival pressure every chapter. Mid (ch 15-50): power-up + faction politics every 3-5 chapters. Late: expansion and existential threats."
-satisfactionTypes: ["Survival Against Odds", "Level Up", "Territory Claimed", "Faction Victory", "System Secret Revealed", "Societal Rebuild Milestone"]
-auditDimensions: [1,2,3,4,5,6,7,8,9,10,11,13,14,15,16,17,18,19,24,25,26]
+pacingRule: >-
+  Early (ch 1-15): survival pressure every chapter. Mid (ch 15-50): power-up +
+  faction politics every 3-5 chapters. Late: expansion and existential threats.
+satisfactionTypes:
+  - Survival Against Odds
+  - Level Up
+  - Territory Claimed
+  - Faction Victory
+  - System Secret Revealed
+  - Societal Rebuild Milestone
+auditDimensions:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 24
+  - 25
+  - 26
+concretePayoffObjects:
+  - 存折
+  - 集资款
+  - 店铺钥匙
+  - 合同
+  - 营业执照
+  - 账本
+  - 批条
+  - 启动资金
+  - 本钱
+  - 车票
+  - 线索
+  - 证据
+  - 文件
+  - 装备
+  - 道具
+styleGovernance:
+  allowedStyleExamples:
+    - 元
+    - 分
+    - 个
+    - 月
+    - 年
+    - 折
+  forbiddenProseKeywords:
+    - 气血
+    - 境界
+    - 面板
+    - 金手指
+    - 升级
+structuralSignals:
+  defaultPayoffActions:
+    - 拿到
+    - 保住
+    - 夺回
+    - 签署
+    - 避开
+    - 买下
+    - 拦下
+    - 激活
+  lowStatusKeywords:
+    - 下岗
+    - 贫困
+    - 负债
+    - 被裁员
+    - 新手
 ---
-
 ## Genre Prohibitions
 
 - Day Zero that doesn't permanently change the world — no reverting to normal

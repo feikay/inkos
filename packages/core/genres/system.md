@@ -1,16 +1,114 @@
 ---
 name: 系统流
 id: system
-chapterTypes: ["任务章", "升级章", "布局章", "过渡章", "回收章"]
-fatigueWords: ["冷笑", "倒吸凉气", "不可置信", "轰然炸裂", "满场死寂", "仿佛", "不禁", "宛如", "竟然"]
+chapterTypes:
+  - 任务章
+  - 升级章
+  - 布局章
+  - 过渡章
+  - 回收章
+fatigueWords:
+  - 冷笑
+  - 倒吸凉气
+  - 不可置信
+  - 轰然炸裂
+  - 满场死寂
+  - 仿佛
+  - 不禁
+  - 宛如
+  - 竟然
 numericalSystem: true
 powerScaling: true
 eraResearch: false
-pacingRule: "每1-3章一次系统反馈：升级、技能解锁、任务奖励、属性提升"
-satisfactionTypes: ["升级突破", "技能解锁", "任务完成", "隐藏成就", "系统秘密揭示", "碾压反击"]
-auditDimensions: [1,2,3,4,5,6,7,8,9,10,11,13,14,15,16,17,18,19,24,25,26]
----
+pacingRule: 每1-3章一次系统反馈：升级、技能解锁、任务奖励、属性提升
+satisfactionTypes:
+  - 升级突破
+  - 技能解锁
+  - 任务完成
+  - 隐藏成就
+  - 系统秘密揭示
+  - 碾压反击
+auditDimensions:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 24
+  - 25
+  - 26
+resourceSystem:
+  defaultTypes:
+    - 系统积分
+    - 系统点数
+    - 技能
+    - 属性点
+  aliases:
+    积分: 系统积分
+    点数: 系统点数
+styleGovernance:
+  allowedStyleExamples:
+    - 点
+    - 枚
+    - 个
+    - 级
+  forbiddenProseKeywords:
+    - 气血
+    - 境界
+structuralSignals:
+  defaultPayoffActions:
+    - 获得
+    - 兑换
+    - 解锁
+    - 激活
+recoveryTemplates:
+  deferExchangeConstraints:
+    - 获得 +10 系统积分。
+    - 消耗 10 系统积分兑换初级技能。
+    - 当前系统积分归零。
+    - 本章不兑换任何其他资源，只保留下一章兑换的希望。
+    - 当前系统积分必须非负。
+  deferExchangeText: |
+    面板上的数字终于稳定下来。
+    当前系统积分：{reputationAfter}。
 
+    他的指尖停在兑换的确认按钮前，停了很久，却没有立刻按下去。
+
+    虽然眼下的危机依然如阴影般笼罩，但面板上的数字让他确信，系统并不是浮云虚影。
+
+    只要能继续完成接下来的任务，获取足够的积分，这些困难终将会迎刃而解。
+
+    他收回了视线，将所有的杂念压下，迈步走向了未知的路途。
+concretePayoffObjects:
+  - 存折
+  - 集资款
+  - 店铺钥匙
+  - 合同
+  - 营业执照
+  - 账本
+  - 批条
+  - 启动资金
+  - 本钱
+  - 车票
+  - 线索
+  - 证据
+  - 文件
+  - 装备
+  - 道具
+---
 ## 题材禁忌
 
 - 系统规则前后矛盾——读者会追踪每一个数值

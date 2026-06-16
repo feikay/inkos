@@ -1,5 +1,34 @@
 import { countChapterLength, type LengthLanguage } from "./length-metrics.js";
 
+// Comprehensive stop words: generic words that should never be hook keywords or next chapter direction keywords
+const GLOBAL_STOP_WORDS = new Set([
+  // Generic narrative terms
+  "主角", "关键", "事情", "线索", "重要", "可能", "需要", "已经", "这个", "那个",
+  "一些", "什么", "怎么", "为什么", "在哪里", "人物", "冲突", "资源", "开放",
+  "未完成", "已完成", "进行中", "待定", "未知", "备注",
+  // Family / common nouns
+  "家里", "父亲", "母亲", "爸爸", "妈妈", "儿子", "女儿", "哥哥", "姐姐", "弟弟", "妹妹",
+  "厂里", "车间", "门口", "客厅", "卧室", "厨房",
+  // Generic items / places / background context
+  "电器", "电风扇", "洗衣机", "电视机", "自行车", "摩托车",
+  "棉纺", "纺织", "布料", "衣服", "鞋子", "家具",
+  "棉纺厂", "纺织厂", "服装厂", "食品厂", "机械厂", "化工厂",
+  "家属院", "生活区", "厂房", "车间", "仓库", "办公室",
+  "生产线", "流水线", "技术科", "财务科", "供销科",
+  // Generic titles/roles
+  "厂长", "经理", "主任", "科长", "组长", "队长", "班长",
+  "工人", "员工", "同事", "老板",
+  "东西", "事情", "问题", "办法", "机会", "时间", "地方",
+  // Generic verbs/actions
+  "起来", "出来", "进去", "下来", "过去", "回来", "回去", "过来",
+  "到了", "开始", "面临", "解决", "为了", "以及", "然后", "重新",
+  // Economic generic terms
+  "倒爷", "倒卖", "批发", "零售", "进货", "出货",
+  "存钱", "赚钱", "赔钱", "借钱", "还钱", "花钱",
+  "八百", "几千", "几万", "万元", "块钱",
+]);
+
+
 /**
  * Parsed chapter intent scope boundaries extracted from intent markdown.
  */
@@ -417,7 +446,7 @@ function checkNextChapterFulfillment(
 
     for (const phrase of allDirectionPhrases) {
       if (phrase.length < 2 || phrase.length > 15) continue;
-      if (isCharacterName(phrase) || /^(?:需要|展示|建立|形成|确保|提升|增强|实现)$/.test(phrase)) continue;
+      if (isCharacterName(phrase) || GLOBAL_STOP_WORDS.has(phrase) || /^(?:需要|展示|建立|形成|确保|提升|增强|实现)$/.test(phrase)) continue;
       if (allowedContext && allowedContext.includes(phrase)) {
         continue;
       }
@@ -809,34 +838,7 @@ function extractNotesKeywords(notes: string): string[] {
 
   const allPhrases = new Set([...fullPhrases, ...tokens.map((t) => t.trim()).filter((t) => t.length >= 3)]);
 
-  // Comprehensive stop words: generic words that should never be hook keywords
-  const stopWords = new Set([
-    // Generic narrative terms
-    "主角", "关键", "事情", "线索", "重要", "可能", "需要", "已经", "这个", "那个",
-    "一些", "什么", "怎么", "为什么", "在哪里", "人物", "冲突", "资源", "开放",
-    "未完成", "已完成", "进行中", "待定", "未知", "备注",
-    // Family / common nouns
-    "家里", "父亲", "母亲", "爸爸", "妈妈", "儿子", "女儿", "哥哥", "姐姐", "弟弟", "妹妹",
-    "厂里", "车间", "家里", "门口", "客厅", "卧室", "厨房",
-    // Generic items / places / background context
-    "电器", "电风扇", "洗衣机", "电视机", "自行车", "摩托车",
-    "棉纺", "纺织", "布料", "衣服", "鞋子", "家具",
-    "棉纺厂", "纺织厂", "服装厂", "食品厂", "机械厂", "化工厂",
-    "家属院", "生活区", "厂房", "车间", "仓库", "办公室",
-    "生产线", "流水线", "技术科", "财务科", "供销科",
-    // Generic titles/roles
-    "厂长", "经理", "主任", "科长", "组长", "队长", "班长",
-    "工人", "员工", "同事", "老板",
-    "东西", "事情", "问题", "办法", "机会", "时间", "地方",
-    // Generic verbs/actions
-    "起来", "出来", "进去", "下来", "过去", "回来", "回去", "过来",
-    // Economic generic terms
-    "倒爷", "倒卖", "批发", "零售", "进货", "出货",
-    "存钱", "赚钱", "赔钱", "借钱", "还钱", "花钱",
-    "八百", "几千", "几万", "万元", "块钱",
-  ]);
-
-  return [...allPhrases].filter((p) => !stopWords.has(p) && (p.length >= 3 || isHighSignal2Char(p)));
+  return [...allPhrases].filter((p) => !GLOBAL_STOP_WORDS.has(p) && (p.length >= 3 || isHighSignal2Char(p)));
 }
 
 /**
@@ -995,6 +997,7 @@ function parsePendingHooksTable(
     // Check if any keyword appears in chapter text
     for (const kw of keywords) {
       if (kw.length < 2) continue;
+      if (isCharacterName(kw) || GLOBAL_STOP_WORDS.has(kw)) continue;
       if (chapterText.includes(kw)) {
         // Check for completion markers to decide severity
         const completionMarkers = /完成|成功|实现|达成|拿到|得到|获得|已经|终于|解决|化解|消除|处理|搞定/;

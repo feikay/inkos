@@ -1,16 +1,105 @@
 ---
 name: 历史/架空历史
 id: historical
-chapterTypes: ["权谋章", "战争章", "布局章", "过渡章", "回收章"]
-fatigueWords: ["冷笑", "倒吸凉气", "不可置信", "仿佛", "不禁", "宛如", "竟然", "龙颜大悦", "雷霆震怒", "不怒自威"]
+chapterTypes:
+  - 权谋章
+  - 战争章
+  - 布局章
+  - 过渡章
+  - 回收章
+fatigueWords:
+  - 冷笑
+  - 倒吸凉气
+  - 不可置信
+  - 仿佛
+  - 不禁
+  - 宛如
+  - 竟然
+  - 龙颜大悦
+  - 雷霆震怒
+  - 不怒自威
 numericalSystem: false
 powerScaling: false
 eraResearch: true
-pacingRule: "每2-3章一次政治博弈收获：联盟缔结、对手受挫、信息优势、地盘扩张"
-satisfactionTypes: ["权谋碾压", "战争胜利", "联盟达成", "身份跃升", "历史改写", "敌手覆灭"]
-auditDimensions: [1,2,3,6,7,8,9,10,11,12,13,14,15,16,17,18,19,24,25,26]
+pacingRule: 每2-3章一次政治博弈收获：联盟缔结、对手受挫、信息优势、地盘扩张
+satisfactionTypes:
+  - 权谋碾压
+  - 战争胜利
+  - 联盟达成
+  - 身份跃升
+  - 历史改写
+  - 敌手覆灭
+auditDimensions:
+  - 1
+  - 2
+  - 3
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 24
+  - 25
+  - 26
+concretePayoffObjects:
+  - 地图锁孔
+  - 玉简
+  - 地图
+  - 残图
+  - 锁孔
+  - 机关
+  - 阵纹
+  - 禁纹
+  - 法阵
+  - 腰牌
+  - 令牌
+  - 钥匙
+  - 卷轴
+  - 古卷
+  - 残卷
+  - 残页
+  - 石碑
+  - 古碑
+  - 碑纹
+  - 入口
+  - 门
+  - 祭坛
+styleGovernance:
+  allowedStyleExamples:
+    - 三息
+    - 一炷香
+    - 千年
+    - 聚气九层
+  forbiddenProseKeywords:
+    - 性价比
+    - 打折
+    - 收益
+    - 基础值
+structuralSignals:
+  defaultPayoffActions:
+    - 触发
+    - 打开
+    - 拿到
+    - 夺下
+    - 获得
+    - 压住
+    - 突破
+    - 开启
+  lowStatusKeywords:
+    - 扫地
+    - 杂役
+    - 废材
+    - 废物
 ---
-
 ## 题材禁忌
 
 - 用现代思维强行套入历史背景——价值观必须有时代局限

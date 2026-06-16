@@ -1,16 +1,102 @@
 ---
 name: 末日/末世
 id: apocalypse
-chapterTypes: ["生存章", "战斗章", "布局章", "过渡章", "回收章"]
-fatigueWords: ["冷笑", "不可置信", "倒吸凉气", "轰然炸裂", "仿佛", "不禁", "宛如", "竟然", "丧尸潮", "铺天盖地"]
+chapterTypes:
+  - 生存章
+  - 战斗章
+  - 布局章
+  - 过渡章
+  - 回收章
+fatigueWords:
+  - 冷笑
+  - 不可置信
+  - 倒吸凉气
+  - 轰然炸裂
+  - 仿佛
+  - 不禁
+  - 宛如
+  - 竟然
+  - 丧尸潮
+  - 铺天盖地
 numericalSystem: false
 powerScaling: false
 eraResearch: true
-pacingRule: "前期(1-15章)每章生存压力，中期每3-5章一次势力博弈或资源突破，后期扩张与存亡危机"
-satisfactionTypes: ["绝境求生", "资源夺取", "领地确立", "阵营胜利", "真相揭示", "文明重建里程碑"]
-auditDimensions: [1,2,3,6,7,8,9,10,11,12,13,14,15,16,17,18,19,24,25,26]
+pacingRule: 前期(1-15章)每章生存压力，中期每3-5章一次势力博弈或资源突破，后期扩张与存亡危机
+satisfactionTypes:
+  - 绝境求生
+  - 资源夺取
+  - 领地确立
+  - 阵营胜利
+  - 真相揭示
+  - 文明重建里程碑
+auditDimensions:
+  - 1
+  - 2
+  - 3
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 24
+  - 25
+  - 26
+concretePayoffObjects:
+  - 存折
+  - 集资款
+  - 店铺钥匙
+  - 合同
+  - 营业执照
+  - 账本
+  - 批条
+  - 启动资金
+  - 本钱
+  - 车票
+  - 线索
+  - 证据
+  - 文件
+  - 装备
+  - 道具
+styleGovernance:
+  allowedStyleExamples:
+    - 元
+    - 分
+    - 个
+    - 月
+    - 年
+    - 折
+  forbiddenProseKeywords:
+    - 气血
+    - 境界
+    - 面板
+    - 金手指
+    - 升级
+structuralSignals:
+  defaultPayoffActions:
+    - 拿到
+    - 保住
+    - 夺回
+    - 签署
+    - 避开
+    - 买下
+    - 拦下
+    - 激活
+  lowStatusKeywords:
+    - 下岗
+    - 贫困
+    - 负债
+    - 被裁员
+    - 新手
 ---
-
 ## 题材禁忌
 
 - 末日第一天世界毫无根本改变——旧秩序必须彻底崩塌

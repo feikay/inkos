@@ -14,6 +14,7 @@ import {
   decidePublishQuality,
   evaluatePublishReadyLengthGate,
   applyPublishReadyLengthGate,
+  applyPostCompressionGate,
   readChapterIndexStatus,
   applyStoryEffectivenessDecision,
   applyGolden3ChapterDecision,
@@ -195,8 +196,25 @@ describe("continuity-auto verdict helpers", () => {
 
     expect(gate.status).toBe("FAIL");
     expect(gate.hard_max).toBe(2545);
-    expect(decision.publishStatus).toBe("READY_WITH_WARNINGS");
+    expect(decision.publishStatus).toBe("BLOCKED_BY_LENGTH");
     expect(decision.warnings?.join("\n")).toContain("outside hard range");
+  });
+
+  it("requires manual review when the compressor modifies a final candidate after audits", () => {
+    const gate = evaluatePublishReadyLengthGate({
+      text: "正文".repeat(300),
+      targetChapterWords: 3000,
+      language: "zh",
+    });
+    const decision = applyPostCompressionGate(
+      "READY_TO_EXPORT",
+      ["quality warning"],
+      { lengthGate: gate, compressed: true },
+    );
+
+    expect(decision.publishStatus).toBe("MANUAL_REVIEW");
+    expect(decision.warnings?.join("\n")).toContain("post_compression_review_required");
+    expect(decision.warnings?.join("\n")).toContain("quality warning");
   });
 
   it("prefers chapters-reviewed final as publish-ready starting candidate when manual continuity is accepted", async () => {

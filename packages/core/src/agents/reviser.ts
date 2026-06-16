@@ -140,6 +140,7 @@ export class ReviserAgent extends BaseAgent {
       await readBookNumericExpressionMode(bookDir, gp),
       resolvedLanguage,
       "reviser",
+      gp,
     );
     const langPrefix = isEnglish
       ? mode === "spot-fix"

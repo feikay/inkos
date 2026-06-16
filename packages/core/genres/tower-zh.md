@@ -1,16 +1,100 @@
 ---
 name: 爬塔/登塔
 id: tower-zh
-chapterTypes: ["楼层挑战章", "升级章", "布局章", "过渡章", "回收章"]
-fatigueWords: ["冷笑", "倒吸凉气", "不可置信", "轰然炸裂", "仿佛", "不禁", "宛如", "竟然", "蝼蚁"]
+chapterTypes:
+  - 楼层挑战章
+  - 升级章
+  - 布局章
+  - 过渡章
+  - 回收章
+fatigueWords:
+  - 冷笑
+  - 倒吸凉气
+  - 不可置信
+  - 轰然炸裂
+  - 仿佛
+  - 不禁
+  - 宛如
+  - 竟然
+  - 蝼蚁
 numericalSystem: false
 powerScaling: true
 eraResearch: false
-pacingRule: "每层楼3-8章：引入→探索→对抗→推进，楼层间难度必须明显递增"
-satisfactionTypes: ["楼层通关", "Boss击杀", "新能力获得", "楼层秘密发现", "对手超越", "登顶推进"]
-auditDimensions: [1,2,3,4,6,7,8,9,10,13,14,15,16,17,18,19,24,25,26]
+pacingRule: 每层楼3-8章：引入→探索→对抗→推进，楼层间难度必须明显递增
+satisfactionTypes:
+  - 楼层通关
+  - Boss击杀
+  - 新能力获得
+  - 楼层秘密发现
+  - 对手超越
+  - 登顶推进
+auditDimensions:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 24
+  - 25
+  - 26
+concretePayoffObjects:
+  - 存折
+  - 集资款
+  - 店铺钥匙
+  - 合同
+  - 营业执照
+  - 账本
+  - 批条
+  - 启动资金
+  - 本钱
+  - 车票
+  - 线索
+  - 证据
+  - 文件
+  - 装备
+  - 道具
+styleGovernance:
+  allowedStyleExamples:
+    - 元
+    - 分
+    - 个
+    - 月
+    - 年
+    - 折
+  forbiddenProseKeywords:
+    - 气血
+    - 境界
+    - 面板
+    - 金手指
+    - 升级
+structuralSignals:
+  defaultPayoffActions:
+    - 拿到
+    - 保住
+    - 夺回
+    - 签署
+    - 避开
+    - 买下
+    - 拦下
+    - 激活
+  lowStatusKeywords:
+    - 下岗
+    - 贫困
+    - 负债
+    - 被裁员
+    - 新手
 ---
-
 ## 题材禁忌
 
 - 楼层只是换皮——每层必须有本质不同的挑战

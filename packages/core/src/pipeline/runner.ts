@@ -1655,6 +1655,7 @@ export class PipelineRunner {
           currentLedger,
           currentState,
           chapterIntent,
+          genreProfile: gp,
         });
         const classification = classifyResourceConsistency({
           validation,
@@ -1965,6 +1966,7 @@ export class PipelineRunner {
         currentLedger: await readFile(join(storyDir, "particle_ledger.md"), "utf-8").catch(() => ""),
         currentState: await readFile(join(storyDir, "current_state.md"), "utf-8").catch(() => ""),
         chapterIntent: await readFile(join(storyDir, "runtime", "chapter-intents", `${String(chapterNumber).padStart(4, "0")}.md`), "utf-8").catch(() => ""),
+        genreProfile: gp,
       }),
     };
     const finalResourceClassification = classifyResourceConsistency({
@@ -3272,8 +3274,13 @@ ${matrix}`,
       { reuseExistingIntentWhenContextMissing: true },
     );
 
+    let intentMarkdown = plan.intentMarkdown;
+    if (chapterNumber > 1) {
+      intentMarkdown = await this.alignChapterIntent(bookDir, chapterNumber, intentMarkdown);
+    }
+
     return {
-      chapterIntent: plan.intentMarkdown,
+      chapterIntent: intentMarkdown,
       contextPackage: composed.contextPackage,
       ruleStack: composed.ruleStack,
       trace: composed.trace,
@@ -3542,26 +3549,51 @@ ${matrix}`,
     const jsonPath = join(reportDir, "golden-3-chapter.report.json");
     const markdownPath = join(reportDir, "golden-3-chapter.report.md");
     const chaptersDir = join(params.bookDir, "chapters");
+    const reviewedDir = join(params.bookDir, "chapters-reviewed");
 
     // Read chapter files from disk
-    const readChapterContent = async (chNum: number): Promise<string> => {
+    const readChapterContent = async (chNum: number): Promise<{ content: string; hasDraft: boolean; hasFinal: boolean }> => {
+      const padded = String(chNum).padStart(4, "0");
+      let content = "";
+      let hasDraft = false;
+      let hasFinal = false;
+
+      // 1. Check final reviewed chapter
+      try {
+        const files = await readdir(reviewedDir);
+        const file = files.find((f) => f.startsWith(padded) && f.endsWith(".md"));
+        if (file) {
+          const raw = await readFile(join(reviewedDir, file), "utf-8");
+          const headingEnd = raw.indexOf("\n\n");
+          content = headingEnd >= 0 ? raw.slice(headingEnd + 2).trim() : raw.trim();
+          hasFinal = true;
+        }
+      } catch {
+        // ignore
+      }
+
+      // 2. Check draft chapter
       try {
         const files = await readdir(chaptersDir);
-        const padded = String(chNum).padStart(4, "0");
         const file = files.find((f) => f.startsWith(padded) && f.endsWith(".md"));
-        if (!file) return "";
-        const raw = await readFile(join(chaptersDir, file), "utf-8");
-        // Strip heading line
-        const headingEnd = raw.indexOf("\n\n");
-        return headingEnd >= 0 ? raw.slice(headingEnd + 2).trim() : raw.trim();
+        if (file) {
+          hasDraft = true;
+          if (!content) {
+            const raw = await readFile(join(chaptersDir, file), "utf-8");
+            const headingEnd = raw.indexOf("\n\n");
+            content = headingEnd >= 0 ? raw.slice(headingEnd + 2).trim() : raw.trim();
+          }
+        }
       } catch {
-        return "";
+        // ignore
       }
+
+      return { content, hasDraft, hasFinal };
     };
 
-    const ch1Content = await readChapterContent(1);
-    const ch2Content = await readChapterContent(2);
-    const ch3Content = await readChapterContent(3);
+    const ch1Result = await readChapterContent(1);
+    const ch2Result = await readChapterContent(2);
+    const ch3Result = await readChapterContent(3);
 
     // Read first_10_chapter_plan from story dir
     let first10Plan: string | undefined;
@@ -3574,12 +3606,15 @@ ${matrix}`,
     }
 
     const input = {
-      chapter1Content: ch1Content,
-      chapter2Content: ch2Content,
-      chapter3Content: ch3Content,
+      chapter1Content: ch1Result.content,
+      chapter2Content: ch2Result.content,
+      chapter3Content: ch3Result.content,
       first10ChapterPlan: first10Plan,
       resourceBlocking: params.resourceBlocking,
       chapterIndexStatus: params.chapterIndexStatus,
+      chapter1Exists: { draft: ch1Result.hasDraft, final: ch1Result.hasFinal },
+      chapter2Exists: { draft: ch2Result.hasDraft, final: ch2Result.hasFinal },
+      chapter3Exists: { draft: ch3Result.hasDraft, final: ch3Result.hasFinal },
     };
 
     let report: Golden3ChapterReport;
@@ -3795,18 +3830,21 @@ ${matrix}`,
   }): Promise<ResourceConsistencyPipelineResult> {
     const storyDir = join(params.bookDir, "story");
     const padded = String(params.chapterNumber).padStart(4, "0");
-    const [bookRules, currentLedger, currentState, chapterIntent] = await Promise.all([
+    const [bookRules, currentLedger, currentState, chapterIntent, book] = await Promise.all([
       readFile(join(storyDir, "book_rules.md"), "utf-8").catch(() => ""),
       readFile(join(storyDir, "particle_ledger.md"), "utf-8").catch(() => ""),
       readFile(join(storyDir, "current_state.md"), "utf-8").catch(() => ""),
       readFile(join(storyDir, "runtime", "chapter-intents", `${padded}.md`), "utf-8").catch(() => ""),
+      this.state.loadBookConfig(params.bookId),
     ]);
+    const { profile: genreProfile } = await this.loadGenreProfile(book.genre);
     let validation = this.revalidateResourceConsistency({
       content: params.content,
       bookRules,
       currentLedger,
       currentState,
       chapterIntent,
+      genreProfile,
     });
     const resourcePlanViolations = params.resourcePlan
       ? validateResourceEngineAgainstPlan({ text: params.content, validation, plan: params.resourcePlan })
@@ -3897,7 +3935,7 @@ ${matrix}`,
     let content = localRepair.content;
     let tokenUsage: TokenUsageSummary | undefined;
     let repaired = localRepair.repaired;
-    validation = this.revalidateResourceConsistency({ content, bookRules, currentLedger, currentState, chapterIntent });
+    validation = this.revalidateResourceConsistency({ content, bookRules, currentLedger, currentState, chapterIntent, genreProfile });
 
     if (validation.issues.length > 0) {
       try {
@@ -3927,7 +3965,7 @@ ${matrix}`,
         if (decision.accepted) {
           content = revised.content;
           repaired = true;
-          validation = this.revalidateResourceConsistency({ content, bookRules, currentLedger, currentState, chapterIntent });
+          validation = this.revalidateResourceConsistency({ content, bookRules, currentLedger, currentState, chapterIntent, genreProfile });
           if (validation.issues.length === 0) {
             this.config.logger?.child("writer")?.info("resource-engine: second validation passed");
           } else {
@@ -3970,129 +4008,139 @@ ${matrix}`,
     if (classification.blocking) {
       recoveryAttempted = true;
       this.config.logger?.child("writer")?.info("resource-engine: second validation failed, attempting blocking recovery");
-      recoveryPlan = selectResourceRecoveryPlan({ validation, chapterIntent });
-      this.config.logger?.child("writer")?.info(`resource-engine: recovery plan selected: ${recoveryPlan.planId}`);
-      try {
-        const rewriter = new ResourceBlockingRewriterAgent(this.agentCtxFor("resource-blocking-rewrite", params.bookId));
-        const attempt = await this.tryResourceBlockingRewrite({
-          rewriter,
-          content,
-          chapterIntent,
-          validation,
-          recoveryPlan,
-          bookRules,
-          currentLedger,
-          currentState,
-          lengthSpec: params.lengthSpec,
-          originalWordCount: params.wordCount,
-          language: params.language,
-          logLabel: "resource-blocking-rewrite",
-        });
-        tokenUsage = tokenUsage && attempt.usage
-          ? PipelineRunner.addUsage(tokenUsage, attempt.usage)
-          : attempt.usage ?? tokenUsage;
-        if (attempt.accepted) {
-          content = attempt.content;
-          validation = attempt.validation;
-          repaired = true;
-          secondValidation = "PASS";
-          recoveryPlanResult = "PASS";
-          classification = classifyResourceConsistency({ validation, repaired });
-          this.config.logger?.child("writer")?.info("resource-engine: recovery validation passed");
-          this.config.logger?.child("writer")?.info("resource-engine: blocking recovered, continuing normal flow");
-        } else {
-          secondValidation = "FAILED";
-          recoveryPlanResult = "FAILED";
-          this.config.logger?.child("writer")?.warn(`resource-engine: recovery validation failed for ${recoveryPlan.planId}`);
-          const resourceRulesForFallback = parseResourceRules(bookRules, currentLedger, currentState);
-          const planModeForFallback = params.resourcePlan?.mode ?? "no_resource_change";
-          const exchangeAllowed = isExchangeStrategyAllowed({
-            resourceRules: resourceRulesForFallback,
-            planMode: planModeForFallback,
+      recoveryPlan = selectResourceRecoveryPlan({ validation, chapterIntent, genreProfile });
+      if (!recoveryPlan) {
+        secondValidation = "FAILED";
+        recoveryPlanResult = "FAILED";
+        this.config.logger?.child("writer")?.warn("resource-engine: no recovery plan available for this genre/resource profile; keeping blocking report for manual repair");
+      } else {
+        this.config.logger?.child("writer")?.info(`resource-engine: recovery plan selected: ${recoveryPlan.planId}`);
+        try {
+          const rewriter = new ResourceBlockingRewriterAgent(this.agentCtxFor("resource-blocking-rewrite", params.bookId));
+          const attempt = await this.tryResourceBlockingRewrite({
+            rewriter,
+            content,
+            chapterIntent,
+            validation,
+            recoveryPlan,
+            bookRules,
+            currentLedger,
+            currentState,
+            lengthSpec: params.lengthSpec,
+            originalWordCount: params.wordCount,
+            language: params.language,
+            logLabel: "resource-blocking-rewrite",
+            genreProfile,
           });
-          const fallback = exchangeAllowed
-            ? buildFallbackRecoveryPlan({
-              validation,
-              chapterIntent,
-              failedPlan: recoveryPlan,
-            })
-            : undefined;
-          if (fallback && fallback.planId !== recoveryPlan.planId) {
-            fallbackRecoveryAttempted = true;
-            fallbackRecoveryPlan = fallback;
-            this.config.logger?.child("writer")?.info(`resource-engine: falling back to ${fallback.strategy}`);
-            this.config.logger?.child("writer")?.info(`resource-engine: fallback recovery plan selected: ${fallbackRecoveryPlan.planId}`);
-            const fallbackAttempt = await this.tryResourceBlockingRewrite({
-              rewriter,
-              content,
-              chapterIntent,
-              validation,
-              recoveryPlan: fallbackRecoveryPlan,
-              bookRules,
-              currentLedger,
-              currentState,
-              lengthSpec: params.lengthSpec,
-              originalWordCount: params.wordCount,
-              language: params.language,
-              logLabel: "resource-blocking-rewrite",
-              isFallback: true,
+          tokenUsage = tokenUsage && attempt.usage
+            ? PipelineRunner.addUsage(tokenUsage, attempt.usage)
+            : attempt.usage ?? tokenUsage;
+          if (attempt.accepted) {
+            content = attempt.content;
+            validation = attempt.validation;
+            repaired = true;
+            secondValidation = "PASS";
+            recoveryPlanResult = "PASS";
+            classification = classifyResourceConsistency({ validation, repaired });
+            this.config.logger?.child("writer")?.info("resource-engine: recovery validation passed");
+            this.config.logger?.child("writer")?.info("resource-engine: blocking recovered, continuing normal flow");
+          } else {
+            secondValidation = "FAILED";
+            recoveryPlanResult = "FAILED";
+            this.config.logger?.child("writer")?.warn(`resource-engine: recovery validation failed for ${recoveryPlan.planId}`);
+            const resourceRulesForFallback = parseResourceRules(bookRules, currentLedger, currentState, genreProfile);
+            const planModeForFallback = params.resourcePlan?.mode ?? "no_resource_change";
+            const exchangeAllowed = isExchangeStrategyAllowed({
+              resourceRules: resourceRulesForFallback,
+              planMode: planModeForFallback,
             });
-            tokenUsage = tokenUsage && fallbackAttempt.usage
-              ? PipelineRunner.addUsage(tokenUsage, fallbackAttempt.usage)
-              : fallbackAttempt.usage ?? tokenUsage;
-            if (fallbackAttempt.accepted) {
-              content = fallbackAttempt.content;
-              validation = fallbackAttempt.validation;
-              repaired = true;
-              fallbackSecondValidation = "PASS";
-              secondValidation = "PASS";
-              classification = classifyResourceConsistency({ validation, repaired });
-              this.config.logger?.child("writer")?.info("resource-engine: fallback recovery validation passed");
-              this.config.logger?.child("writer")?.info("resource-engine: blocking recovered by defer_exchange");
-            } else {
-              fallbackSecondValidation = "FAILED";
-              this.config.logger?.child("writer")?.warn("resource-engine: fallback recovery validation failed");
-              const templateAttempt = this.tryDeferExchangeTemplatePatch({
-                content: fallbackAttempt.content,
+            const fallback = exchangeAllowed
+              ? buildFallbackRecoveryPlan({
+                validation,
+                chapterIntent,
+                failedPlan: recoveryPlan,
+                genreProfile,
+              })
+              : undefined;
+            if (fallback && fallback.planId !== recoveryPlan.planId) {
+              fallbackRecoveryAttempted = true;
+              fallbackRecoveryPlan = fallback;
+              this.config.logger?.child("writer")?.info(`resource-engine: falling back to ${fallback.strategy}`);
+              this.config.logger?.child("writer")?.info(`resource-engine: fallback recovery plan selected: ${fallbackRecoveryPlan.planId}`);
+              const fallbackAttempt = await this.tryResourceBlockingRewrite({
+                rewriter,
+                content,
+                chapterIntent,
+                validation,
+                recoveryPlan: fallbackRecoveryPlan,
                 bookRules,
                 currentLedger,
                 currentState,
-                chapterIntent,
-                recoveryPlan: fallbackRecoveryPlan,
+                lengthSpec: params.lengthSpec,
+                originalWordCount: params.wordCount,
+                language: params.language,
+                logLabel: "resource-blocking-rewrite",
+                isFallback: true,
+                genreProfile,
               });
-              if (templateAttempt.attempted) {
-                templatePatchAttempted = true;
-                templatePatchApplied = templateAttempt.applied;
-                templatePatchValidation = templateAttempt.validationPassed ? "PASS" : "FAILED";
-                templatePatchReason = templateAttempt.reason;
-                removedCashFlowSnippets = templateAttempt.removedSnippets;
-                balanceClaimPatchAttempted = Boolean(templateAttempt.balanceClaimPatchAttempted);
-                balanceClaimPatchApplied = Boolean(templateAttempt.balanceClaimPatchApplied);
-                balanceClaimPatchResource = templateAttempt.balanceClaimPatchResource;
-                balanceClaimPatchFrom = templateAttempt.balanceClaimPatchFrom;
-                balanceClaimPatchTo = templateAttempt.balanceClaimPatchTo;
-                balanceClaimPatchReason = templateAttempt.balanceClaimPatchReason;
-                if (templateAttempt.validationPassed) {
-                  content = templateAttempt.content;
-                  validation = templateAttempt.validation;
-                  repaired = true;
-                  secondValidation = "PASS";
-                  classification = classifyResourceConsistency({ validation, repaired });
-                  this.config.logger?.child("writer")?.info("resource-engine: template patch validation passed");
-                  this.config.logger?.child("writer")?.info("resource-engine: blocking recovered by defer_exchange template patch");
-                } else {
-                  this.config.logger?.child("writer")?.warn("resource-engine: template patch validation failed");
+              tokenUsage = tokenUsage && fallbackAttempt.usage
+                ? PipelineRunner.addUsage(tokenUsage, fallbackAttempt.usage)
+                : fallbackAttempt.usage ?? tokenUsage;
+              if (fallbackAttempt.accepted) {
+                content = fallbackAttempt.content;
+                validation = fallbackAttempt.validation;
+                repaired = true;
+                fallbackSecondValidation = "PASS";
+                secondValidation = "PASS";
+                classification = classifyResourceConsistency({ validation, repaired });
+                this.config.logger?.child("writer")?.info("resource-engine: fallback recovery validation passed");
+                this.config.logger?.child("writer")?.info("resource-engine: blocking recovered by defer_exchange");
+              } else {
+                fallbackSecondValidation = "FAILED";
+                this.config.logger?.child("writer")?.warn("resource-engine: fallback recovery validation failed");
+                const templateAttempt = this.tryDeferExchangeTemplatePatch({
+                  content: fallbackAttempt.content,
+                  bookRules,
+                  currentLedger,
+                  currentState,
+                  chapterIntent,
+                  recoveryPlan: fallbackRecoveryPlan,
+                  genreProfile,
+                });
+                if (templateAttempt.attempted) {
+                  templatePatchAttempted = true;
+                  templatePatchApplied = templateAttempt.applied;
+                  templatePatchValidation = templateAttempt.validationPassed ? "PASS" : "FAILED";
+                  templatePatchReason = templateAttempt.reason;
+                  removedCashFlowSnippets = templateAttempt.removedSnippets;
+                  balanceClaimPatchAttempted = Boolean(templateAttempt.balanceClaimPatchAttempted);
+                  balanceClaimPatchApplied = Boolean(templateAttempt.balanceClaimPatchApplied);
+                  balanceClaimPatchResource = templateAttempt.balanceClaimPatchResource;
+                  balanceClaimPatchFrom = templateAttempt.balanceClaimPatchFrom;
+                  balanceClaimPatchTo = templateAttempt.balanceClaimPatchTo;
+                  balanceClaimPatchReason = templateAttempt.balanceClaimPatchReason;
+                  if (templateAttempt.validationPassed) {
+                    content = templateAttempt.content;
+                    validation = templateAttempt.validation;
+                    repaired = true;
+                    secondValidation = "PASS";
+                    classification = classifyResourceConsistency({ validation, repaired });
+                    this.config.logger?.child("writer")?.info("resource-engine: template patch validation passed");
+                    this.config.logger?.child("writer")?.info("resource-engine: blocking recovered by defer_exchange template patch");
+                  } else {
+                    this.config.logger?.child("writer")?.warn("resource-engine: template patch validation failed");
+                  }
                 }
               }
             }
           }
+        } catch (error) {
+          secondValidation = "FAILED";
+          this.logWarn(params.language, {
+            zh: `resource-blocking-rewrite 调用失败，保持 state-degraded：${error instanceof Error ? error.message : String(error)}`,
+            en: `resource-blocking-rewrite failed; keeping state-degraded: ${error instanceof Error ? error.message : String(error)}`,
+          });
         }
-      } catch (error) {
-        secondValidation = "FAILED";
-        this.logWarn(params.language, {
-          zh: `resource-blocking-rewrite 调用失败，保持 state-degraded：${error instanceof Error ? error.message : String(error)}`,
-          en: `resource-blocking-rewrite failed; keeping state-degraded: ${error instanceof Error ? error.message : String(error)}`,
-        });
       }
     }
 
@@ -4234,7 +4282,7 @@ ${matrix}`,
     readonly content: string;
     readonly chapterIntent: string;
     readonly validation: ResourceValidationResult;
-    readonly recoveryPlan: ReturnType<typeof selectResourceRecoveryPlan>;
+    readonly recoveryPlan: NonNullable<ReturnType<typeof selectResourceRecoveryPlan>>;
     readonly bookRules: string;
     readonly currentLedger: string;
     readonly currentState: string;
@@ -4243,6 +4291,7 @@ ${matrix}`,
     readonly language: LengthLanguage;
     readonly logLabel: string;
     readonly isFallback?: boolean;
+    readonly genreProfile?: GenreProfile;
   }): Promise<{
     readonly accepted: boolean;
     readonly content: string;
@@ -4267,6 +4316,7 @@ ${matrix}`,
       currentLedger: params.currentLedger,
       currentState: params.currentState,
       chapterIntent: params.chapterIntent,
+      genreProfile: params.genreProfile,
     });
     const candidateClassification = classifyResourceConsistency({ validation: candidateValidation, repaired: true });
     const forbidden = hasForbiddenResourceRecoveryPhrase(rewritten.content, params.recoveryPlan);
@@ -4296,6 +4346,7 @@ ${matrix}`,
     readonly currentState: string;
     readonly chapterIntent: string;
     readonly recoveryPlan?: ReturnType<typeof selectResourceRecoveryPlan>;
+    readonly genreProfile?: GenreProfile;
   }): {
     readonly attempted: boolean;
     readonly applied: boolean;
@@ -4323,6 +4374,7 @@ ${matrix}`,
           currentLedger: params.currentLedger,
           currentState: params.currentState,
           chapterIntent: params.chapterIntent,
+          genreProfile: params.genreProfile,
         }),
         removedSnippets: [],
         balanceClaimPatchAttempted: false,
@@ -4334,6 +4386,7 @@ ${matrix}`,
       bookRules: params.bookRules,
       currentLedger: params.currentLedger,
       currentState: params.currentState,
+      genreProfile: params.genreProfile,
     });
     if (!patch.patchApplied) {
       return {
@@ -4347,6 +4400,7 @@ ${matrix}`,
           currentLedger: params.currentLedger,
           currentState: params.currentState,
           chapterIntent: params.chapterIntent,
+          genreProfile: params.genreProfile,
         }),
         reason: patch.reason,
         removedSnippets: [],
@@ -4369,6 +4423,7 @@ ${matrix}`,
       currentLedger: params.currentLedger,
       currentState: params.currentState,
       chapterIntent: params.chapterIntent,
+      genreProfile: params.genreProfile,
     });
     const classification = classifyResourceConsistency({ validation, repaired: true });
     const forbidden = hasForbiddenResourceRecoveryPhrase(contentForValidation, params.recoveryPlan);
@@ -4643,8 +4698,9 @@ ${matrix}`,
     readonly currentState: string;
     readonly chapterIntent?: string;
     readonly validation?: ResourceValidationResult;
+    readonly genreProfile?: GenreProfile;
   }): ResourceValidationResult {
-    const events = extractResourceEvents(params.content, params.bookRules, params.currentLedger);
+    const events = extractResourceEvents(params.content, params.bookRules, params.currentLedger, params.genreProfile);
     return validateResourceMath({
       events,
       currentLedger: params.currentLedger,
@@ -4652,6 +4708,7 @@ ${matrix}`,
       bookRules: params.bookRules,
       chapterIntent: params.chapterIntent,
       chapterText: params.content,
+      genreProfile: params.genreProfile,
     });
   }
 
@@ -5463,6 +5520,89 @@ ${matrix}`,
     }
     return raw;
   }
+
+  private async alignChapterIntent(
+    bookDir: string,
+    chapterNumber: number,
+    intentMarkdown: string,
+  ): Promise<string> {
+    if (chapterNumber <= 1) {
+      return intentMarkdown;
+    }
+
+    let prevContent = "";
+    try {
+      prevContent = await this.readChapterContent(bookDir, chapterNumber - 1);
+    } catch (err) {
+      this.config.logger?.warn(`[align-intent] Failed to read previous chapter ${chapterNumber - 1} content: ${err instanceof Error ? err.message : String(err)}`);
+      return intentMarkdown;
+    }
+
+    if (!prevContent.trim()) {
+      return intentMarkdown;
+    }
+
+    const lastSnippet = prevContent.length > 500 ? prevContent.slice(-500) : prevContent;
+
+    const messages = [
+      {
+        role: "system" as const,
+        content: `You are an expert literary editor. Your task is to compare the end of the previous chapter of a novel with the current chapter's intent card (plan). You need to identify any overlapping micro-actions (e.g., characters performing the exact same physical action, eating the same food, repeating the exact same conversation, or paying the same amount of money that was already paid/done in the previous chapter's ending).
+
+If there is a physical action overlap or clash at the boundary:
+1. Revise the Chapter Intent Markdown to remove or modify the overlapping start, ensuring the story flows continuously without repeating the micro-actions.
+2. Maintain all other parts of the Chapter Intent (including goals, plot beats, hooks, and guidelines) completely intact. Do not change the core story direction.
+3. Output the revised Chapter Intent in full.
+
+If there is NO overlap or repetition, output the original Chapter Intent completely unchanged.
+
+Your output MUST be enclosed in \`=== ALIGNED_INTENT ===\` tags, like this:
+=== ALIGNED_INTENT ===
+[Markdown of the original or revised chapter intent]
+=== ALIGNED_INTENT ===`
+      },
+      {
+        role: "user" as const,
+        content: `### Previous Chapter Ending (Last 400 characters):
+${lastSnippet}
+
+### Original Chapter Intent:
+${intentMarkdown}
+
+Compare them. If there is a micro-action overlap at the boundary, erase or rewrite the overlapping opening beats in the Chapter Intent. Return the result enclosed in === ALIGNED_INTENT ===.`
+      }
+    ];
+
+    try {
+      this.config.logger?.info(`[align-intent] Running boundary alignment comparison for chapter ${chapterNumber}...`);
+      const response = await chatCompletion(this.config.client, this.config.model, messages, {
+        temperature: 0.1,
+        stage: "intent-alignment-micro",
+        projectRoot: this.config.projectRoot,
+      });
+
+      const content = response.content;
+      const match = content.match(/===\s*ALIGNED_INTENT\s*===([\s\S]*?)===\s*ALIGNED_INTENT\s*===/);
+      if (match && match[1]) {
+        const cleaned = match[1].trim();
+        if (cleaned && cleaned !== intentMarkdown.trim()) {
+          this.config.logger?.info(`[align-intent] Chapter ${chapterNumber} intent aligned and updated to resolve boundary overlaps.`);
+          const padded = String(chapterNumber).padStart(4, "0");
+          const runtimeDir = join(bookDir, "story", "runtime", "chapter-intents");
+          const intentPath = join(runtimeDir, `${padded}.md`);
+          await mkdir(runtimeDir, { recursive: true });
+          await writeFile(intentPath, `${cleaned}\n`, "utf-8");
+          this.config.logger?.info(`[align-intent] Chapter ${chapterNumber} aligned intent written to ${intentPath}.`);
+          return cleaned;
+        }
+      }
+      this.config.logger?.info(`[align-intent] No boundary overlaps detected for chapter ${chapterNumber}.`);
+      return intentMarkdown;
+    } catch (err) {
+      this.config.logger?.warn(`[align-intent] Boundary alignment LLM call failed: ${err instanceof Error ? err.message : String(err)}`);
+      return intentMarkdown;
+    }
+  }
 }
 
 function buildResourceRepairSuggestions(validation: ResourceValidationResult): string[] {
@@ -5534,12 +5674,14 @@ function detectResourceIndexReadinessBlocker(params: {
 function buildFallbackRecoveryPlan(params: {
   readonly validation: ResourceValidationResult;
   readonly chapterIntent: string;
-  readonly failedPlan: ReturnType<typeof selectResourceRecoveryPlan>;
+  readonly failedPlan: NonNullable<ReturnType<typeof selectResourceRecoveryPlan>>;
+  readonly genreProfile?: GenreProfile;
 }): ReturnType<typeof selectResourceRecoveryPlan> | undefined {
   if (params.failedPlan.strategy !== "add_earned_resource_before_spend") return undefined;
   return buildResourceRecoveryPlans({
     validation: params.validation,
     chapterIntent: params.chapterIntent,
+    genreProfile: params.genreProfile,
   }).find((plan) => plan.strategy === "defer_exchange");
 }
 

@@ -41,6 +41,9 @@ export interface Golden3ChapterReviewInput {
   readonly first10ChapterPlan?: string;
   readonly resourceBlocking?: boolean;
   readonly chapterIndexStatus?: string;
+  readonly chapter1Exists?: { readonly draft: boolean; readonly final: boolean };
+  readonly chapter2Exists?: { readonly draft: boolean; readonly final: boolean };
+  readonly chapter3Exists?: { readonly draft: boolean; readonly final: boolean };
 }
 
 const DIMENSION_LABELS: Record<Golden3ChapterDimension, string> = {
@@ -174,12 +177,26 @@ export class Golden3ChapterAgent extends BaseAgent {
     const ch2 = input.chapter2Content ?? "";
     const ch3 = input.chapter3Content ?? "";
 
-    // Require all three chapters; any missing → skip to avoid misjudging incomplete input
-    if (!ch1.trim() || !ch2.trim() || !ch3.trim()) {
-      const missing = [];
-      if (!ch1.trim()) missing.push("第1章");
-      if (!ch2.trim()) missing.push("第2章");
-      if (!ch3.trim()) missing.push("第3章");
+    const exists1 = input.chapter1Exists ?? { draft: Boolean(ch1.trim()), final: Boolean(ch1.trim()) };
+    const exists2 = input.chapter2Exists ?? { draft: Boolean(ch2.trim()), final: Boolean(ch2.trim()) };
+    const exists3 = input.chapter3Exists ?? { draft: Boolean(ch3.trim()), final: Boolean(ch3.trim()) };
+
+    const hasCh1 = exists1.final || exists1.draft;
+    const hasCh2 = exists2.final || exists2.draft;
+    const hasCh3 = exists3.final || exists3.draft;
+
+    if (!hasCh1 || !hasCh2 || !hasCh3 || (hasCh1 && !exists1.final) || (hasCh2 && !exists2.final) || (hasCh3 && !exists3.final)) {
+      const missing: string[] = [];
+      const checkMissing = (num: number, exists: { draft: boolean; final: boolean }) => {
+        if (!exists.draft && !exists.final) {
+          missing.push(`第${num}章`);
+        } else if (exists.draft && !exists.final) {
+          missing.push(`第${num}章 draft exists but final missing`);
+        }
+      };
+      checkMissing(1, exists1);
+      checkMissing(2, exists2);
+      checkMissing(3, exists3);
       return buildSkippedGolden3ChapterReport(input, `前三章未齐全（缺失：${missing.join("、")}），无法执行完整开篇审核。`);
     }
 

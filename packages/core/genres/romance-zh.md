@@ -1,16 +1,100 @@
 ---
 name: 言情/甜宠
 id: romance-zh
-chapterTypes: ["互动章", "冲突章", "糖点章", "过渡章", "回收章"]
-fatigueWords: ["冷笑", "不可置信", "仿佛", "不禁", "宛如", "竟然", "心中一紧", "心漏跳一拍", "眸色一暗", "喉结滚动"]
+chapterTypes:
+  - 互动章
+  - 冲突章
+  - 糖点章
+  - 过渡章
+  - 回收章
+fatigueWords:
+  - 冷笑
+  - 不可置信
+  - 仿佛
+  - 不禁
+  - 宛如
+  - 竟然
+  - 心中一紧
+  - 心漏跳一拍
+  - 眸色一暗
+  - 喉结滚动
 numericalSystem: false
 powerScaling: false
 eraResearch: false
-pacingRule: "每2-3章一个甜蜜互动或关系推进节点，冲突与甜蜜交替不能连续5章只有拉扯"
-satisfactionTypes: ["甜蜜互动", "心意确认", "吃醋反击", "误会解开", "关系升级", "公开表白"]
-auditDimensions: [1,2,3,6,7,8,9,10,13,14,15,16,17,18,19,24,25,26]
+pacingRule: 每2-3章一个甜蜜互动或关系推进节点，冲突与甜蜜交替不能连续5章只有拉扯
+satisfactionTypes:
+  - 甜蜜互动
+  - 心意确认
+  - 吃醋反击
+  - 误会解开
+  - 关系升级
+  - 公开表白
+auditDimensions:
+  - 1
+  - 2
+  - 3
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 24
+  - 25
+  - 26
+concretePayoffObjects:
+  - 存折
+  - 集资款
+  - 店铺钥匙
+  - 合同
+  - 营业执照
+  - 账本
+  - 批条
+  - 启动资金
+  - 本钱
+  - 车票
+  - 线索
+  - 证据
+  - 文件
+  - 装备
+  - 道具
+styleGovernance:
+  allowedStyleExamples:
+    - 元
+    - 分
+    - 个
+    - 月
+    - 年
+    - 折
+  forbiddenProseKeywords:
+    - 气血
+    - 境界
+    - 面板
+    - 金手指
+    - 升级
+structuralSignals:
+  defaultPayoffActions:
+    - 拿到
+    - 保住
+    - 夺回
+    - 签署
+    - 避开
+    - 买下
+    - 拦下
+    - 激活
+  lowStatusKeywords:
+    - 下岗
+    - 贫困
+    - 负债
+    - 被裁员
+    - 新手
 ---
-
 ## 题材禁忌
 
 - 没有铺垫的喜欢——读者必须理解角色为什么在乎对方

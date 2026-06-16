@@ -363,7 +363,8 @@ function selectRelevantHooks(
 
   const primary = ranked
     .filter((entry: { hook: StoredHook; score: number; matched: boolean }) =>
-      entry.matched || isHookWithinChapterWindow(entry.hook, chapterNumber, 5),
+      (entry.matched || isHookWithinChapterWindow(entry.hook, chapterNumber, 5))
+      && (!isFuturePlannedHook(entry.hook, chapterNumber) || isHookWithinChapterWindow(entry.hook, chapterNumber, 5)),
     )
     .sort((left, right) => right.score - left.score || right.hook.lastAdvancedChapter - left.hook.lastAdvancedChapter)
     .slice(0, 6);

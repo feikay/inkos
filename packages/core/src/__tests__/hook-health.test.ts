@@ -163,4 +163,22 @@ describe("analyzeHookHealth", () => {
 
     expect(issues.some((issue) => issue.description.includes("Opened 2 new hooks"))).toBe(false);
   });
+
+  it("does not count future hooks or structural hooks as active hooks", () => {
+    const issues = analyzeHookHealth({
+      language: "en",
+      chapterNumber: 20,
+      hooks: [
+        createHook({ hookId: "normal-active", startChapter: 10 }),
+        createHook({ hookId: "future-hook", startChapter: 25 }), // future hook (startChapter > 20)
+        createHook({ hookId: "system-secret-trap", startChapter: 5 }), // structural hook
+      ],
+      maxActiveHooks: 1, // recommended cap is 1
+    });
+
+    // Recommended cap is 1. Under normal logic, 3 hooks would exceed it and trigger warning.
+    // However, with filtering, only "normal-active" is counted, so active count is 1.
+    // Therefore, no warning should be triggered.
+    expect(issues.some((issue) => issue.description.includes("active hooks"))).toBe(false);
+  });
 });

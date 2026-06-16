@@ -3,6 +3,7 @@ import type { AuditIssue } from "./continuity.js";
 import type { LLMResponse } from "../llm/provider.js";
 import { countChapterLength } from "../utils/length-metrics.js";
 import type { ChapterResourcePlanMode, PlannedResourceEvent } from "./resource-plan.js";
+import type { GenreProfile } from "../models/genre-profile.js";
 
 export type ResourceEventKind = "gain" | "consume" | "balance" | "balance_jump" | "unlock";
 export type ResourceConsistencyStatus = "PASS" | "FIXED" | "WARN" | "FAILED";
@@ -350,7 +351,21 @@ export class ResourceBlockingRewriterAgent extends BaseAgent {
   }
 }
 
-export function parseResourceRules(bookRules = "", currentLedger = "", currentState = ""): ResourceRules {
+export function parseResourceRules(
+  bookRules = "",
+  currentLedger = "",
+  currentState = "",
+  genreProfile?: GenreProfile,
+): ResourceRules {
+  const defaultTypes = genreProfile?.resourceSystem?.defaultTypes ?? DEFAULT_RESOURCE_TYPES;
+  const resourceAliases = {
+    ...RESOURCE_ALIASES,
+    ...(genreProfile?.resourceSystem?.aliases ?? {}),
+  };
+  const canonicalWhitelist = new Set<string>([
+    ...defaultTypes.map((resource) => resourceAliases[resource] ?? resource),
+  ]);
+
   const resources = new Map<string, ResourceRule>();
   const aliases: Record<string, string> = {};
   const addResource = (name: string, options: {
@@ -362,7 +377,7 @@ export function parseResourceRules(bookRules = "", currentLedger = "", currentSt
     creditLimit?: number;
     aliases?: ReadonlyArray<string>;
   } = {}) => {
-    const canonical = normalizeResourceName(name);
+    const canonical = normalizeResourceName(name, resourceAliases);
     if (!isAllowedResource(canonical) && !declaredResourceNames.has(canonical)) return;
     const existing = resources.get(canonical);
     const allowNegative = options.allowNegative ?? existing?.allowNegative ?? false;
@@ -387,8 +402,12 @@ export function parseResourceRules(bookRules = "", currentLedger = "", currentSt
     });
     for (const alias of mergedAliases) {
       aliases[alias] = canonical;
-      aliases[normalizeResourceName(alias)] = canonical;
+      aliases[normalizeResourceName(alias, resourceAliases)] = canonical;
     }
+  };
+
+  const isAllowedResource = (resource: string) => {
+    return canonicalWhitelist.has(resource);
   };
 
   // Extract explicitly declared resource types from book_rules first.
@@ -442,18 +461,18 @@ export function parseResourceRules(bookRules = "", currentLedger = "", currentSt
   // silently dropped by isAllowedResource / CANONICAL_RESOURCE_WHITELIST.
   const declaredResourceNames = new Set<string>();
   for (const name of declaredTypes) {
-    declaredResourceNames.add(normalizeResourceName(name));
+    declaredResourceNames.add(normalizeResourceName(name, resourceAliases));
   }
 
   const hasExplicitDeclaration = declaredTypes.size > 0;
   // Only inject defaults that match the book's declared resourceTypes;
   // if no resourceTypes declared, fall back to all defaults (backward compatible)
-  for (const resource of DEFAULT_RESOURCE_TYPES) {
+  for (const resource of defaultTypes) {
     if (!hasExplicitDeclaration || declaredTypes.has(resource)) {
       addResource(resource);
     }
   }
-  for (const [alias, canonical] of Object.entries(RESOURCE_ALIASES)) {
+  for (const [alias, canonical] of Object.entries(resourceAliases)) {
     if (!hasExplicitDeclaration || declaredTypes.has(canonical) || declaredTypes.has(alias)) {
       addResource(canonical, { aliases: [alias] });
     }
@@ -462,7 +481,7 @@ export function parseResourceRules(bookRules = "", currentLedger = "", currentSt
   // Add declared types that aren't in DEFAULT_RESOURCE_TYPES (any format)
   if (hasExplicitDeclaration) {
     for (const type of declaredTypes) {
-      if (!DEFAULT_RESOURCE_TYPES.includes(type as typeof DEFAULT_RESOURCE_TYPES[number])) {
+      if (!defaultTypes.includes(type as any)) {
         addResource(type);
       }
     }
@@ -475,7 +494,7 @@ export function parseResourceRules(bookRules = "", currentLedger = "", currentSt
 
   const resourcesBlock = bookRules.match(/resources\s*:\s*\n([\s\S]*?)(?:\n\S|$)/iu)?.[1] ?? "";
   for (const match of resourcesBlock.matchAll(/^\s{2}([^:\n]+):\s*$/gmu)) {
-    const name = normalizeResourceName(match[1] ?? "");
+    const name = normalizeResourceName(match[1] ?? "", resourceAliases);
     if (!isAllowedResource(name) && !declaredResourceNames.has(name)) continue;
     const start = (match.index ?? 0) + match[0].length;
     const next = resourcesBlock.slice(start).search(/^\s{2}[^:\n]+:\s*$/mu);
@@ -528,46 +547,54 @@ export function extractResourceEvents(
   chapterText: string,
   bookRules = "",
   currentLedger = "",
+  genreProfile?: GenreProfile,
 ): ResourceEvent[] {
-  const rules = parseResourceRules(bookRules, currentLedger);
+  const rules = parseResourceRules(bookRules, currentLedger, "", genreProfile);
   const resourceTypes = Object.keys(rules.resources);
-  const resourcePattern = buildResourcePattern(resourceTypes);
+  const resourcePattern = buildResourcePattern(resourceTypes, rules.aliases);
   const events: ResourceEvent[] = [];
+
+  const reputationResource = findReputationResource(resourceTypes, rules.aliases) ?? "民望值";
+  const currencyResource = findCurrencyResource(resourceTypes, rules.aliases) ?? "联邦币";
+  const repAliases = resourceAliasesFor(reputationResource, rules.aliases);
+  const repPattern = repAliases.map(escapeRegExp).join("|");
+  const currAliases = resourceAliasesFor(currencyResource, rules.aliases);
+  const currPattern = currAliases.map(escapeRegExp).join("|");
 
   collectRegexEvents(chapterText, new RegExp(`(?:获得了?|得到了?|取得了?|增加了?|新增|到账)\\s*(${NUMBER_SOURCE})\\s*(?:点|枚|个|块|元)?\\s*(${resourcePattern})`, "giu"), (match) => ({
     kind: "gain",
     amount: parseFlexibleNumber(match[1] ?? ""),
-    resource: normalizeResourceName(match[2] ?? ""),
+    resource: normalizeResourceName(match[2] ?? "", rules.aliases),
   }), events);
 
   collectRegexEvents(chapterText, new RegExp(`(${resourcePattern})\\s*[+＋]\\s*(${NUMBER_SOURCE})`, "giu"), (match) => ({
     kind: "gain",
     amount: parseFlexibleNumber(match[2] ?? ""),
-    resource: normalizeResourceName(match[1] ?? ""),
+    resource: normalizeResourceName(match[1] ?? "", rules.aliases),
   }), events);
 
   collectRegexEvents(chapterText, new RegExp(`(?:消耗了?|扣除了?|花费了?|支付了?|赔偿|用掉|耗去)\\s*(${NUMBER_SOURCE})\\s*(?:点|枚|个|块|元)?\\s*(${resourcePattern})`, "giu"), (match) => ({
     kind: "consume",
     amount: parseFlexibleNumber(match[1] ?? ""),
-    resource: normalizeResourceName(match[2] ?? ""),
+    resource: normalizeResourceName(match[2] ?? "", rules.aliases),
   }), events);
 
   collectRegexEvents(chapterText, new RegExp(`(?:消耗了?|扣除了?|花费了?|支付了?|赔偿|用掉|耗去)\\s*(${resourcePattern})\\s*(${NUMBER_SOURCE})\\s*(?:点|枚|个|块|元)?`, "giu"), (match) => ({
     kind: "consume",
     amount: parseFlexibleNumber(match[2] ?? ""),
-    resource: normalizeResourceName(match[1] ?? ""),
+    resource: normalizeResourceName(match[1] ?? "", rules.aliases),
   }), events);
 
-  collectRegexEvents(chapterText, new RegExp(`(?:赔偿|支付|花费)[^，。！？\\n]{0,12}?(${NUMBER_SOURCE})\\s*(?:元)?\\s*(联邦币|现金)`, "giu"), (match) => ({
+  collectRegexEvents(chapterText, new RegExp(`(?:赔偿|支付|花费)[^，。！？\\n]{0,12}?(${NUMBER_SOURCE})\\s*(?:元)?\\s*(${currPattern})`, "giu"), (match) => ({
     kind: "consume",
     amount: parseFlexibleNumber(match[1] ?? ""),
-    resource: normalizeResourceName(match[2] ?? ""),
+    resource: normalizeResourceName(match[2] ?? "", rules.aliases),
   }), events);
 
   collectRegexEvents(chapterText, new RegExp(`(${resourcePattern})\\s*[-－]\\s*(${NUMBER_SOURCE})`, "giu"), (match) => ({
     kind: "consume",
     amount: parseFlexibleNumber(match[2] ?? ""),
-    resource: normalizeResourceName(match[1] ?? ""),
+    resource: normalizeResourceName(match[1] ?? "", rules.aliases),
   }), events);
 
   // Generic exchange-implied consume: "用/把/将 N点RESOURCE (全)换了/换成/兑换成/换取 TARGET"
@@ -575,51 +602,51 @@ export function extractResourceEvents(
   collectRegexEvents(chapterText, new RegExp(`(?:用|把|将|消耗了?|扣除了?|花费了?)\\s*(${NUMBER_SOURCE})\\s*(?:点|枚|个|块)?\\s*(${resourcePattern})\\s*(?:全|全部|都|全都)?\\s*(?:换了|换成|兑换成|兑换了|换取|换成了|换取了)`, "giu"), (match) => ({
     kind: "consume",
     amount: parseFlexibleNumber(match[1] ?? ""),
-    resource: normalizeResourceName(match[2] ?? ""),
+    resource: normalizeResourceName(match[2] ?? "", rules.aliases),
   }), events);
 
   // "N点RESOURCE被兑换/换成X"
   collectRegexEvents(chapterText, new RegExp(`(${NUMBER_SOURCE})\\s*(?:点|枚|个|块)?\\s*(${resourcePattern})\\s*被\\s*(?:兑换了?|换成|换了)`, "giu"), (match) => ({
     kind: "consume",
     amount: parseFlexibleNumber(match[1] ?? ""),
-    resource: normalizeResourceName(match[2] ?? ""),
+    resource: normalizeResourceName(match[2] ?? "", rules.aliases),
   }), events);
 
-  collectRegexEvents(chapterText, new RegExp(`(?:消耗了?|扣除了?|花费了?|支付了?)?\\s*(${NUMBER_SOURCE})\\s*(?:点)?\\s*(民望值|民望)\\s*(?:兑换了?|换成|换取)\\s*(${NUMBER_SOURCE})\\s*(?:元)?\\s*(联邦币|现金)`, "giu"), (match) => ({
+  collectRegexEvents(chapterText, new RegExp(`(?:消耗了?|扣除了?|花费了?|支付了?)?\\s*(${NUMBER_SOURCE})\\s*(?:点)?\\s*(${repPattern})\\s*(?:兑换了?|换成|换取)\\s*(${NUMBER_SOURCE})\\s*(?:元)?\\s*(${currPattern})`, "giu"), (match) => ({
     kind: "consume",
     amount: parseFlexibleNumber(match[1] ?? ""),
-    resource: normalizeResourceName(match[2] ?? ""),
-    targetResource: normalizeResourceName(match[4] ?? ""),
+    resource: normalizeResourceName(match[2] ?? "", rules.aliases),
+    targetResource: normalizeResourceName(match[4] ?? "", rules.aliases),
   }), events);
 
-  collectRegexEvents(chapterText, new RegExp(`(?:消耗了?|扣除了?|花费了?|支付了?)?\\s*(${NUMBER_SOURCE})\\s*(?:点)?\\s*(民望值|民望)\\s*(?:兑换了?|换成|换取)\\s*(${NUMBER_SOURCE})\\s*(?:元)?\\s*(联邦币|现金)`, "giu"), (match) => ({
+  collectRegexEvents(chapterText, new RegExp(`(?:消耗了?|扣除了?|花费了?|支付了?)?\\s*(${NUMBER_SOURCE})\\s*(?:点)?\\s*(${repPattern})\\s*(?:兑换了?|换成|换取)\\s*(${NUMBER_SOURCE})\\s*(?:元)?\\s*(${currPattern})`, "giu"), (match) => ({
     kind: "gain",
     amount: parseFlexibleNumber(match[3] ?? ""),
-    resource: normalizeResourceName(match[4] ?? ""),
-    targetResource: normalizeResourceName(match[2] ?? ""),
+    resource: normalizeResourceName(match[4] ?? "", rules.aliases),
+    targetResource: normalizeResourceName(match[2] ?? "", rules.aliases),
   }), events);
 
-  collectRegexEvents(chapterText, new RegExp(`(?:兑换了?|换成|换取)\\s*(${NUMBER_SOURCE})\\s*(?:元)?\\s*(联邦币|现金)`, "giu"), (match) => ({
+  collectRegexEvents(chapterText, new RegExp(`(?:兑换了?|换成|换取)\\s*(${NUMBER_SOURCE})\\s*(?:元)?\\s*(${currPattern})`, "giu"), (match) => ({
     kind: "gain",
     amount: parseFlexibleNumber(match[1] ?? ""),
-    resource: normalizeResourceName(match[2] ?? ""),
-    targetResource: "民望值",
+    resource: normalizeResourceName(match[2] ?? "", rules.aliases),
+    targetResource: reputationResource,
   }), events);
 
   collectRegexEvents(chapterText, new RegExp(`(?:当前|现在|此刻)?\\s*(${resourcePattern})\\s*(?:值|余额)?(?:[：:=]|为|是|剩余|余|回到|变成|跳成|来到)?\\s*(${NUMBER_SOURCE})`, "giu"), (match) => ({
     kind: "balance",
     amount: parseFlexibleNumber(match[2] ?? ""),
-    resource: normalizeResourceName(match[1] ?? ""),
+    resource: normalizeResourceName(match[1] ?? "", rules.aliases),
   }), events);
 
   collectRegexEvents(chapterText, new RegExp(`(?:当前|现在|此刻)?\\s*(${resourcePattern})\\s*(?:值|余额)?\\s*[：:=为是]\\s*[-－]\\s*(${NUMBER_SOURCE})`, "giu"), (match) => ({
     kind: "balance",
     amount: -parseFlexibleNumber(match[2] ?? ""),
-    resource: normalizeResourceName(match[1] ?? ""),
+    resource: normalizeResourceName(match[1] ?? "", rules.aliases),
   }), events);
 
-  collectBalanceJumpEvents(chapterText, resourceTypes, events);
-  collectSentenceBalanceEvents(chapterText, resourceTypes, events);
+  collectBalanceJumpEvents(chapterText, resourceTypes, events, rules.aliases);
+  collectSentenceBalanceEvents(chapterText, resourceTypes, events, rules.aliases);
 
   collectRegexEvents(chapterText, /(?:兑换了?|解锁了?|激活了?|获得了?|掌握了?)\s*([^，。！？；;、:\n：]{1,12}(?:技能)?)/giu, (match) => ({
     kind: "unlock",
@@ -650,8 +677,9 @@ export function validateResourceMath(params: {
   readonly chapterIntent?: string;
   readonly rules?: ResourceRules;
   readonly chapterText?: string;
+  readonly genreProfile?: GenreProfile;
 }): ResourceValidationResult {
-  const rules = params.rules ?? parseResourceRules(params.bookRules ?? "", params.currentLedger ?? "", params.currentState ?? "");
+  const rules = params.rules ?? parseResourceRules(params.bookRules ?? "", params.currentLedger ?? "", params.currentState ?? "", params.genreProfile);
   const sourceText = `${params.currentLedger ?? ""}\n${params.currentState ?? ""}`;
   const openingBalances = parseOpeningBalancesWithRules(sourceText, rules);
   const balances: Record<string, number> = { ...openingBalances };
@@ -810,11 +838,13 @@ export function computeResourceLedger(params: {
   readonly chapterNumber: number;
   readonly bookRules?: string;
   readonly chapterIntent?: string;
+  readonly genreProfile?: GenreProfile;
 }): ResourceValidationResult {
   const rules = params.rules ?? parseResourceRules(
     params.bookRules ?? "",
     params.previousLedger ?? "",
     params.currentState ?? "",
+    params.genreProfile,
   );
   return validateResourceMath({
     events: params.events.map((event) => ({ ...event, chapter: event.chapter ?? params.chapterNumber })),
@@ -823,6 +853,7 @@ export function computeResourceLedger(params: {
     bookRules: params.bookRules,
     chapterIntent: params.chapterIntent,
     rules,
+    genreProfile: params.genreProfile,
   });
 }
 
@@ -872,7 +903,21 @@ export function classifyClosureStatus(params: {
 export function buildResourceRecoveryPlans(params: {
   readonly validation: ResourceValidationResult;
   readonly chapterIntent?: string;
+  readonly genreProfile?: GenreProfile;
 }): ResourceRecoveryPlan[] {
+  const hasTemplate = Boolean(
+    params.genreProfile?.recoveryTemplates?.deferExchangeText
+    || params.genreProfile?.recoveryTemplates?.deferExchangeConstraints?.length,
+  );
+  if (
+    params.genreProfile
+    && !params.genreProfile.numericalSystem
+    && !hasTemplate
+    && !supportsLegacyDeferExchangeRecovery(params.validation.rules)
+  ) {
+    return [];
+  }
+
   const commonForbidden = [
     "可透支",
     "透支兑换",
@@ -948,21 +993,20 @@ export function buildResourceRecoveryPlans(params: {
       技能: "初级辩论技能",
     },
   };
+
+  const deferExchangeConstraints = params.genreProfile?.recoveryTemplates?.deferExchangeConstraints ?? [
+    "本章不进行主要的货币或点数兑换，保留现有余额或延后兑换。",
+    "本章不出现大额金钱或关键物资到账或余额激增的文字描写。",
+    "相关的资源余额变化必须符合逻辑。",
+    "当前资源数值必须非负。"
+  ];
+
   const planA: ResourceRecoveryPlan = {
     planId: "defer_exchange",
     title: "延后现金兑换",
     strategy: "defer_exchange",
     description: "删除本章现金兑换，让民望先服务于技能解锁和打脸，现金兑换留到下一章。",
-    constraints: [
-      "扶老太太获得 +10 民望。",
-      "消耗 10 民望兑换初级辩论技能。",
-      "当前民望归零。",
-      "用初级辩论技能反击汤姆。",
-      "围观路人认可林默，新增民望 +100 或余额跳到100/110。",
-      "本章不兑换任何联邦币或现金，本章不出现任何到账/入账/银行余额增加。",
-      "本章不解决透析费/房租，只保留下一章可兑换现金的希望。",
-      "当前民望必须非负。",
-    ],
+    constraints: deferExchangeConstraints,
     requiredEvents: [
       { kind: "gain", resource: "民望值", amount: 10, evidence: "恢复方案：扶老太太 +10 民望", index: 0 },
       { kind: "consume", resource: "民望值", amount: 10, evidence: "恢复方案：兑换初级辩论技能 -10 民望", index: 1 },
@@ -985,8 +1029,9 @@ export function buildResourceRecoveryPlans(params: {
 export function selectResourceRecoveryPlan(params: {
   readonly validation: ResourceValidationResult;
   readonly chapterIntent?: string;
-}): ResourceRecoveryPlan {
-  return buildResourceRecoveryPlans(params)[0]!;
+  readonly genreProfile?: GenreProfile;
+}): ResourceRecoveryPlan | undefined {
+  return buildResourceRecoveryPlans(params)[0];
 }
 
 export function hasForbiddenResourceRecoveryPhrase(content: string, plan?: ResourceRecoveryPlan): boolean {
@@ -996,6 +1041,19 @@ export function hasForbiddenResourceRecoveryPhrase(content: string, plan?: Resou
     || (plan?.strategy === "defer_exchange" && hasDeferExchangeCashFlow(content))
     || /当前民望值?\s*[：:=为是]?\s*[-－]\s*\d+/u.test(content)
     || UNAUTHORIZED_RESOURCE_RULE_PATTERN.test(content);
+}
+
+function supportsLegacyDeferExchangeRecovery(rules: ResourceRules): boolean {
+  const resources = Object.keys(rules.resources);
+  const reputation = findReputationResource(resources, rules.aliases);
+  const currency = findCurrencyResource(resources, rules.aliases);
+  return Boolean(
+    reputation
+    && currency
+    && (rules.exchangeRates.length > 0 || rules.skills.length > 0)
+    && (reputation === "民望值" || reputation === "民望")
+    && (currency === "联邦币" || currency === "现金")
+  );
 }
 
 function hasDeferExchangeCashFlow(content: string): boolean {
@@ -1011,6 +1069,7 @@ export function applyDeferExchangeTemplatePatch(params: {
   readonly bookRules?: string;
   readonly currentLedger?: string;
   readonly currentState?: string;
+  readonly genreProfile?: GenreProfile;
 }): DeferExchangeTemplatePatchResult {
   const units = splitPatchUnits(params.chapterText);
   const kept: string[] = [];
@@ -1043,49 +1102,57 @@ export function applyDeferExchangeTemplatePatch(params: {
     return false;
   });
   const baseText = keptWithoutStaleBalanceClaims.join(keptWithoutStaleBalanceClaims.some((unit) => unit.includes("\n")) ? "\n\n" : "");
-  const skillAlreadyPresent = extractResourceEvents(baseText, params.bookRules ?? "", params.currentLedger ?? "")
+  const skillAlreadyPresent = extractResourceEvents(baseText, params.bookRules ?? "", params.currentLedger ?? "", params.genreProfile)
     .some((event) => event.kind === "unlock" && event.label === "初级辩论技能");
   const skillLine = skillAlreadyPresent
     ? ""
     : "系统扣除10点民望，初级辩论技能已激活。";
   const textBeforeGain = [baseText.trim(), skillLine].filter(Boolean).join("\n\n");
   const interimValidation = validateResourceMath({
-    events: extractResourceEvents(textBeforeGain, params.bookRules ?? "", params.currentLedger ?? ""),
+    events: extractResourceEvents(textBeforeGain, params.bookRules ?? "", params.currentLedger ?? "", params.genreProfile),
     currentLedger: params.currentLedger,
     currentState: params.currentState,
     bookRules: params.bookRules,
     chapterText: textBeforeGain,
+    genreProfile: params.genreProfile,
   });
-  const currentReputation = interimValidation.closingBalances["民望值"] ?? 0;
-  const explicitReputation = findExplicitReputationBalance(baseText);
+  const repResource = findReputationResource(Object.keys(interimValidation.rules.resources), interimValidation.rules.aliases) ?? "民望值";
+  const currentReputation = interimValidation.closingBalances[repResource] ?? 0;
+  const explicitReputation = findExplicitReputationBalance(baseText, interimValidation.rules);
   const reputationAfter = Math.max(0, explicitReputation ?? (currentReputation > 0 ? currentReputation : 100));
   const gainDelta = Math.max(0, reputationAfter - currentReputation);
   const gainLine = gainDelta > 0
     ? `围观路人认可他的做法，系统新增${gainDelta}点民望。`
     : "";
+
+  const recoveryTemplates = params.genreProfile?.recoveryTemplates;
+  const insertedTemplateRaw = recoveryTemplates?.deferExchangeText ?? [
+    "面板上的数字稳定下来。",
+    `当前${repResource}：{reputationAfter}。`,
+
+    "",
+    "看着已经更新的数值，他停下了操作，没有急于进行下一步的大额兑换。",
+    "",
+    "在当前的环境下，有些缺口和压力依然存在，但这微小的积累已经让他看到了破局的希望。",
+    "",
+    "只要继续按照计划走下去，一切终究会好起来。",
+    "",
+    "他平复了呼吸，目光望向远处，第一次觉得在这个充满未知的世界里，自己多了一份底气。"
+  ].join("\n");
+
   const insertedTemplate = [
-    skillLine,
     gainLine,
-    "系统面板上的数字终于稳定下来。",
-    `当前民望值：${reputationAfter}。`,
-    "",
-    "林默的指尖停在“兑换合法资源”的按钮前，停了很久，却没有立刻按下去。",
-    "",
-    "外婆的透析费还差两千七，下个月房租还差八百，这些数字仍像石头一样压在胸口。可这一次，他没有再像刚才那样被逼到绝路。",
-    "",
-    "至少他已经知道，民望是真的，系统是真的。",
-    "",
-    "只要继续得到民众真实认可，这些民望迟早能换成真正能救命的钱。",
-    "",
-    "他把手机重新塞回口袋，掌心按住那枚旧铜勋章，第一次觉得，自己脚下那条被人堵死的路，好像裂开了一道缝。",
-  ].filter((line, index, lines) => line !== "" || lines[index - 1] !== "").join("\n");
+    insertedTemplateRaw.replace(/{reputationAfter}/g, String(reputationAfter))
+  ].filter(Boolean).join("\n\n");
+
   const patchedBeforeBalanceSync = [baseText.trim(), insertedTemplate.trim()].filter(Boolean).join("\n\n");
   const patchedValidation = validateResourceMath({
-    events: extractResourceEvents(patchedBeforeBalanceSync, params.bookRules ?? "", params.currentLedger ?? ""),
+    events: extractResourceEvents(patchedBeforeBalanceSync, params.bookRules ?? "", params.currentLedger ?? "", params.genreProfile),
     currentLedger: params.currentLedger,
     currentState: params.currentState,
     bookRules: params.bookRules,
     chapterText: patchedBeforeBalanceSync,
+    genreProfile: params.genreProfile,
   });
   const balancePatch = syncBalanceClaimsWithLedger(patchedBeforeBalanceSync, patchedValidation);
   const staleBalance = staleBalanceClaims.at(-1);
@@ -1252,11 +1319,12 @@ function hasIndirectDeferExchangeCashFlow(content: string): boolean {
     || new RegExp(`(?:还差|透析费还差)${reducedGap}`, "u").test(content);
 }
 
-function findExplicitReputationBalance(text: string): number | undefined {
+function findExplicitReputationBalance(text: string, rules?: ResourceRules): number | undefined {
+  const repResource = rules ? (findReputationResource(Object.keys(rules.resources), rules.aliases) ?? "民望值") : "民望值";
   const events = extractResourceEvents(text);
   const balances = events.filter((event) =>
     (event.kind === "balance" || event.kind === "balance_jump")
-    && event.resource === "民望值"
+    && event.resource === repResource
     && event.amount !== undefined
     && event.amount >= 0);
   return balances.at(-1)?.amount;
@@ -1264,8 +1332,10 @@ function findExplicitReputationBalance(text: string): number | undefined {
 
 export function repairResourceInconsistencies(
   chapterText: string,
-  validation: Pick<ResourceValidationResult, "issues">,
+  validation: Pick<ResourceValidationResult, "issues" | "rules">,
 ): ResourceRepairResult {
+  const rules = (validation as any).rules;
+  const repResource = rules ? (findReputationResource(Object.keys(rules.resources), rules.aliases) ?? "民望值") : "民望值";
   let content = chapterText;
   const repaired: ResourceMathIssue[] = [];
   const unresolved: ResourceMathIssue[] = [];
@@ -1277,10 +1347,10 @@ export function repairResourceInconsistencies(
       continue;
     }
     const before = content;
-    if (issue.resource === "民望值" && issue.code === "balance-mismatch") {
-      content = repairReputationBalance(content, issue.actual, issue.expected);
+    if (issue.resource === repResource && issue.code === "balance-mismatch") {
+      content = repairReputationBalance(content, issue.actual, issue.expected, rules);
     } else if (issue.code === "exchange-rate-mismatch" || issue.code === "exchange-ratio-mismatch") {
-      content = repairExchangeAmount(content, issue);
+      content = repairExchangeAmount(content, issue, rules);
     } else {
       content = replaceFirstResourceNumber(content, issue);
     }
@@ -1542,8 +1612,8 @@ function deriveResourceTypes(bookRules: string, combined: string): string[] {
   return Object.keys(rules.resources).sort((left, right) => right.length - left.length);
 }
 
-function buildResourcePattern(resourceTypes: ReadonlyArray<string>): string {
-  const aliases = new Set<string>([...resourceTypes, ...Object.keys(RESOURCE_ALIASES)]);
+function buildResourcePattern(resourceTypes: ReadonlyArray<string>, aliasesMap?: Record<string, string>): string {
+  const aliases = new Set<string>([...resourceTypes, ...Object.keys(aliasesMap ?? RESOURCE_ALIASES)]);
   return [...aliases]
     .sort((left, right) => right.length - left.length)
     .map(escapeRegExp)
@@ -1571,7 +1641,7 @@ function parseExchangeRatesFromText(
     rates.push({ from, to, rate, rule, source });
   };
 
-  for (const match of text.matchAll(new RegExp(`1\\s*点?\\s*(${buildResourcePattern(Object.keys(RESOURCE_ALIASES))})\\s*(?:=|可兑换|兑换|换成)\\s*(${NUMBER_SOURCE})\\s*(?:元)?\\s*(${buildResourcePattern(Object.keys(RESOURCE_ALIASES))})`, "giu"))) {
+  for (const match of text.matchAll(new RegExp(`1\\s*点?\\s*(${buildResourcePattern(Object.keys(effectiveRules.resources), effectiveRules.aliases)})\\s*(?:=|可兑换|兑换|换成)\\s*(${NUMBER_SOURCE})\\s*(?:元)?\\s*(${buildResourcePattern(Object.keys(effectiveRules.resources), effectiveRules.aliases)})`, "giu"))) {
     add(match[1] ?? "", match[3] ?? "", parseFlexibleNumber(match[2] ?? ""), match[0] ?? "");
   }
 
@@ -1601,7 +1671,7 @@ function parseSkillRules(bookRules: string, aliases: Readonly<Record<string, str
     skills.push({ skill, resource, amount });
   };
 
-  for (const match of bookRules.matchAll(new RegExp(`([^\\n，。！？]{1,20}?技能)\\s*(?:消耗|花费|需要)\\s*(${NUMBER_SOURCE})\\s*点?\\s*(${buildResourcePattern(Object.keys(RESOURCE_ALIASES))})`, "giu"))) {
+  for (const match of bookRules.matchAll(new RegExp(`([^\\n，。！？]{1,20}?技能)\\s*(?:消耗|花费|需要)\\s*(${NUMBER_SOURCE})\\s*点?\\s*(${buildResourcePattern(Object.keys(effectiveRules.resources), effectiveRules.aliases)})`, "giu"))) {
     add(match[1] ?? "", match[3] ?? "", parseFlexibleNumber(match[2] ?? ""));
   }
 
@@ -1998,8 +2068,8 @@ function buildExchangeRateIssue(params: {
   };
 }
 
-function resourceAliasesFor(resource: string): string[] {
-  const aliases = Object.entries(RESOURCE_ALIASES)
+function resourceAliasesFor(resource: string, aliasesMap?: Record<string, string>): string[] {
+  const aliases = Object.entries(aliasesMap ?? RESOURCE_ALIASES)
     .filter(([, canonical]) => canonical === resource)
     .map(([alias]) => alias);
   return [...new Set([resource, ...aliases])];
@@ -2062,14 +2132,219 @@ function collectRegexEvents(
   }
 }
 
-function collectBalanceJumpEvents(text: string, resourceTypes: ReadonlyArray<string>, events: ResourceEvent[]): void {
+
+function findCurrencyResource(resourceTypes: ReadonlyArray<string>, aliases: Record<string, string>): string | undefined {
+  const currencyTerms = ["联邦币", "资金", "现金", "金币", "银两", "灵石", "钱"];
+  for (const term of currencyTerms) {
+    if (resourceTypes.includes(term)) return term;
+    if (aliases[term]) return aliases[term];
+  }
+  return undefined;
+}
+
+function findReputationResource(resourceTypes: ReadonlyArray<string>, aliases: Record<string, string>): string | undefined {
+  const reputationTerms = ["民望值", "民望", "声望", "名声", "威望", "信仰值", "震惊值", "怨气值", "好感度"];
+  for (const term of reputationTerms) {
+    if (resourceTypes.includes(term)) return term;
+    if (aliases[term]) return aliases[term];
+  }
+  return undefined;
+}
+
+const NARRATIVE_FINANCIAL_PATTERNS = [
+  /价格|单价|总价|订单金额|消费金额|打车费|外卖费|快递费|运费|房租|水电费|物业费|餐费|路费|油费|过路费/,
+  /花了.{0,4}元|付了.{0,4}元|转账|汇款|工资|薪水|奖金.{0,4}元|报销|找零|零钱|找.{0,4}元/,
+  /收银|买单|结账|AA制|分摊|凑钱|垫付|预付款|订金|押金|退款|到付/,
+  /购买|买了|卖(?:了|出|给)|售价|成交价|市场价|成本|亏了|赚了.{0,4}元/,
+  /\d+元[以之]?内|\d+块[以之]?内|\d+块钱|\d+毛钱|\d+分钱/,
+];
+
+function isNarrativeFinancialContext(
+  textWindow: string,
+  resourceTypes: ReadonlyArray<string> = [],
+  aliasesMap?: Record<string, string>,
+): boolean {
+  const hasFinancialPattern = NARRATIVE_FINANCIAL_PATTERNS.some((p: RegExp) => p.test(textWindow));
+  if (!hasFinancialPattern) return false;
+  const resourcePattern = buildResourcePattern(resourceTypes, aliasesMap);
+  const systemKeywords = `系统面板|系统商店|系统商城|兑换|资源余额|资源面板|面板|${resourcePattern}`;
+  const hasSystemContext = new RegExp(`(?:${systemKeywords})`, "u").test(textWindow);
+  return !hasSystemContext;
+}
+
+function detectBalanceJumpResource(
+  sentence: string,
+  resourceTypes: ReadonlyArray<string>,
+  aliasesMap?: Record<string, string>,
+): string | undefined {
+  const resourcePattern = buildResourcePattern(resourceTypes, aliasesMap);
+  const detectionKeywords = `系统面板|面板|数值|当前值|余额|兑换|资源|积分|银行|手机|账户|入账|到账|${resourcePattern}`;
+  if (!new RegExp(`(?:${detectionKeywords})`, "u").test(sentence)) {
+    return undefined;
+  }
+  if (/(第\s*110\s*街|110号公路|110栋|110号|三号仓库|第\s*\d+\s*章|电话|房号|日期|时间)/u.test(sentence)) {
+    return undefined;
+  }
+  if (isNarrativeFinancialContext(sentence, resourceTypes, aliasesMap)) {
+    return undefined;
+  }
+  return inferResourceForNumericContext(sentence, undefined, resourceTypes, aliasesMap) ?? undefined;
+}
+
+function inferResourceForNumericContext(
+  textWindow: string,
+  fallback?: string,
+  resourceTypes: ReadonlyArray<string> = DEFAULT_RESOURCE_TYPES,
+  aliases?: Record<string, string>,
+): string | null {
+  const resourceAliases = aliases ?? RESOURCE_ALIASES;
+  const repResource = findReputationResource(resourceTypes, resourceAliases);
+  if (repResource) {
+    const repAliases = resourceAliasesFor(repResource, resourceAliases);
+    const repPattern = repAliases.map(escapeRegExp).join("|");
+    const repRegex = new RegExp(`(?:当前(?:${repPattern})|(?:${repPattern})值|(?:${repPattern})余额|系统(?:${repPattern})|面板[^。！？!?；;\\n]{0,12}(?:${repPattern})|(?:${repPattern})[^。！？!?；;\\n]{0,12}(?:停在|定格|跳到|显示|变成|余额))`, "u");
+    if (repRegex.test(textWindow)) {
+      return repResource;
+    }
+  }
+  const currencyResource = findCurrencyResource(resourceTypes, resourceAliases);
+  if (currencyResource) {
+    const currAliases = resourceAliasesFor(currencyResource, resourceAliases);
+    const currPattern = currAliases.map(escapeRegExp).join("|");
+    if (new RegExp(`(?:${currPattern})`, "u").test(textWindow)) {
+      return currencyResource;
+    }
+    if (/(?:手机|银行|账户|银行卡|银行APP|银行短信|余额页面|入账|到账|账户余额|银行余额|手机余额|现金余额)/u.test(textWindow)) {
+      if (isNarrativeFinancialContext(textWindow, resourceTypes, resourceAliases)) return null;
+      return currencyResource;
+    }
+  }
+
+  for (const type of resourceTypes) {
+    const canonical = resourceAliases[type] ?? type;
+    const typeAliases = resourceAliasesFor(canonical, resourceAliases);
+    const pattern = typeAliases.map(escapeRegExp).join("|");
+    if (new RegExp(`(?:${pattern})`, "u").test(textWindow)) {
+      return canonical;
+    }
+  }
+
+  const resourcePattern = buildResourcePattern(resourceTypes, resourceAliases);
+  const explicit = textWindow.match(new RegExp(`(${resourcePattern})`, "iu"))?.[1];
+  if (explicit) return normalizeResourceName(explicit, resourceAliases);
+  if (fallback) return normalizeResourceName(fallback, resourceAliases);
+  return null;
+}
+
+function repairReputationBalance(content: string, actual: number, expected: number, rules?: ResourceRules): string {
+  const repResource = rules ? (findReputationResource(Object.keys(rules.resources), rules.aliases) ?? "民望值") : "民望值";
+  const repBase = repResource.replace("值", "");
+  const numericActual = escapeRegExp(String(actual));
+  const replacement = expected === 0 ? `当前${repBase}归零` : `当前${repBase}${expected}点`;
+  const patterns = [
+    new RegExp(`${repBase}值跳成(${NUMBER_SOURCE})，扣除兑换技能的(${NUMBER_SOURCE})点，正好余${numericActual}点`, "u"),
+    new RegExp(`扣除兑换技能的(${NUMBER_SOURCE})点，正好余${numericActual}点`, "u"),
+    new RegExp(`当前${repBase}余额${numericActual}点`, "u"),
+    new RegExp(`${repBase}余额${numericActual}点`, "u"),
+    new RegExp(`正好余${numericActual}点`, "u"),
+    new RegExp(`余额${numericActual}点`, "u"),
+    new RegExp(`余${numericActual}点`, "u"),
+  ];
+  for (const pattern of patterns) {
+    if (!pattern.test(content)) continue;
+    if (pattern.source.includes("值跳成") || pattern.source.startsWith("扣除")) {
+      return content.replace(pattern, `刚刚兑换技能的10点已经扣过，此刻新增的${expected}点${repBase}就是当前余额`);
+    }
+    return content.replace(pattern, replacement);
+  }
+  return content;
+}
+
+function repairExchangeAmount(content: string, issue: ResourceMathIssue, rules?: ResourceRules): string {
+  const repResource = rules ? (findReputationResource(Object.keys(rules.resources), rules.aliases) ?? "民望值") : "民望值";
+  const currResource = rules ? (findCurrencyResource(Object.keys(rules.resources), rules.aliases) ?? "联邦币") : "联邦币";
+  const repBase = repResource.replace("值", "");
+  const currBase = currResource.replace("值", "");
+  if (issue.actualFromAmount !== undefined && issue.expectedFromAmount !== undefined) {
+    return content.replace(
+      new RegExp(`(消耗|扣除|花费|用)\\s*${issue.actualFromAmount}\\s*点?\\s*${repBase}值?\\s*(兑换|换成|换取)`, "u"),
+      `$1${issue.expectedFromAmount}点${repBase}$2`,
+    );
+  }
+  if (issue.actualToAmount !== undefined && issue.expectedToAmount !== undefined) {
+    return content.replace(new RegExp(`兑换\\s*${issue.actualToAmount}\\s*(?:元)?\\s*${currBase}`, "u"), `兑换${issue.expectedToAmount}${currBase}`);
+  }
+  if (issue.actual !== undefined && issue.expected !== undefined) {
+    return content.replace(new RegExp(`兑换\\s*${issue.actual}\\s*(?:元)?\\s*${currBase}`, "u"), `兑换${issue.expected}${currBase}`);
+  }
+  return content;
+}
+
+function collectSentenceBalanceEvents(
+  text: string,
+  resourceTypes: ReadonlyArray<string>,
+  events: ResourceEvent[],
+  aliasesMap?: Record<string, string>,
+): void {
+  const sentences = text.split(/(?<=[。！？!?；;])|\n/u);
+  let offset = 0;
+  let lastResource: string | undefined;
+  const resourceAliases = aliasesMap ?? RESOURCE_ALIASES;
+  const resourcePattern = buildResourcePattern(resourceTypes, resourceAliases);
+  const repResource = findReputationResource(resourceTypes, resourceAliases) ?? "民望值";
+  const currencyResource = findCurrencyResource(resourceTypes, resourceAliases) ?? "联邦币";
+  const repAliases = resourceAliasesFor(repResource, resourceAliases);
+  const repPattern = repAliases.map(escapeRegExp).join("|");
+  const currAliases = resourceAliasesFor(currencyResource, resourceAliases);
+  const currPattern = currAliases.map(escapeRegExp).join("|");
+  const checkPattern = new RegExp(`余额|剩余|正好余|余|${repPattern}|${currPattern}|兑换`, "iu");
+
+  for (const sentence of sentences) {
+    const explicit = sentence.match(new RegExp(`(${resourcePattern})`, "iu"))?.[1];
+    if (explicit) {
+      lastResource = normalizeResourceName(explicit, resourceAliases);
+    }
+    const balance = sentence.match(new RegExp(`(?:余额|剩余|正好余|余)\\s*(${NUMBER_SOURCE})\\s*(?:点|元)?`, "iu"));
+    if (balance?.[1] && /余额|剩余|正好余|余/u.test(sentence) && checkPattern.test(sentence)) {
+      if (isNarrativeFinancialContext(sentence, resourceTypes, resourceAliases)) {
+        offset += sentence.length;
+        continue;
+      }
+      const resource = inferResourceForNumericContext(sentence, lastResource, resourceTypes, resourceAliases);
+      if (!resource) {
+        offset += sentence.length;
+        continue;
+      }
+      events.push({
+        kind: "balance",
+        resource,
+        amount: parseFlexibleNumber(balance[1]),
+        evidence: sentence.trim(),
+        index: offset + (sentence.indexOf(balance[0]) >= 0 ? sentence.indexOf(balance[0]) : 0),
+      });
+    }
+    offset += sentence.length;
+  }
+}
+
+function collectBalanceJumpEvents(
+  text: string,
+  resourceTypes: ReadonlyArray<string>,
+  events: ResourceEvent[],
+  aliasesMap?: Record<string, string>,
+): void {
   const sentences = text.split(/(?<=[。！？!?；;])|\n/u);
   let offset = 0;
   let previous = "";
   let previousPrevious = "";
+  const resourceAliases = aliasesMap ?? RESOURCE_ALIASES;
+  const repResource = findReputationResource(resourceTypes, resourceAliases) ?? "民望值";
+  const repAliases = resourceAliasesFor(repResource, resourceAliases);
+  const repPattern = repAliases.map(escapeRegExp).join("|");
+
   for (const sentence of sentences) {
     const contextWindow = `${previousPrevious}${previous}${sentence}`;
-    const contextResource = detectBalanceJumpResource(contextWindow, resourceTypes);
+    const contextResource = detectBalanceJumpResource(contextWindow, resourceTypes, aliasesMap);
     if (!contextResource) {
       offset += sentence.length;
       previousPrevious = previous;
@@ -2095,7 +2370,7 @@ function collectBalanceJumpEvents(text: string, resourceTypes: ReadonlyArray<str
       previous = sentence;
       continue;
     }
-    const jump = sentence.match(new RegExp(`(?:民望值?|面板上的民望|当前民望|银行余额|手机余额|账户余额|现金余额|余额|数字|数值|当前值|面板)[^。！？!?；;\\n]{0,32}?(?:停在|定格在|跳到|跳至|涨到|显示为|显示|变成|变成了|来到)[^\\d一二两三四五六七八九十百千万]{0,8}?(${NUMBER_SOURCE})`, "iu"))
+    const jump = sentence.match(new RegExp(`(?:${repPattern}|面板上的${repPattern}|当前${repPattern}|银行余额|手机余额|账户余额|现金余额|余额|数字|数值|当前值|面板)[^。！？!?；;\\n]{0,32}?(?:停在|定格在|跳到|跳至|涨到|显示为|显示|变成|变成了|来到)[^\\d一二两三四五六七八九十百千万]{0,8}?(${NUMBER_SOURCE})`, "iu"))
       ?? sentence.match(new RegExp(`(?:停在|定格在|跳到|跳至|涨到|显示为|显示|变成|变成了|来到)[^\\d一二两三四五六七八九十百千万]{0,8}?(${NUMBER_SOURCE})`, "iu"));
     if (jump?.[1]) {
       const toAmount = parseFlexibleNumber(jump[1]);
@@ -2113,102 +2388,6 @@ function collectBalanceJumpEvents(text: string, resourceTypes: ReadonlyArray<str
     offset += sentence.length;
     previousPrevious = previous;
     previous = sentence;
-  }
-}
-
-// Patterns that indicate ordinary financial narration (prices, fees, salaries, transfers)
-// rather than system-panel resource balance display
-const NARRATIVE_FINANCIAL_PATTERNS = [
-  /价格|单价|总价|订单金额|消费金额|打车费|外卖费|快递费|运费|房租|水电费|物业费|餐费|路费|油费|过路费/,
-  /花了.{0,4}元|付了.{0,4}元|转账|汇款|工资|薪水|奖金.{0,4}元|报销|找零|零钱|找.{0,4}元/,
-  /收银|买单|结账|AA制|分摊|凑钱|垫付|预付款|订金|押金|退款|到付/,
-  /购买|买了|卖(?:了|出|给)|售价|成交价|市场价|成本|亏了|赚了.{0,4}元/,
-  /\d+元[以之]?内|\d+块[以之]?内|\d+块钱|\d+毛钱|\d+分钱/,
-];
-
-function isNarrativeFinancialContext(textWindow: string): boolean {
-  const hasFinancialPattern = NARRATIVE_FINANCIAL_PATTERNS.some((p) => p.test(textWindow));
-  if (!hasFinancialPattern) return false;
-  // System panel / resource balance context overrides narrative financial
-  const hasSystemContext = /(系统面板|系统商店|系统商城|兑换|资源余额|资源面板|当前民望|民望值|灵石|金币|银两|气血|灵力|修为|功德|好感度|技能点|系统积分)/u.test(textWindow);
-  return !hasSystemContext;
-}
-
-function detectBalanceJumpResource(sentence: string, resourceTypes: ReadonlyArray<string>): string | undefined {
-  if (!/(民望|民望值|系统面板|面板|数值|当前值|余额|兑换|资源|积分|灵石|金币|联邦币|技能点|银行|手机|账户|入账|到账|现金)/u.test(sentence)) {
-    return undefined;
-  }
-  if (/(第\s*110\s*街|110号公路|110栋|110号|三号仓库|第\s*\d+\s*章|电话|房号|日期|时间)/u.test(sentence)) {
-    return undefined;
-  }
-  if (isNarrativeFinancialContext(sentence)) {
-    return undefined;
-  }
-  return inferResourceForNumericContext(sentence, undefined, resourceTypes) ?? undefined;
-}
-
-function inferResourceForNumericContext(
-  textWindow: string,
-  fallback?: string,
-  resourceTypes: ReadonlyArray<string> = DEFAULT_RESOURCE_TYPES,
-): string | null {
-  if (/(当前民望|民望值|民望余额|系统民望|面板[^。！？!?；;\n]{0,12}民望|民望[^。！？!?；;\n]{0,12}(?:停在|定格|跳到|显示|变成|余额))/u.test(textWindow)) {
-    return "民望值";
-  }
-  if (/(联邦币|联邦现金)/u.test(textWindow)) {
-    return "联邦币";
-  }
-  if (/(手机|银行|账户|银行卡|银行APP|银行短信|余额页面|入账|到账|现金|账户余额|银行余额|手机余额|现金余额|钱)/u.test(textWindow)) {
-    if (isNarrativeFinancialContext(textWindow)) return null;
-    return "联邦币";
-  }
-  if (/技能点/u.test(textWindow)) return "技能点";
-  if (/系统积分|积分/u.test(textWindow)) return "系统积分";
-  if (/灵石/u.test(textWindow)) return "灵石";
-  if (/金币/u.test(textWindow)) return "金币";
-  if (/银两/u.test(textWindow)) return "银两";
-  if (/气血/u.test(textWindow)) return "气血";
-  if (/灵力/u.test(textWindow)) return "灵力";
-  if (/修为/u.test(textWindow)) return "修为";
-  if (/功德/u.test(textWindow)) return "功德";
-  if (/好感度/u.test(textWindow)) return "好感度";
-  const resourcePattern = buildResourcePattern(resourceTypes);
-  const explicit = textWindow.match(new RegExp(`(${resourcePattern})`, "iu"))?.[1];
-  if (explicit) return normalizeResourceName(explicit);
-  if (fallback) return normalizeResourceName(fallback);
-  return null;
-}
-
-function collectSentenceBalanceEvents(text: string, resourceTypes: ReadonlyArray<string>, events: ResourceEvent[]): void {
-  const sentences = text.split(/(?<=[。！？!?；;])|\n/u);
-  let offset = 0;
-  let lastResource: string | undefined;
-  const resourcePattern = buildResourcePattern(resourceTypes);
-  for (const sentence of sentences) {
-    const explicit = sentence.match(new RegExp(`(${resourcePattern})`, "iu"))?.[1];
-    if (explicit) {
-      lastResource = normalizeResourceName(explicit);
-    }
-    const balance = sentence.match(new RegExp(`(?:余额|剩余|正好余|余)\\s*(${NUMBER_SOURCE})\\s*(?:点|元)?`, "iu"));
-    if (balance?.[1] && /余额|剩余|正好余|余/u.test(sentence) && /民望|余额|兑换|联邦币|现金/u.test(sentence)) {
-      if (isNarrativeFinancialContext(sentence)) {
-        offset += sentence.length;
-        continue;
-      }
-      const resource = inferResourceForNumericContext(sentence, lastResource, resourceTypes);
-      if (!resource) {
-        offset += sentence.length;
-        continue;
-      }
-      events.push({
-        kind: "balance",
-        resource,
-        amount: parseFlexibleNumber(balance[1]),
-        evidence: sentence.trim(),
-        index: offset + (sentence.indexOf(balance[0]) >= 0 ? sentence.indexOf(balance[0]) : 0),
-      });
-    }
-    offset += sentence.length;
   }
 }
 
@@ -2306,46 +2485,7 @@ function isExchangeConsumeForGain(consume: ResourceEvent, gain: ResourceEvent): 
     || (/(到账|入账)/u.test(gain.evidence) && /(消耗|扣除|花费|支付)/u.test(consume.evidence));
 }
 
-function repairReputationBalance(content: string, actual: number, expected: number): string {
-  const numericActual = escapeRegExp(String(actual));
-  const replacement = expected === 0 ? "当前民望归零" : `当前民望${expected}点`;
-  const patterns = [
-    new RegExp(`民望值跳成(${NUMBER_SOURCE})，扣除兑换技能的(${NUMBER_SOURCE})点，正好余${numericActual}点`, "u"),
-    new RegExp(`扣除兑换技能的(${NUMBER_SOURCE})点，正好余${numericActual}点`, "u"),
-    new RegExp(`当前民望余额${numericActual}点`, "u"),
-    new RegExp(`民望余额${numericActual}点`, "u"),
-    new RegExp(`正好余${numericActual}点`, "u"),
-    new RegExp(`余额${numericActual}点`, "u"),
-    new RegExp(`余${numericActual}点`, "u"),
-  ];
-  for (const pattern of patterns) {
-    if (!pattern.test(content)) continue;
-    if (pattern.source.startsWith("民望值跳成")) {
-      return content.replace(pattern, `刚刚兑换技能的10点已经扣过，此刻新增的${expected}点民望就是当前余额`);
-    }
-    if (pattern.source.startsWith("扣除")) {
-      return content.replace(pattern, `刚刚兑换技能的10点已经扣过，此刻新增的${expected}点民望就是当前余额`);
-    }
-    return content.replace(pattern, replacement);
-  }
-  return content;
-}
 
-function repairExchangeAmount(content: string, issue: ResourceMathIssue): string {
-  if (issue.actualFromAmount !== undefined && issue.expectedFromAmount !== undefined) {
-    return content.replace(
-      new RegExp(`(消耗|扣除|花费|用)\\s*${issue.actualFromAmount}\\s*点?\\s*民望值?\\s*(兑换|换成|换取)`, "u"),
-      `$1${issue.expectedFromAmount}点民望$2`,
-    );
-  }
-  if (issue.actualToAmount !== undefined && issue.expectedToAmount !== undefined) {
-    return content.replace(new RegExp(`兑换\\s*${issue.actualToAmount}\\s*(?:元)?\\s*联邦币`, "u"), `兑换${issue.expectedToAmount}联邦币`);
-  }
-  if (issue.actual !== undefined && issue.expected !== undefined) {
-    return content.replace(new RegExp(`兑换\\s*${issue.actual}\\s*(?:元)?\\s*联邦币`, "u"), `兑换${issue.expected}联邦币`);
-  }
-  return content;
-}
 
 function replaceFirstResourceNumber(content: string, issue: ResourceMathIssue): string {
   if (issue.actual === undefined || issue.expected === undefined) return content;
@@ -2404,9 +2544,9 @@ function compactEvidence(value: string): string {
   return value.replace(/\s+/gu, "").slice(0, 40);
 }
 
-function normalizeResourceName(value: string): string {
+function normalizeResourceName(value: string, aliasesMap?: Record<string, string>): string {
   const trimmed = value.trim().replace(/值$/u, "值");
-  return RESOURCE_ALIASES[trimmed] ?? trimmed;
+  return (aliasesMap ?? RESOURCE_ALIASES)[trimmed] ?? trimmed;
 }
 
 function normalizeSkillLabel(value: string): string {

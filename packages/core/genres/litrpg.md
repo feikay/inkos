@@ -2,16 +2,110 @@
 name: LitRPG
 id: litrpg
 language: en
-chapterTypes: ["Progression", "Setup", "Transition", "Payoff", "Combat"]
-fatigueWords: ["delve", "tapestry", "testament", "intricate", "pivotal", "vibrant", "comprehensive", "nuanced", "embark", "foster", "underscore", "bolstered", "crucial"]
+chapterTypes:
+  - Progression
+  - Setup
+  - Transition
+  - Payoff
+  - Combat
+fatigueWords:
+  - delve
+  - tapestry
+  - testament
+  - intricate
+  - pivotal
+  - vibrant
+  - comprehensive
+  - nuanced
+  - embark
+  - foster
+  - underscore
+  - bolstered
+  - crucial
 numericalSystem: true
 powerScaling: true
 eraResearch: false
-pacingRule: "Every 1-3 chapters early: level-up or stat gain. Mid-story every 5-10 chapters. Late story: tier transitions spaced far apart."
-satisfactionTypes: ["Level Up", "Skill Unlock", "Loot Drop", "Boss Kill", "Tier Breakthrough", "System Secret Revealed"]
-auditDimensions: [1,2,3,4,5,6,7,8,9,10,13,14,15,16,17,18,19,24,25,26]
+pacingRule: >-
+  Every 1-3 chapters early: level-up or stat gain. Mid-story every 5-10
+  chapters. Late story: tier transitions spaced far apart.
+satisfactionTypes:
+  - Level Up
+  - Skill Unlock
+  - Loot Drop
+  - Boss Kill
+  - Tier Breakthrough
+  - System Secret Revealed
+auditDimensions:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 24
+  - 25
+  - 26
+concretePayoffObjects:
+  - 地图锁孔
+  - 玉简
+  - 地图
+  - 残图
+  - 锁孔
+  - 机关
+  - 阵纹
+  - 禁纹
+  - 法阵
+  - 腰牌
+  - 令牌
+  - 钥匙
+  - 卷轴
+  - 古卷
+  - 残卷
+  - 残页
+  - 石碑
+  - 古碑
+  - 碑纹
+  - 入口
+  - 门
+  - 祭坛
+styleGovernance:
+  allowedStyleExamples:
+    - 三息
+    - 一炷香
+    - 千年
+    - 聚气九层
+  forbiddenProseKeywords:
+    - 性价比
+    - 打折
+    - 收益
+    - 基础值
+structuralSignals:
+  defaultPayoffActions:
+    - 触发
+    - 打开
+    - 拿到
+    - 夺下
+    - 获得
+    - 压住
+    - 突破
+    - 开启
+  lowStatusKeywords:
+    - 扫地
+    - 杂役
+    - 废材
+    - 废物
 ---
-
 ## Genre Prohibitions
 
 - System rules changing arbitrarily after being established — readers track every number

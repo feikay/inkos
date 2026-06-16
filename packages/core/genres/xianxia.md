@@ -1,16 +1,108 @@
 ---
 name: 仙侠
 id: xianxia
-chapterTypes: ["战斗章", "悟道章", "布局章", "过渡章", "回收章"]
-fatigueWords: ["冷笑", "蝼蚁", "倒吸凉气", "瞳孔骤缩", "天道", "大道", "因果", "气运", "仿佛", "不禁", "宛如", "竟然"]
+chapterTypes:
+  - 战斗章
+  - 悟道章
+  - 布局章
+  - 过渡章
+  - 回收章
+fatigueWords:
+  - 冷笑
+  - 蝼蚁
+  - 倒吸凉气
+  - 瞳孔骤缩
+  - 天道
+  - 大道
+  - 因果
+  - 气运
+  - 仿佛
+  - 不禁
+  - 宛如
+  - 竟然
 numericalSystem: true
 powerScaling: true
 eraResearch: false
-pacingRule: "修炼/悟道与战斗交替，每3-5章一次小突破或关键收获"
-satisfactionTypes: ["悟道突破", "斗法碾压", "法宝收获", "身份揭示", "天劫渡过", "因果了结"]
-auditDimensions: [1,2,3,4,5,6,7,8,9,10,11,13,14,15,16,17,18,19,24,25,26]
+pacingRule: 修炼/悟道与战斗交替，每3-5章一次小突破或关键收获
+satisfactionTypes:
+  - 悟道突破
+  - 斗法碾压
+  - 法宝收获
+  - 身份揭示
+  - 天劫渡过
+  - 因果了结
+auditDimensions:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 24
+  - 25
+  - 26
+concretePayoffObjects:
+  - 地图锁孔
+  - 玉简
+  - 地图
+  - 残图
+  - 锁孔
+  - 机关
+  - 阵纹
+  - 禁纹
+  - 法阵
+  - 腰牌
+  - 令牌
+  - 钥匙
+  - 卷轴
+  - 古卷
+  - 残卷
+  - 残页
+  - 石碑
+  - 古碑
+  - 碑纹
+  - 入口
+  - 门
+  - 祭坛
+styleGovernance:
+  allowedStyleExamples:
+    - 三息
+    - 一炷香
+    - 千年
+    - 聚气九层
+  forbiddenProseKeywords:
+    - 性价比
+    - 打折
+    - 收益
+    - 基础值
+structuralSignals:
+  defaultPayoffActions:
+    - 触发
+    - 打开
+    - 拿到
+    - 夺下
+    - 获得
+    - 压住
+    - 突破
+    - 开启
+  lowStatusKeywords:
+    - 扫地
+    - 杂役
+    - 废材
+    - 废物
 ---
-
 ## 题材禁忌
 
 - 主角为推剧情突然仁慈、犯蠢

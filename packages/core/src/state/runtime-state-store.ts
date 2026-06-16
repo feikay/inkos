@@ -69,9 +69,20 @@ export async function buildRuntimeStateArtifacts(params: {
   readonly allowReapply?: boolean;
 }): Promise<RuntimeStateArtifacts> {
   const snapshot = await loadRuntimeStateSnapshot(params.bookDir, params.delta.chapter - 1);
+
+  const prefix = String(params.delta.chapter).padStart(4, "0");
+  const intentPath = join(params.bookDir, "story", "runtime", "chapter-intents", `${prefix}.md`);
+  let chapterIntent = "";
+  try {
+    chapterIntent = await readFile(intentPath, "utf-8");
+  } catch {
+    // ignore if intent file is missing
+  }
+
   const { resolvedDelta } = arbitrateRuntimeStateDeltaHooks({
     hooks: snapshot.hooks.hooks,
     delta: params.delta,
+    chapterIntent,
   });
   const next = applyRuntimeStateDelta({
     snapshot,

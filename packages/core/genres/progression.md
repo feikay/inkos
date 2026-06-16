@@ -2,16 +2,109 @@
 name: Progression Fantasy
 id: progression
 language: en
-chapterTypes: ["Training", "Breakthrough", "Setup", "Transition", "Payoff"]
-fatigueWords: ["delve", "tapestry", "testament", "intricate", "pivotal", "vibrant", "comprehensive", "nuanced", "embark", "foster", "underscore", "bolstered", "crucial"]
+chapterTypes:
+  - Training
+  - Breakthrough
+  - Setup
+  - Transition
+  - Payoff
+fatigueWords:
+  - delve
+  - tapestry
+  - testament
+  - intricate
+  - pivotal
+  - vibrant
+  - comprehensive
+  - nuanced
+  - embark
+  - foster
+  - underscore
+  - bolstered
+  - crucial
 numericalSystem: false
 powerScaling: true
 eraResearch: false
-pacingRule: "Tier advancement every 2-4 chapters early, every 8-15 mid-story, every 20+ late-story. Each tier must feel fundamentally different."
-satisfactionTypes: ["Tier Breakthrough", "Technique Mastery", "Rival Surpassed", "Mentor Transcended", "Power Combination Discovered", "Impossible Challenge Overcome"]
-auditDimensions: [1,2,3,4,6,7,8,9,10,13,14,15,16,17,18,19,24,25,26]
+pacingRule: >-
+  Tier advancement every 2-4 chapters early, every 8-15 mid-story, every 20+
+  late-story. Each tier must feel fundamentally different.
+satisfactionTypes:
+  - Tier Breakthrough
+  - Technique Mastery
+  - Rival Surpassed
+  - Mentor Transcended
+  - Power Combination Discovered
+  - Impossible Challenge Overcome
+auditDimensions:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 24
+  - 25
+  - 26
+concretePayoffObjects:
+  - 地图锁孔
+  - 玉简
+  - 地图
+  - 残图
+  - 锁孔
+  - 机关
+  - 阵纹
+  - 禁纹
+  - 法阵
+  - 腰牌
+  - 令牌
+  - 钥匙
+  - 卷轴
+  - 古卷
+  - 残卷
+  - 残页
+  - 石碑
+  - 古碑
+  - 碑纹
+  - 入口
+  - 门
+  - 祭坛
+styleGovernance:
+  allowedStyleExamples:
+    - 三息
+    - 一炷香
+    - 千年
+    - 聚气九层
+  forbiddenProseKeywords:
+    - 性价比
+    - 打折
+    - 收益
+    - 基础值
+structuralSignals:
+  defaultPayoffActions:
+    - 触发
+    - 打开
+    - 拿到
+    - 夺下
+    - 获得
+    - 压住
+    - 突破
+    - 开启
+  lowStatusKeywords:
+    - 扫地
+    - 杂役
+    - 废材
+    - 废物
 ---
-
 ## Genre Prohibitions
 
 - Power loss without extraordinary justification — progress loss drives readers away faster than anything

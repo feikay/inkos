@@ -2,16 +2,106 @@
 name: Romantasy
 id: romantasy
 language: en
-chapterTypes: ["Romance", "Action", "Setup", "Transition", "Payoff"]
-fatigueWords: ["delve", "tapestry", "testament", "intricate", "pivotal", "vibrant", "comprehensive", "nuanced", "embark", "foster", "underscore", "bolstered", "crucial"]
+chapterTypes:
+  - Romance
+  - Action
+  - Setup
+  - Transition
+  - Payoff
+fatigueWords:
+  - delve
+  - tapestry
+  - testament
+  - intricate
+  - pivotal
+  - vibrant
+  - comprehensive
+  - nuanced
+  - embark
+  - foster
+  - underscore
+  - bolstered
+  - crucial
 numericalSystem: false
 powerScaling: false
 eraResearch: false
-pacingRule: "Romance beats at every act break. Chemistry scenes every 2-3 chapters. Fantasy romance: consummation at 60-75%. Romantic fantasy: romance resolution aligned with plot resolution."
-satisfactionTypes: ["Chemistry Moment", "Vulnerability Shared", "Obstacle Overcome Together", "First Kiss", "Relationship Defined", "HEA/HFN Achieved"]
-auditDimensions: [1,2,3,6,7,8,9,10,13,14,15,16,17,18,19,24,25,26]
+pacingRule: >-
+  Romance beats at every act break. Chemistry scenes every 2-3 chapters. Fantasy
+  romance: consummation at 60-75%. Romantic fantasy: romance resolution aligned
+  with plot resolution.
+satisfactionTypes:
+  - Chemistry Moment
+  - Vulnerability Shared
+  - Obstacle Overcome Together
+  - First Kiss
+  - Relationship Defined
+  - HEA/HFN Achieved
+auditDimensions:
+  - 1
+  - 2
+  - 3
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 24
+  - 25
+  - 26
+concretePayoffObjects:
+  - 存折
+  - 集资款
+  - 店铺钥匙
+  - 合同
+  - 营业执照
+  - 账本
+  - 批条
+  - 启动资金
+  - 本钱
+  - 车票
+  - 线索
+  - 证据
+  - 文件
+  - 装备
+  - 道具
+styleGovernance:
+  allowedStyleExamples:
+    - 元
+    - 分
+    - 个
+    - 月
+    - 年
+    - 折
+  forbiddenProseKeywords:
+    - 气血
+    - 境界
+    - 面板
+    - 金手指
+    - 升级
+structuralSignals:
+  defaultPayoffActions:
+    - 拿到
+    - 保住
+    - 夺回
+    - 签署
+    - 避开
+    - 买下
+    - 拦下
+    - 激活
+  lowStatusKeywords:
+    - 下岗
+    - 贫困
+    - 负债
+    - 被裁员
+    - 新手
 ---
-
 ## Genre Prohibitions
 
 - Chemistry that isn't earned — readers must understand why characters care for each other

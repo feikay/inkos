@@ -343,6 +343,15 @@ interface HookRow {
   readonly notes: string;
 }
 
+interface First10HookSeed {
+  readonly name: string;
+  readonly startChapter: number;
+  readonly type: string;
+  readonly expectedPayoff: string;
+  readonly payoffTiming: string;
+  readonly notes: string;
+}
+
 function parsePendingHookRows(pendingHooks: string): HookRow[] {
   const table = extractFirstTable(pendingHooks);
   return table
@@ -363,6 +372,222 @@ function parsePendingHookRows(pendingHooks: string): HookRow[] {
       payoffTiming: cells[6] || "待定",
       notes: cells[7] || "",
     }));
+}
+
+function extractTableBlocks(markdown: string): string[][] {
+  const blocks: string[][] = [];
+  let current: string[] = [];
+  for (const line of markdown.split("\n")) {
+    if (line.trim().startsWith("|")) {
+      current.push(line.trim());
+      continue;
+    }
+    if (current.length > 0) {
+      blocks.push(current);
+      current = [];
+    }
+  }
+  if (current.length > 0) blocks.push(current);
+  return blocks;
+}
+
+function normalizeHeaderCell(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, "").trim();
+}
+
+function findColumnIndex(headers: readonly string[], patterns: readonly RegExp[]): number {
+  return headers.findIndex((header) => patterns.some((pattern) => pattern.test(normalizeHeaderCell(header))));
+}
+
+function extractFirst10HookSeeds(first10ChapterPlan: string, language: Language): First10HookSeed[] {
+  const seeds: First10HookSeed[] = [];
+  for (const block of extractTableBlocks(first10ChapterPlan)) {
+    if (block.length < 3) continue;
+    const headerCells = block[0]!.split("|").slice(1, -1).map((cell) => cell.trim());
+    const headerText = headerCells.join(" ");
+    if (!/(伏笔|钩子|hook|foreshadow)/iu.test(headerText)) continue;
+
+    const nameIndex = findColumnIndex(headerCells, [/伏笔名|伏笔|钩子|hookname|hook/iu]);
+    const startIndex = findColumnIndex(headerCells, [/埋设章节|起始章节|开始章节|startchapter|chapter/iu]);
+    const setupIndex = findColumnIndex(headerCells, [/初始表现|表层表现|表现|埋设方式|setup|initial|surface/iu]);
+    const meaningIndex = findColumnIndex(headerCells, [/真实含义|预期回收|回收|payoff|meaning|truth/iu]);
+    const timingIndex = findColumnIndex(headerCells, [/回收章节|回收节奏|节奏|eta|timing/iu]);
+    if (nameIndex < 0 || startIndex < 0) continue;
+
+    for (const line of block.slice(2)) {
+      if (/---/.test(line)) continue;
+      const cells = line.split("|").slice(1, -1).map((cell) => cell.trim());
+      const name = cells[nameIndex] ?? "";
+      const startChapter = parseChapterNumber(cells[startIndex]);
+      if (!name || !Number.isFinite(startChapter) || startChapter < 1 || startChapter > 10) continue;
+      const setup = setupIndex >= 0 ? cells[setupIndex] ?? "" : "";
+      const meaning = meaningIndex >= 0 ? cells[meaningIndex] ?? "" : "";
+      const timing = timingIndex >= 0 ? cells[timingIndex] ?? "" : "";
+      seeds.push({
+        name,
+        startChapter,
+        type: inferHookSeedType([name, setup, meaning].join(" "), language),
+        expectedPayoff: meaning || name,
+        payoffTiming: timing || (language === "en" ? "near-term" : "近期"),
+        notes: [name, setup].filter(Boolean).join("；"),
+      });
+    }
+  }
+  return seeds;
+}
+
+function inferHookSeedType(text: string, language: Language): string {
+  if (/(情感|父亲|母亲|家人|关系|emotion|relationship|family)/iu.test(text)) return language === "en" ? "emotional" : "情感伏笔";
+  if (/(商业|赚钱|生意|资源|钱|business|resource|money)/iu.test(text)) return language === "en" ? "business" : "资源伏笔";
+  if (/(对手|反派|敌|威胁|antagonist|enemy|threat)/iu.test(text)) return language === "en" ? "antagonist" : "对手伏笔";
+  return language === "en" ? "plot" : "事件伏笔";
+}
+
+function extractSignificantTerms(text: string): string[] {
+  const blocked = new Set([
+    "伏笔", "钩子", "首次", "出场", "主动", "接触", "日后", "形成", "关系", "主角", "阶段", "近期", "中程", "长期",
+    "事件", "人物", "身份", "商业", "资源", "情感", "对手", "规则", "慢烧", "终局", "open", "pending",
+    "前世", "今生", "知道", "记得", "不知", "不确定", "原因", "第一次", "一个", "这个", "那个", "信息", "线索",
+    "决定", "暗中", "保护", "出现", "没有", "解释", "来意", "掌握", "另一", "钥匙", "需要", "特定", "代价",
+    "蝴蝶效应", "联系方式", "联系方", "省城", "父亲", "母亲", "家人", "合作", "留下", "具体", "时间", "日期", "大概",
+    "进货", "偶然", "遇到", "愉快", "生意", "伙伴", "长期", "供货商",
+    "the", "and", "hook", "first", "later", "chapter", "open", "pending",
+  ]);
+  const chineseTerms = (text.match(/[\u4e00-\u9fff]{2,16}/gu) ?? []).flatMap((term) => {
+    const splitTerms = term
+      .replace(/(首次|出场|主动|接触|日后|形成|关系线|关系|伏笔|钩子|章节|中程|近期|长期|预计|回收|真实|含义|表层|表现)/gu, " ")
+      .replace(/[的了和与及、，。；：]/gu, " ")
+      .split(/\s+/u)
+      .filter(Boolean);
+    return [term.slice(0, 8), ...splitTerms, ...splitTerms.map((item) => item.slice(0, 3))];
+  });
+  const terms = [
+    ...chineseTerms,
+    ...(text.match(/\b[A-Z][A-Za-z0-9_-]{2,}\b/g) ?? []),
+  ];
+  return [...new Set(terms
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 2)
+    .filter((term) => !blocked.has(term))
+    .filter((term) => !/^(?:首次出场|主动接触|日后形成|关系线|事件伏笔|情感伏笔|资源伏笔|对手伏笔)$/.test(term)))];
+}
+
+function hookRowText(row: HookRow): string {
+  return [row.hookId, row.expectedPayoff, row.notes].filter(Boolean).join(" ");
+}
+
+function seedText(seed: First10HookSeed): string {
+  return [seed.name, seed.expectedPayoff, seed.notes].filter(Boolean).join(" ");
+}
+
+function hasHookOverlap(row: HookRow, seed: First10HookSeed): boolean {
+  const rowText = hookRowText(row);
+  const seedNameTerms = extractSignificantTerms(seed.name);
+  if (seedNameTerms.length > 0 && !seedNameTerms.some((term) => rowText.includes(term))) {
+    return false;
+  }
+  const seedTerms = extractSignificantTerms([seed.name, seed.expectedPayoff, seed.notes].join(" "));
+  const rowTerms = extractSignificantTerms(rowText);
+  const seedTextValue = seedText(seed);
+  const overlaps = seedTerms.filter((term) => rowText.includes(term));
+  const reverseOverlaps = rowTerms.filter((term) => seedTextValue.includes(term));
+  const allOverlaps = [...new Set([...overlaps, ...reverseOverlaps])];
+  return allOverlaps.length >= 2 || allOverlaps.some((term) => term.length >= 5);
+}
+
+function findEarliestFirst10Mention(row: HookRow, chapterRows: readonly ChapterPlanRow[]): number | undefined {
+  const terms = extractSignificantTerms(hookRowText(row));
+  if (terms.length === 0) return undefined;
+  const match = chapterRows.find((chapterRow) => {
+    const chapterText = [
+      chapterRow.functionText,
+      chapterRow.emotionEvent,
+      chapterRow.goal,
+      chapterRow.obstacle,
+      chapterRow.solution,
+      chapterRow.payoff,
+      chapterRow.endingHook,
+    ].join(" ");
+    return terms.some((term) => chapterText.includes(term));
+  });
+  return match?.chapter;
+}
+
+function renderPendingHooks(rows: readonly HookRow[], language: Language): string {
+  const header = language === "en"
+    ? ["# Pending Hooks", "", "| hook_id | start_chapter | type | status | last_advanced_chapter | expected_payoff | payoff_timing | notes |", "|---|---|---|---|---|---|---|---|"]
+    : ["# Pending Hooks", "", "| hook_id | 起始章节 | 类型 | 状态 | 最近推进 | 预期回收 | 回收节奏 | 备注 |", "|---|---|---|---|---|---|---|---|"];
+  const body = rows.map((row) => `| ${tableCell(row.hookId, 80)} | ${tableCell(row.startChapter, 20)} | ${tableCell(row.type, 40)} | ${tableCell(row.status, 40)} | ${tableCell(row.lastAdvanced, 20)} | ${tableCell(row.expectedPayoff, 120)} | ${tableCell(row.payoffTiming, 60)} | ${tableCell(row.notes, 180)} |`);
+  return [...header, ...body].join("\n");
+}
+
+export function alignPendingHooksWithFirst10Plan(
+  output: ArchitectOutput,
+  language: Language = "zh",
+): ArchitectOutput {
+  if (!output.first10ChapterPlan?.trim() || !output.pendingHooks?.trim()) {
+    return output;
+  }
+  const seeds = extractFirst10HookSeeds(output.first10ChapterPlan, language);
+  const originalRows = parsePendingHookRows(output.pendingHooks);
+  if (seeds.length === 0 && originalRows.length === 0) {
+    return output;
+  }
+
+  const chapterRows = normalizeFirst10ChapterRows(output.first10ChapterPlan);
+  const rows = originalRows.map((row) => {
+    const start = parseChapterNumber(row.startChapter);
+    const seed = seeds.find((candidate) => hasHookOverlap(row, candidate));
+    const earliestMention = seeds.length === 0 ? findEarliestFirst10Mention(row, chapterRows) : undefined;
+    const correctedStart = seed?.startChapter ?? earliestMention;
+    if (
+      correctedStart !== undefined
+      && Number.isFinite(start)
+      && start >= 1
+      && row.lastAdvanced === "0"
+      && correctedStart !== start
+    ) {
+      return { ...row, startChapter: String(correctedStart) };
+    }
+    if (
+      correctedStart === undefined
+      && Number.isFinite(start)
+      && start >= 1
+      && start <= 10
+      && row.lastAdvanced === "0"
+      && seeds.length > 0
+    ) {
+      return {
+        ...row,
+        startChapter: "11",
+        notes: tableCell([row.notes, language === "en" ? "Deferred: not anchored in first_10_chapter_plan." : "已顺延：first_10_chapter_plan 未提供前10章埋设依据。"].filter(Boolean).join("；"), 180),
+      };
+    }
+    return row;
+  });
+
+  for (const seed of seeds) {
+    if (rows.some((row) => hasHookOverlap(row, seed))) continue;
+    const index = rows.length + 1;
+    rows.push({
+      hookId: `first10-hook-${String(index).padStart(3, "0")}`,
+      startChapter: String(seed.startChapter),
+      type: seed.type,
+      status: "open",
+      lastAdvanced: "0",
+      expectedPayoff: seed.expectedPayoff,
+      payoffTiming: seed.payoffTiming,
+      notes: seed.notes,
+    });
+  }
+
+  if (rows.length === 0) {
+    return output;
+  }
+  return {
+    ...output,
+    pendingHooks: renderPendingHooks(rows, language),
+  };
 }
 
 function extractProtagonistName(bookRules: string, storyBible: string, motivationMatrix: string, language: Language): string {

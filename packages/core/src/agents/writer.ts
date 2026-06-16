@@ -61,6 +61,7 @@ import { reconcileSettlementDiff } from "../state/settlement-reconciliation.js";
 import type { RuntimeStateSnapshot } from "../state/state-reducer.js";
 import { parsePendingHooksMarkdown } from "../utils/memory-retrieval.js";
 import { analyzeHookHealth } from "../utils/hook-health.js";
+import { cleanHooksMarkdown } from "../utils/hook-arbiter.js";
 import { buildEnglishVarianceBrief } from "../utils/long-span-fatigue.js";
 import { buildChapterTitleCandidates, resolveChapterTitle } from "../utils/chapter-title-engine.js";
 import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
@@ -1021,7 +1022,7 @@ export class WriterAgent extends BaseAgent {
       oldHooks: hooks,
       oldLedger: ledger,
       updatedState: runtimeStateArtifacts?.currentStateMarkdown ?? settlement.updatedState,
-      updatedHooks: runtimeStateArtifacts?.hooksMarkdown ?? settlement.updatedHooks,
+      updatedHooks: cleanHooksMarkdown(runtimeStateArtifacts?.hooksMarkdown ?? settlement.updatedHooks),
       updatedLedger: runtimeStateArtifacts ? (settlement.updatedLedger || ledger) : settlement.updatedLedger,
     });
     const resolvedRuntimeStateDelta = runtimeStateArtifacts?.resolvedDelta ?? settlement.runtimeStateDelta;
@@ -1284,7 +1285,7 @@ export class WriterAgent extends BaseAgent {
       oldHooks: hooks,
       oldLedger: ledger,
       updatedState: runtimeStateArtifacts?.currentStateMarkdown ?? settlement.updatedState,
-      updatedHooks: runtimeStateArtifacts?.hooksMarkdown ?? settlement.updatedHooks,
+      updatedHooks: cleanHooksMarkdown(runtimeStateArtifacts?.hooksMarkdown ?? settlement.updatedHooks),
       updatedLedger: runtimeStateArtifacts ? (settlement.updatedLedger || ledger) : settlement.updatedLedger,
     });
 
@@ -1744,12 +1745,12 @@ ${chapter}`;
     const writes: Array<Promise<void>> = [
       writeFile(join(chaptersDir, filename), chapterContent, "utf-8"),
       writeFile(join(storyDir, "current_state.md"), runtimeStateArtifacts?.currentStateMarkdown ?? output.updatedState, "utf-8"),
-      writeFile(join(storyDir, "pending_hooks.md"), runtimeStateArtifacts?.hooksMarkdown ?? output.updatedHooks, "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), cleanHooksMarkdown(runtimeStateArtifacts?.hooksMarkdown ?? output.updatedHooks), "utf-8"),
       writeFile(
         join(storyDir, "foreshadow_registry.json"),
         JSON.stringify(
           this.buildForeshadowRegistry(
-            runtimeStateArtifacts?.hooksMarkdown ?? output.updatedHooks,
+            cleanHooksMarkdown(runtimeStateArtifacts?.hooksMarkdown ?? output.updatedHooks),
           ),
           null,
           2,
@@ -4948,32 +4949,55 @@ ${overrides}\n`;
     // Extract only the data row(s) from the summary (skip header lines)
     const dataRows = summary
       .split("\n")
+      .map((line) => line.trim())
       .filter((line) =>
         line.startsWith("|")
         && !line.startsWith("| 章节")
         && !line.startsWith("| Chapter")
         && !line.startsWith("|--")
         && !line.startsWith("| ---"),
-      )
-      .join("\n");
-
-    if (dataRows) {
-      // Deduplicate: remove existing rows with the same chapter number before appending
-      const newChapterNums = new Set(
-        dataRows.split("\n")
-          .map((line) => line.split("|")[1]?.trim())
-          .filter((ch) => ch && /^\d+$/.test(ch)),
       );
-      const deduped = existing
-        .split("\n")
-        .filter((line) => {
-          if (!line.startsWith("|")) return true;
-          const chNum = line.split("|")[1]?.trim();
-          return !chNum || !newChapterNums.has(chNum);
-        })
-        .join("\n");
-      await writeFile(summaryPath, `${deduped.trimEnd()}\n${dataRows}\n`, "utf-8");
+
+    if (dataRows.length === 0) return;
+
+    // Parse existing lines into header lines and a map of chapter -> row
+    const lines = existing.split("\n");
+    const headerLines: string[] = [];
+    const chapterRowMap = new Map<number, string>();
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      if (trimmed.startsWith("|")) {
+        const parts = trimmed.split("|").map((p) => p.trim());
+        const chNum = parts[1] ? Number.parseInt(parts[1], 10) : NaN;
+        if (!Number.isNaN(chNum)) {
+          chapterRowMap.set(chNum, trimmed);
+        } else {
+          headerLines.push(trimmed);
+        }
+      } else {
+        headerLines.push(trimmed);
+      }
     }
+
+    // Update or insert incoming summaries
+    for (const row of dataRows) {
+      const parts = row.split("|").map((p) => p.trim());
+      const chNum = parts[1] ? Number.parseInt(parts[1], 10) : NaN;
+      if (!Number.isNaN(chNum)) {
+        chapterRowMap.set(chNum, row);
+      }
+    }
+
+    // Sort chapters numerically to keep the table organized
+    const sortedChapters = Array.from(chapterRowMap.keys()).sort((a, b) => a - b);
+    const resultLines = [...headerLines];
+    for (const ch of sortedChapters) {
+      resultLines.push(chapterRowMap.get(ch)!);
+    }
+
+    await writeFile(summaryPath, resultLines.join("\n") + "\n", "utf-8");
   }
 
   private buildStyleFingerprint(styleProfileRaw: string): string | undefined {

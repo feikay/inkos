@@ -400,4 +400,37 @@ describe("Golden3ChapterAgent", () => {
       expect(report.dimensions.opening_hook_delivery).toBeGreaterThanOrEqual(70);
     });
   });
+
+  describe("chapter exist status diagnostics", () => {
+    it("reports missing chapters accurately when ch1 exists but ch2/ch3 are missing", async () => {
+      const report = await agent.review({
+        chapter1Content: "Some content",
+        chapter2Content: "",
+        chapter3Content: "",
+        chapter1Exists: { draft: true, final: true },
+        chapter2Exists: { draft: false, final: false },
+        chapter3Exists: { draft: false, final: false },
+      });
+
+      expect(report.status).toBe("SKIPPED");
+      expect(report.skippedReason).toContain("缺失：第2章、第3章");
+      expect(report.skippedReason).not.toContain("第1章");
+    });
+
+    it("reports draft exists but final missing precisely", async () => {
+      const report = await agent.review({
+        chapter1Content: "Draft content",
+        chapter2Content: "Content 2",
+        chapter3Content: "Content 3",
+        chapter1Exists: { draft: true, final: false },
+        chapter2Exists: { draft: true, final: true },
+        chapter3Exists: { draft: true, final: true },
+      });
+
+      expect(report.status).toBe("SKIPPED");
+      expect(report.skippedReason).toContain("第1章 draft exists but final missing");
+      expect(report.skippedReason).not.toContain("第2章");
+      expect(report.skippedReason).not.toContain("第3章");
+    });
+  });
 });

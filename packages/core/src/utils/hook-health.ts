@@ -3,6 +3,7 @@ import type { HookRecord, RuntimeStateDelta } from "../models/runtime-state.js";
 import { classifyHookDisposition, collectStaleHookDebt } from "./hook-governance.js";
 import { describeHookLifecycle, localizeHookPayoffTiming } from "./hook-lifecycle.js";
 import { HOOK_HEALTH_DEFAULTS } from "./hook-policy.js";
+import { isStructuralHookId } from "./hook-arbiter.js";
 
 export function analyzeHookHealth(params: {
   readonly language: "zh" | "en";
@@ -22,7 +23,11 @@ export function analyzeHookHealth(params: {
   const newHookBurstThreshold = params.newHookBurstThreshold ?? HOOK_HEALTH_DEFAULTS.newHookBurstThreshold;
   const issues: AuditIssue[] = [];
 
-  const activeHooks = params.hooks.filter((hook) => hook.status !== "resolved");
+  const activeHooks = params.hooks.filter((hook) =>
+    hook.status !== "resolved" &&
+    hook.startChapter <= params.chapterNumber &&
+    !isStructuralHookId(hook.hookId)
+  );
   const lifecycleEntries = activeHooks.map((hook) => ({
     hook,
     lifecycle: describeHookLifecycle({

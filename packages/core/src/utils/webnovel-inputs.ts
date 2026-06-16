@@ -11,6 +11,12 @@ interface GenreProfileDocument {
   };
   readonly core_loop?: ReadonlyArray<string>;
   readonly forbidden_patterns?: ReadonlyArray<string>;
+  readonly concretePayoffObjects?: ReadonlyArray<string>;
+  readonly numericalSystem?: boolean;
+  readonly powerScaling?: boolean;
+  readonly structuralSignals?: {
+    readonly defaultPayoffActions?: ReadonlyArray<string>;
+  };
 }
 
 interface ArcVolumeDocument {
@@ -36,6 +42,10 @@ export interface GenreProfileSummary {
   readonly styleEmphasis: ReadonlyArray<string>;
   readonly mustAvoid: ReadonlyArray<string>;
   readonly excerpt?: string;
+  readonly concretePayoffObjects?: ReadonlyArray<string>;
+  readonly defaultPayoffActions?: ReadonlyArray<string>;
+  readonly numericalSystem?: boolean;
+  readonly powerScaling?: boolean;
 }
 
 export interface ArcMapSummary {
@@ -88,6 +98,10 @@ export function summarizeGenreProfile(
       coreLoop.length > 0 ? coreLoop.join(" -> ") : undefined,
       forbidden[0],
     ].filter(Boolean).join(" | "),
+    concretePayoffObjects: parsed.concretePayoffObjects,
+    defaultPayoffActions: parsed.structuralSignals?.defaultPayoffActions,
+    numericalSystem: parsed.numericalSystem,
+    powerScaling: parsed.powerScaling,
   };
 }
 

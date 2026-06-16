@@ -37,6 +37,23 @@ export const GenreProfileSchema = z.object({
   satisfactionTypes: z.array(z.string()).default([]),
   auditDimensions: z.array(z.number()).default([]),
   contentSafetyProfile: ContentSafetyProfileSchema.optional(),
+  concretePayoffObjects: z.array(z.string()).optional(),
+  resourceSystem: z.object({
+    defaultTypes: z.array(z.string()),
+    aliases: z.record(z.string()),
+  }).optional(),
+  styleGovernance: z.object({
+    allowedStyleExamples: z.array(z.string()).optional(),
+    forbiddenProseKeywords: z.array(z.string()).optional(),
+  }).optional(),
+  structuralSignals: z.object({
+    defaultPayoffActions: z.array(z.string()).optional(),
+    lowStatusKeywords: z.array(z.string()).optional(),
+  }).optional(),
+  recoveryTemplates: z.object({
+    deferExchangeText: z.string().optional(),
+    deferExchangeConstraints: z.array(z.string()).optional(),
+  }).optional(),
 });
 
 export type GenreProfile = z.infer<typeof GenreProfileSchema>;

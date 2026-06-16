@@ -60,6 +60,7 @@ import {
   parseResourceRules,
   LengthNormalizerAgent,
   isOutsideSoftRange,
+  ChapterCompressorAgent,
 } from "@actalk/inkos-core";
 import { existsSync, readdirSync, type Dirent } from "node:fs";
 import { mkdir, readdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
@@ -597,117 +598,14 @@ reviewCommand
             log("warning: Chapter failed to reach PASS after max attempts. Manual review required.");
           }
 
-          if (runtime?.client && runtime.model) {
-            if (!opts.json) {
-              log("");
-              log("[auto-salvage]");
-            }
-            salvage = await runContinuitySalvage({
-              bookDir: book.dir,
-              chapter,
-              client: runtime.client,
-              model: runtime.model,
-              issues: finalReport.issues,
-              maxFixAttempts,
-              minChapterWords,
-            });
-
-            const salvageScore = salvage.report?.report.score ?? 0;
-            if (!opts.json) {
-              log(`rewrite -> score: ${salvageScore}`);
-            }
-
-            if (salvage.report && isContinuityPublishPass(salvage.report.report)) {
-              finalStatus = "PASS";
-              finalReport = makeContinuityDecisionReport({
-                ...salvage.report.report,
-                rewrite_strategy: "salvage_rewrite",
-                summary: `${salvage.report.report.summary}\n\nsalvage_rewrite accepted as final chapter candidate.`,
-              }, {
-                finalStatus: "PASS",
-                decisionSource: "salvage",
-                usedFile: relative(book.dir, salvage.salvageChapterPath),
-                bodySource: "salvaged",
-                fixAttempt: salvage.report.report.fix_attempt,
-                maxFixAttempts,
-              });
-              await writeContinuityReportFiles(
-                finalReport,
-                join(reportDir, `${prefix}.final-report.json`),
-                join(reportDir, `${prefix}.final-report.md`),
-                chapter,
-                salvage.report.chapterTitle,
-              );
-              if (!opts.json) log("final result: PASS (salvaged)");
-            } else if (salvage.report && salvageScore >= 70) {
-              const lightFixed = await runSalvageLightFix({
-                bookDir: book.dir,
-                chapter,
-                client: runtime.client,
-                model: runtime.model,
-                reportJsonPath: salvage.report.reportJsonPath,
-                maxFixAttempts,
-              });
-              salvage = { ...salvage, lightFixChapterPath: lightFixed.fixedChapterPath };
-              const afterLightFix = await checkContinuityChapter({
-                root,
-                bookId: book.id,
-                bookDir: book.dir,
-                chapter,
-                client: runtime.client,
-                model: runtime.model,
-                final: true,
-                reportKind: "final-report",
-                currentOverridePath: lightFixed.fixedChapterPath,
-                fixAttempt: maxFixAttempts,
-                maxFixAttempts,
-                minChapterWords,
-              });
-              salvage = { ...salvage, finalReport: afterLightFix };
-              if (isContinuityPublishPass(afterLightFix.report)) {
-                finalStatus = "PASS";
-                finalReport = makeContinuityDecisionReport({ ...afterLightFix.report, rewrite_strategy: "salvage_rewrite" }, {
-                  finalStatus: "PASS",
-                  decisionSource: "salvage",
-                  usedFile: relative(book.dir, lightFixed.fixedChapterPath),
-                  bodySource: "salvaged",
-                  fixAttempt: afterLightFix.report.fix_attempt,
-                  maxFixAttempts,
-                });
-                await writeContinuityReportFiles(finalReport, afterLightFix.reportJsonPath, afterLightFix.reportMarkdownPath, chapter, afterLightFix.chapterTitle);
-                if (!opts.json) log("final result: PASS (salvaged)");
-              } else {
-                finalStatus = "MANUAL_REVIEW";
-                finalReport = retainNonSalvageFinalAfterSalvageFailure(
-                  formalCurrentFinalReport,
-                  "auto-salvage plus light_fix did not produce a PASS candidate; retained the formal current-body continuity diagnosis.",
-                );
-                await writeContinuityReportFiles(
-                  finalReport,
-                  join(reportDir, `${prefix}.final-report.json`),
-                  join(reportDir, `${prefix}.final-report.md`),
-                  chapter,
-                  initial.chapterTitle,
-                );
-                if (!opts.json) log("final result: MANUAL_REVIEW (salvage rejected)");
+          if (!opts.json) {
+            log(`warning: Chapter failed to reach PASS after ${maxFixAttempts} attempts.`);
+            if (finalReport.score !== null && finalReport.score < 70) {
+              log(`CRITICAL: Severe continuity conflict detected (Score: ${finalReport.score} < 70).`);
+              for (const issue of finalReport.issues) {
+                log(`- [${issue.severity}] ${issue.detail}`);
               }
-            } else {
-              finalStatus = "MANUAL_REVIEW";
-              finalReport = retainNonSalvageFinalAfterSalvageFailure(
-                formalCurrentFinalReport,
-                "auto-salvage failed below usable score; retained the formal current-body continuity diagnosis.",
-              );
-              await writeContinuityReportFiles(
-                finalReport,
-                join(reportDir, `${prefix}.final-report.json`),
-                join(reportDir, `${prefix}.final-report.md`),
-                chapter,
-                initial.chapterTitle,
-              );
-              if (!opts.json) log("final result: MANUAL_REVIEW (salvage rejected)");
             }
-          } else if (!opts.json) {
-            log("warning: auto-salvage skipped because LLM config is unavailable.");
           }
         }
 
@@ -873,6 +771,20 @@ reviewCommand
           reset,
         });
         results.push(result);
+
+        if (isExportablePublishStatus(result.publish_status)) {
+          const state = new StateManager(root);
+          const index = await state.loadChapterIndex(book.id);
+          const idx = index.findIndex((ch) => ch.number === chapter);
+          if (idx !== -1 && index[idx]!.status !== "approved") {
+            index[idx]!.status = "ready-for-review";
+            if (result.warnings && result.warnings.length > 0) {
+              index[idx]!.lengthWarnings = result.warnings ? [...result.warnings] : [];
+            }
+            index[idx]!.updatedAt = new Date().toISOString();
+            await state.saveChapterIndex(book.id, index);
+          }
+        }
 
         if (!opts.json) {
           log("");
@@ -1177,6 +1089,11 @@ interface PublishReadyLengthGate {
   readonly hard_max: number;
   readonly counting_mode: string;
   readonly summary: string;
+}
+
+interface PublishReadyCompressionResult {
+  readonly lengthGate: PublishReadyLengthGate;
+  readonly compressed: boolean;
 }
 
 interface ReviewedChapterSource {
@@ -1671,6 +1588,7 @@ async function runPublishReadyChapterOnce(params: {
   let qualityStatus: "QUALITY_PASS" | "QUALITY_WARN_POLISH_OPTIONAL" | "QUALITY_MANUAL_REVIEW" | undefined;
   let qualityCandidate: string | undefined;
   let manualContinuityAcceptance: PublishReadyManualContinuityAcceptance | undefined;
+  let chapterIntentContent = "";
  
   for (let loop = 1; loop <= 2; loop += 1) {
     if (!params.json) {
@@ -1753,7 +1671,7 @@ async function runPublishReadyChapterOnce(params: {
         signalsResult.status === "ok" ? signalsResult.signals : undefined;
 
       const intentPrefix = chapterNumberPrefix(params.chapter);
-      let chapterIntentContent = "";
+      chapterIntentContent = "";
       try {
         const intentPath = join(params.bookDir, "story", "runtime", "chapter-intents", `${intentPrefix}.md`);
         chapterIntentContent = await readFile(intentPath, "utf-8").catch(() => "");
@@ -1902,11 +1820,16 @@ async function runPublishReadyChapterOnce(params: {
       const finalFile = await writeReviewedFinalChapter(params.bookDir, params.chapter, continuity.sourceFile);
       sourceChain.add(relative(params.bookDir, finalFile));
       const readyToExport = isReadyToExport(continuityReport, immediateQualityDecision, finalFile, params.minChapterWords, Boolean(manualContinuityAcceptance));
-      const lengthGate = await checkPublishReadyFinalLength({
+      const compression = await checkAndCompressPublishReadyFinalLength({
         file: finalFile,
         targetChapterWords: params.targetChapterWords,
         language: params.language,
+        client: params.client,
+        model: params.model!,
+        root: params.root,
+        chapterIntent: chapterIntentContent,
       });
+      const lengthGate = compression.lengthGate;
       const lengthDecision = applyPublishReadyLengthGate(
         readyToExport ? publishStatusForQualityDecision(immediateQualityDecision) : "MANUAL_REVIEW",
         qualityWarnings(immediateQualityDecision, quality.report.quality_score, params.qualityPassThreshold),
@@ -1925,10 +1848,11 @@ async function runPublishReadyChapterOnce(params: {
         lengthDecision.warnings,
         scopeGate,
       );
+      const publishDecision = applyPostCompressionGate(scopeDecision.publishStatus, scopeDecision.warnings, compression);
       return writePublishReadyReport(params.bookDir, {
         book: params.bookId,
         chapter_index: params.chapter,
-        publish_status: scopeDecision.publishStatus,
+        publish_status: publishDecision.publishStatus,
         final_candidate_file: relative(params.bookDir, finalFile),
         source_chain: [...sourceChain],
         continuity: { final_status: continuityReport.final_status, score: continuityReport.score },
@@ -1940,7 +1864,7 @@ async function runPublishReadyChapterOnce(params: {
         structure_pass_threshold: params.structurePassThreshold,
         structure_accept_threshold: params.structureAcceptThreshold,
         accepted_reason: immediateQualityDecision === "QUALITY_WARN_POLISH_OPTIONAL" ? "quality score is publishable with optional polish" : undefined,
-        warnings: scopeDecision.warnings,
+        warnings: publishDecision.warnings,
         ...manualContinuityAcceptance,
         source_file: relative(params.bookDir, continuity.sourceFile),
         word_count: lengthGate.count,
@@ -2118,11 +2042,16 @@ async function runPublishReadyChapterOnce(params: {
       const qualityDecision = decidePublishQuality(qualityScore, params.qualityPassThreshold, params.qualityAcceptThreshold);
       qualityStatus = qualityFinalStatusFromDecision(qualityDecision);
       const readyToExport = isReadyToExport(continuityReport, qualityDecision, finalFile, params.minChapterWords, Boolean(manualContinuityAcceptance));
-      const lengthGate = await checkPublishReadyFinalLength({
+      const compression = await checkAndCompressPublishReadyFinalLength({
         file: finalFile,
         targetChapterWords: params.targetChapterWords,
         language: params.language,
+        client: params.client,
+        model: params.model!,
+        root: params.root,
+        chapterIntent: chapterIntentContent,
       });
+      const lengthGate = compression.lengthGate;
       const basePublishStatus: PublishReadyStatus = readyToExport
         ? publishStatusForQualityDecision(qualityDecision)
         : qualityDecision === "NEED_REWRITE" ? "NEED_REWRITE" : "MANUAL_REVIEW";
@@ -2144,10 +2073,11 @@ async function runPublishReadyChapterOnce(params: {
         lengthDecision.warnings,
         scopeGate,
       );
+      const publishDecision = applyPostCompressionGate(scopeDecision.publishStatus, scopeDecision.warnings, compression);
       return writePublishReadyReport(params.bookDir, {
         book: params.bookId,
         chapter_index: params.chapter,
-        publish_status: scopeDecision.publishStatus,
+        publish_status: publishDecision.publishStatus,
         final_candidate_file: relative(params.bookDir, finalFile),
         source_chain: [...sourceChain],
         continuity: { final_status: continuityReport.final_status, score: continuityReport.score },
@@ -2159,7 +2089,7 @@ async function runPublishReadyChapterOnce(params: {
         structure_pass_threshold: params.structurePassThreshold,
         structure_accept_threshold: params.structureAcceptThreshold,
         accepted_reason: qualityDecision === "QUALITY_WARN_POLISH_OPTIONAL" ? "quality score is publishable with optional polish" : undefined,
-        warnings: scopeDecision.warnings,
+        warnings: publishDecision.warnings,
         ...manualContinuityAcceptance,
         source_file: relative(params.bookDir, continuity.sourceFile),
         word_count: lengthGate.count,
@@ -2297,23 +2227,32 @@ async function runPublishReadyWithContinuityOverride(
   const finalFile = await writeReviewedFinalChapter(params.bookDir, params.chapter, candidateSource);
   sourceChain.add(relative(params.bookDir, finalFile));
   const readyToExport = isReadyToExport(override.report, qualityDecision, finalFile, params.minChapterWords);
-  const lengthGate = await checkPublishReadyFinalLength({
+  const intentPrefix = chapterNumberPrefix(params.chapter);
+  const intentPath = join(params.bookDir, "story", "runtime", "chapter-intents", `${intentPrefix}.md`);
+  const chapterIntentContent = await readFile(intentPath, "utf-8").catch(() => "");
+  const compression = await checkAndCompressPublishReadyFinalLength({
     file: finalFile,
     targetChapterWords: params.targetChapterWords,
     language: params.language,
+    client: params.client,
+    model: params.model,
+    root: findProjectRoot(),
+    chapterIntent: chapterIntentContent,
   });
+  const lengthGate = compression.lengthGate;
   const lengthDecision = applyPublishReadyLengthGate(
     readyToExport ? publishStatusForQualityDecision(qualityDecision) : "MANUAL_REVIEW",
     qualityWarnings(qualityDecision, qualityScore, params.qualityPassThreshold),
     lengthGate,
   );
+  const publishDecision = applyPostCompressionGate(lengthDecision.publishStatus, lengthDecision.warnings, compression);
   return writePublishReadyReport(params.bookDir, {
     ...common,
-    publish_status: lengthDecision.publishStatus,
+    publish_status: publishDecision.publishStatus,
     final_candidate_file: relative(params.bookDir, finalFile),
     source_chain: [...sourceChain],
     accepted_reason: qualityDecision === "QUALITY_WARN_POLISH_OPTIONAL" ? "quality score is publishable with optional polish" : undefined,
-    warnings: lengthDecision.warnings,
+    warnings: publishDecision.warnings,
     word_count: lengthGate.count,
     target_chapter_words: params.targetChapterWords,
     max_chapter_words: lengthGate.hard_max,
@@ -2723,6 +2662,89 @@ async function checkPublishReadyFinalLength(params: {
   });
 }
 
+async function checkAndCompressPublishReadyFinalLength(params: {
+  readonly file: string;
+  readonly targetChapterWords: number;
+  readonly language: "zh" | "en";
+  readonly client: any;
+  readonly model: string;
+  readonly root: string;
+  readonly chapterIntent: string;
+}): Promise<PublishReadyCompressionResult> {
+  let lengthGate = await checkPublishReadyFinalLength({
+    file: params.file,
+    targetChapterWords: params.targetChapterWords,
+    language: params.language,
+  });
+  let compressed = false;
+
+  if (lengthGate.status === "FAIL" && lengthGate.count > lengthGate.hard_max) {
+    log(`[compressor] Final chapter length (${lengthGate.count}) exceeds hard max (${lengthGate.hard_max}). Triggering automatic compression...`);
+    const compressor = new ChapterCompressorAgent({
+      client: params.client,
+      model: params.model,
+      projectRoot: params.root,
+      logger: console as any,
+    });
+
+    let text = await readFile(params.file, "utf-8");
+
+    // Round 1: pruneScope
+    log("[compressor] Running Round 1: pruneScope (boundary scene trimming)...");
+    const pruned = await compressor.pruneScope(text, params.chapterIntent);
+    if (pruned && pruned.trim() && pruned !== text) {
+      log(`[compressor] pruneScope succeeded. length count changed from ${lengthGate.count} to ${pruned.length}`);
+      await writeFile(params.file, pruned, "utf-8");
+      compressed = true;
+      text = pruned;
+      lengthGate = await checkPublishReadyFinalLength({
+        file: params.file,
+        targetChapterWords: params.targetChapterWords,
+        language: params.language,
+      });
+    }
+
+    // Round 2: deWater (if still exceeding hard_max)
+    if (lengthGate.status === "FAIL" && lengthGate.count > lengthGate.hard_max) {
+      log(`[compressor] Length is still ${lengthGate.count}, exceeding hard max. Running Round 2: deWater (background / verbose phrasing deflation)...`);
+      const deWatered = await compressor.deWater(text);
+      if (deWatered && deWatered.trim() && deWatered !== text) {
+        log(`[compressor] deWater succeeded. length count changed from ${lengthGate.count} to ${deWatered.length}`);
+        await writeFile(params.file, deWatered, "utf-8");
+        compressed = true;
+        lengthGate = await checkPublishReadyFinalLength({
+          file: params.file,
+          targetChapterWords: params.targetChapterWords,
+          language: params.language,
+        });
+      }
+    }
+    log(`[compressor] Compression finished. Final length: ${lengthGate.count} (${lengthGate.status})`);
+  }
+
+  return { lengthGate, compressed };
+}
+
+export function applyPostCompressionGate(
+  publishStatus: PublishReadyStatus,
+  existingWarnings: ReadonlyArray<string> | undefined,
+  compression: PublishReadyCompressionResult,
+): { readonly publishStatus: PublishReadyStatus; readonly warnings: ReadonlyArray<string> | undefined } {
+  if (!compression.compressed) {
+    return { publishStatus, warnings: existingWarnings };
+  }
+  const warnings = [
+    ...(existingWarnings ?? []),
+    "blocking_warning: post_compression_review_required: final candidate was modified by the length compressor after continuity/quality checks; rerun publish-ready or review manually before export.",
+  ];
+  return {
+    publishStatus: publishStatus === "READY_TO_EXPORT" || publishStatus === "READY_WITH_WARNINGS"
+      ? "MANUAL_REVIEW"
+      : publishStatus,
+    warnings,
+  };
+}
+
 export function applyPublishReadyLengthGate(
   publishStatus: PublishReadyStatus,
   existingWarnings: ReadonlyArray<string> | undefined,
@@ -2730,15 +2752,17 @@ export function applyPublishReadyLengthGate(
 ): { readonly publishStatus: PublishReadyStatus; readonly warnings: ReadonlyArray<string> | undefined } {
   const warnings = [...(existingWarnings ?? [])];
   if (gate.status === "FAIL") {
-    // Length over hardMax is a diagnostic warning, not a hard block.
-    // The root cause is input boundary violations, not length itself.
-    warnings.push(`length_diagnostic: ${gate.summary}`);
-    warnings.push("length_diagnostic: 字数超上限可能是输入越界的症状，请检查 scope_gate 和修稿输入边界。");
-    // Downgrade READY_TO_EXPORT to READY_WITH_WARNINGS if needed
-    if (publishStatus === "READY_TO_EXPORT") {
-      return { publishStatus: "READY_WITH_WARNINGS", warnings: [...new Set(warnings)] };
-    }
-    return { publishStatus, warnings: [...new Set(warnings)] };
+    warnings.push(`length_gate: ${gate.summary}`);
+    warnings.push("length_gate: 字数越界，发布阻塞。请重新运行 publish-ready 或压缩章节字数。");
+    const hardBlocked = publishStatus === "BLOCKED_BY_RESOURCE"
+      || publishStatus === "BLOCKED_BY_CONTINUITY"
+      || publishStatus === "BLOCKED_BY_QUALITY"
+      || publishStatus === "BLOCKED_BY_SCOPE"
+      || publishStatus === "NEED_REWRITE";
+    return {
+      publishStatus: hardBlocked ? publishStatus : "BLOCKED_BY_LENGTH",
+      warnings: [...new Set(warnings)],
+    };
   }
   if (gate.status === "WARN") {
     warnings.push(`length_gate: ${gate.summary}`);
@@ -3472,6 +3496,7 @@ async function writePublishReadyReport(bookDir: string, report: PublishReadyResu
     structureAcceptThreshold,
   );
 
+  const finalPublishStatus = structureDecision.publishStatus as PublishReadyResult["publish_status"];
   const finalReport = {
     ...report,
     story_effectiveness: seSummary,
@@ -3480,7 +3505,8 @@ async function writePublishReadyReport(bookDir: string, report: PublishReadyResu
     antagonist_intelligence: aiSummary,
     transition_quality: tqSummary,
     six_step_plot: ssSummary,
-    publish_status: structureDecision.publishStatus as PublishReadyResult["publish_status"],
+    publish_status: finalPublishStatus,
+    accepted_reason: isExportablePublishStatus(finalPublishStatus) ? report.accepted_reason : undefined,
     warnings: signalError
       ? [...(structureDecision.warnings ?? []), `structure_signals: ${signalError}`]
       : structureDecision.warnings,
@@ -3684,11 +3710,19 @@ async function runQualityAutoFixChapter(params: {
       const finalFile = await writeReviewedFinalChapter(params.bookDir, params.chapter, continuityAfter.final.sourceFile);
       sourceChain.add(relative(params.bookDir, finalFile));
       const readyToExport = isReadyToExport(continuityAfter.report, qualityDecision, finalFile, params.minChapterWords);
-      const lengthGate = await checkPublishReadyFinalLength({
+      const intentPrefix = chapterNumberPrefix(params.chapter);
+      const intentPath = join(params.bookDir, "story", "runtime", "chapter-intents", `${intentPrefix}.md`);
+      const chapterIntentContent = await readFile(intentPath, "utf-8").catch(() => "");
+      const compression = await checkAndCompressPublishReadyFinalLength({
         file: finalFile,
         targetChapterWords: params.targetChapterWords,
         language: params.language,
+        client: params.client,
+        model: params.model,
+        root: params.root,
+        chapterIntent: chapterIntentContent,
       });
+      const lengthGate = compression.lengthGate;
       const lengthDecision = applyPublishReadyLengthGate(
         readyToExport
           ? publishStatusForQualityDecision(qualityDecision)
@@ -3696,10 +3730,11 @@ async function runQualityAutoFixChapter(params: {
         qualityWarnings(qualityDecision, qualityAfter.report.quality_score, params.qualityPassThreshold),
         lengthGate,
       );
+      const publishDecision = applyPostCompressionGate(lengthDecision.publishStatus, lengthDecision.warnings, compression);
       const publish = await writePublishReadyReport(params.bookDir, {
         book: params.bookId,
         chapter_index: params.chapter,
-        publish_status: lengthDecision.publishStatus,
+        publish_status: publishDecision.publishStatus,
         final_candidate_file: relative(params.bookDir, finalFile),
         source_chain: [...sourceChain],
         continuity: { final_status: continuityAfter.report.final_status, score: continuityAfter.report.score },
@@ -3709,7 +3744,7 @@ async function runQualityAutoFixChapter(params: {
         quality_pass_threshold: params.qualityPassThreshold,
         quality_accept_threshold: params.qualityAcceptThreshold,
         accepted_reason: qualityDecision === "QUALITY_WARN_POLISH_OPTIONAL" ? "quality score is publishable with optional polish" : undefined,
-        warnings: lengthDecision.warnings,
+        warnings: publishDecision.warnings,
         source_file: relative(params.bookDir, continuityAfter.final.sourceFile),
         word_count: lengthGate.count,
         min_chapter_words: params.minChapterWords,

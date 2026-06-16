@@ -32,7 +32,10 @@ export function buildEnglishCoreRules(_book: BookConfig): string {
 16. **Promise and payoff**: Every planted hook must be resolved. Every mystery must have an answer.
 17. **Escalation**: Each conflict should feel higher-stakes than the last—either externally or emotionally.
 18. **Reader proxy**: One character should react with surprise/excitement/fear when remarkable things happen, giving readers permission to feel the same.
-19. **Pacing breathing room**: After a high-intensity sequence, give 0.5-1 chapter of lower intensity before the next escalation.`;
+19. **Pacing breathing room**: After a high-intensity sequence, give 0.5-1 chapter of lower intensity before the next escalation.
+
+### End-of-Chapter Boundary Rule
+20. **Boundary Safeguard**: In the final 200 to 300 words of the chapter prose, focus strictly on winding down the emotional atmosphere of the current scene and leaving a suspenseful hook/blank space. **Absolutely forbid jumping ahead or depicting the actions of the next scene's beginning** (for example, if this chapter is set to end before dawn, do not prematurely describe the next morning's micro-actions like the protagonist receiving food, starting a new dialogue, or initiating a new transaction). You must leave the physical action cuts fully clean for the next chapter's writer.`;
 }
 
 // English equivalent of buildAntiAIExamples()

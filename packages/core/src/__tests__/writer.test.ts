@@ -6365,6 +6365,28 @@ describe("WriterAgent", () => {
     expect(planValidation.issues).toEqual([]);
   });
 
+  it("does not build legacy recovery plans for non-numerical genres without explicit legacy rules", () => {
+    const plans = buildResourceRecoveryPlans({
+      validation: validateResourceMath({ events: [] }),
+      chapterIntent: "本章只处理普通关系冲突，不启用系统资源。",
+      genreProfile: {
+        id: "other",
+        name: "通用",
+        language: "zh",
+        chapterTypes: [],
+        fatigueWords: [],
+        numericalSystem: false,
+        powerScaling: false,
+        eraResearch: false,
+        pacingRule: "",
+        satisfactionTypes: [],
+        auditDimensions: [],
+      },
+    });
+
+    expect(plans).toEqual([]);
+  });
+
   it("rejects resource recovery text with forbidden overdraft phrases", () => {
     const plan = buildResourceRecoveryPlans({
       validation: validateResourceMath({ events: [] }),
@@ -6680,6 +6702,18 @@ describe("WriterAgent", () => {
       bookRules: "1点民望=10联邦币\n初级辩论技能消耗10点民望",
       currentState: "民望值=0；联邦币=200",
       currentLedger: "| 民望值 | 0 |\n| 联邦币 | 200 |",
+      genreProfile: {
+        name: "Mock Urban",
+        id: "urban",
+        chapterTypes: [],
+        fatigueWords: [],
+        recoveryTemplates: {
+          deferExchangeText: [
+            "林默的指尖停在“兑换合法资源”的按钮前，停了很久，却没有立刻按下去。",
+            "外婆的透析费还差两千七，下个月房租还差八百，这些数字仍像石头一样压在胸口。可这一次，他没有再像刚才那样被逼到绝路。",
+          ].join("\n\n"),
+        },
+      } as any,
     });
     const validation = validateResourceMath({
       events: extractResourceEvents(patched.patchedText, "1点民望=10联邦币\n初级辩论技能消耗10点民望"),

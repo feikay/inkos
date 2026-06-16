@@ -1,16 +1,105 @@
 ---
 name: 数据流/LitRPG
 id: litrpg-zh
-chapterTypes: ["副本章", "升级章", "布局章", "过渡章", "回收章"]
-fatigueWords: ["冷笑", "倒吸凉气", "不可置信", "轰然炸裂", "满场死寂", "仿佛", "不禁", "宛如", "竟然"]
+chapterTypes:
+  - 副本章
+  - 升级章
+  - 布局章
+  - 过渡章
+  - 回收章
+fatigueWords:
+  - 冷笑
+  - 倒吸凉气
+  - 不可置信
+  - 轰然炸裂
+  - 满场死寂
+  - 仿佛
+  - 不禁
+  - 宛如
+  - 竟然
 numericalSystem: true
 powerScaling: true
 eraResearch: false
-pacingRule: "前期每1-3章一次升级或属性提升，中期每5-10章，后期阶层跨越大幅拉长"
-satisfactionTypes: ["升级突破", "技能解锁", "装备爆出", "Boss击杀", "阶层跨越", "系统秘密揭示"]
-auditDimensions: [1,2,3,4,5,6,7,8,9,10,11,13,14,15,16,17,18,19,24,25,26]
+pacingRule: 前期每1-3章一次升级或属性提升，中期每5-10章，后期阶层跨越大幅拉长
+satisfactionTypes:
+  - 升级突破
+  - 技能解锁
+  - 装备爆出
+  - Boss击杀
+  - 阶层跨越
+  - 系统秘密揭示
+auditDimensions:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 24
+  - 25
+  - 26
+concretePayoffObjects:
+  - 地图锁孔
+  - 玉简
+  - 地图
+  - 残图
+  - 锁孔
+  - 机关
+  - 阵纹
+  - 禁纹
+  - 法阵
+  - 腰牌
+  - 令牌
+  - 钥匙
+  - 卷轴
+  - 古卷
+  - 残卷
+  - 残页
+  - 石碑
+  - 古碑
+  - 碑纹
+  - 入口
+  - 门
+  - 祭坛
+styleGovernance:
+  allowedStyleExamples:
+    - 三息
+    - 一炷香
+    - 千年
+    - 聚气九层
+  forbiddenProseKeywords:
+    - 性价比
+    - 打折
+    - 收益
+    - 基础值
+structuralSignals:
+  defaultPayoffActions:
+    - 触发
+    - 打开
+    - 拿到
+    - 夺下
+    - 获得
+    - 压住
+    - 突破
+    - 开启
+  lowStatusKeywords:
+    - 扫地
+    - 杂役
+    - 废材
+    - 废物
 ---
-
 ## 题材禁忌
 
 - 系统规则前后矛盾——读者会追踪每一个数值

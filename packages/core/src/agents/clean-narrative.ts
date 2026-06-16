@@ -23,12 +23,12 @@ export interface CleanNarrativeResult {
   readonly blocking: boolean;
 }
 
-const PROMPT_LEAK_PATTERN = /本章(?:要求|意图|目标)|按(?:要求|任务|提示词|提示)|根据\s*prompt|根据提示|prompt|本章要写/u;
-const META_INSTRUCTION_PATTERN = /这里(?:应该|补|删)|这段(?:应该|要调整)|需要调整|调整一下|修正为|改成|要写成|不能写|应该写/u;
+const PROMPT_LEAK_PATTERN = /本章(?:要求|意图|目标)|按(?:任务提示词|提示词要求)|根据\s*prompt|prompt|本章要写/u;
+const META_INSTRUCTION_PATTERN = /【这里(?:应该|补|删)】|^这里需要(?:写|补)|^[（(]这里(?:应该|补|删|需要写)[）)]|^这段(?:应该|要调整)|调整一下(?:剧情|大纲|设定|结构)|修正为|改成|要写成|不能写|应该写/u;
 const PROCESS_LEAK_PATTERN = /Resource Engine|resource-consistency|template patch|defer_exchange|add_earned_resource_before_spend|LLM|token|stage|rewrite|validation|accepted=false|rejectedReason|reviewer|report|json|markdown/u;
-const AUTHOR_NOTE_PATTERN = /【作者注】|作者注：|备注：|TODO|FIXME|草稿|临时|待改|这一段|上一段|下一段/u;
+const AUTHOR_NOTE_PATTERN = /【作者注】|作者注[：:]|【备注】|备注[：:]|^TODO|^FIXME|【草稿】|【临时】|临时草稿|临时标注|【待改】|^待补充|^[【（(]?(?:这一段|上一段|下一段)(?:需要|应该|补|删|改|调整)/ui;
 const SELF_CORRECTION_PATTERN = /(?:不对|哦对|哦不对|等等|我调整一下|刚才(?:顺序)?错了|写错了|重新算|重新整理|算错了|前面错了|修一下|对了没错)/u;
-const RESOURCE_SCRATCH_PATTERN = /(?:扶人\s*\d+\s*\+\s*路人\s*\d+|总获得|花\d+换技能|剩\d+|换钱不对|兑换\d+.*哦对|按公式|资源链|民望公式|余额计算|当前账本|程序账本|\d+\s*\+\s*\d+|\d+\s*-\s*\d+)/u;
+const RESOURCE_SCRATCH_PATTERN = /(?:扶人\s*\d+\s*\+\s*路人\s*\d+|总获得|花\d+换技能|剩\d+|换钱不对|兑换\d+.*哦对|按公式|资源链|民望公式|余额计算|当前账本|程序账本|\d+\s*\+\s*\d+\s*=|\d+\s*-\s*\d+\s*=)/u;
 const RESOURCE_WORD_PATTERN = /民望|联邦币|现金|技能|余额|兑换|到账|资源/u;
 const NUMBER_PATTERN = /\d+|[一二两三四五六七八九十百千万]+/gu;
 

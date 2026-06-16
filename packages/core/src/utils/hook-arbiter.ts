@@ -11,35 +11,87 @@ export interface HookArbiterDecision {
   readonly action: "created" | "mapped" | "mentioned" | "rejected";
   readonly reason: string;
   readonly hookId?: string;
-  readonly candidate: NewHookCandidate;
+  readonly candidate: NewHookCandidate & { readonly preferredHookId?: string };
 }
 
 interface PendingHookCandidate extends NewHookCandidate {
   readonly preferredHookId?: string;
 }
 
+const FORBIDDEN_STRUCTURAL_PATTERNS = [
+  "system-secret",
+  "core-antagonist-plot",
+  "world-resource-monopoly",
+  "first-10-stage-enemy",
+  "supporting-character-goals",
+];
+
+export function isStructuralHookId(hookId: string): boolean {
+  const normalized = hookId.toLowerCase();
+  return FORBIDDEN_STRUCTURAL_PATTERNS.some((pat) => normalized.includes(pat));
+}
+
+function isStructuralCandidate(candidate: NewHookCandidate & { readonly preferredHookId?: string }): boolean {
+  if (candidate.preferredHookId && isStructuralHookId(candidate.preferredHookId)) {
+    return true;
+  }
+  const desc = `${candidate.type} ${candidate.expectedPayoff} ${candidate.notes}`.toLowerCase();
+  return FORBIDDEN_STRUCTURAL_PATTERNS.some((pat) => desc.includes(pat));
+}
+
+export function cleanHooksMarkdown(markdown: string): string {
+  const lines = markdown.split("\n");
+  const filtered = lines.filter((line) => {
+    const isStructural = FORBIDDEN_STRUCTURAL_PATTERNS.some((pat) => line.toLowerCase().includes(pat));
+    return !isStructural;
+  });
+  return filtered.join("\n");
+}
+
 export function arbitrateRuntimeStateDeltaHooks(params: {
   readonly hooks: ReadonlyArray<HookRecord>;
   readonly delta: RuntimeStateDelta;
+  readonly chapterIntent?: string;
 }): {
   readonly resolvedDelta: RuntimeStateDelta;
   readonly decisions: ReadonlyArray<HookArbiterDecision>;
 } {
   const delta = RuntimeStateDeltaSchema.parse(params.delta);
-  const workingHooks = params.hooks.map((hook) => ({ ...hook }));
-  const knownHookIds = new Set(workingHooks.map((hook) => hook.hookId));
+  const workingHooks = [...params.hooks];
+
   const upsertsById = new Map<string, HookRecord>();
-  const mentions = new Set(delta.hookOps.mention);
-  const resolves = uniqueStrings(delta.hookOps.resolve);
-  const defers = uniqueStrings(delta.hookOps.defer);
+
+  // Filter structural hooks out of the lists
+  const filteredResolve = delta.hookOps.resolve.filter((id) => !isStructuralHookId(id));
+  const filteredMention = delta.hookOps.mention.filter((id) => !isStructuralHookId(id));
+  const filteredDefer = delta.hookOps.defer.filter((id) => !isStructuralHookId(id));
+
+  const mentions = new Set(filteredMention);
+  const resolves = uniqueStrings(filteredResolve);
+  const defers = uniqueStrings(filteredDefer);
   const fallbackCandidates: PendingHookCandidate[] = [];
   const decisions: HookArbiterDecision[] = [];
 
   for (const hook of delta.hookOps.upsert) {
-    if (knownHookIds.has(hook.hookId)) {
-      const normalized = { ...hook };
-      upsertsById.set(normalized.hookId, normalized);
-      replaceWorkingHook(workingHooks, normalized);
+    if (isStructuralHookId(hook.hookId)) {
+      decisions.push({
+        action: "rejected",
+        reason: "structural_hook_forbidden",
+        candidate: {
+          type: hook.type,
+          expectedPayoff: hook.expectedPayoff,
+          notes: hook.notes,
+          preferredHookId: hook.hookId,
+        },
+      });
+      continue;
+    }
+
+    const existing = workingHooks.find((h) => h.hookId === hook.hookId);
+    if (existing) {
+      const merged = mergeCandidateIntoExistingHook(existing, hook, delta.chapter);
+      upsertsById.set(merged.hookId, merged);
+      replaceWorkingHook(workingHooks, merged);
       continue;
     }
 
@@ -51,7 +103,48 @@ export function arbitrateRuntimeStateDeltaHooks(params: {
     });
   }
 
-  for (const candidate of [...fallbackCandidates, ...delta.newHookCandidates]) {
+  // Parse foreshadowed IDs and new hook cap budget from chapter intent
+  let newHookCap = Infinity;
+  const foreshadowedIds = new Set<string>();
+
+  if (params.chapterIntent) {
+    const capMatch = params.chapterIntent.match(/(?:本章不要再新开超过|do not open more than)\s*(\d+)\s*(?:个新伏笔家族|new hook families)/i);
+    if (capMatch) {
+      newHookCap = parseInt(capMatch[1], 10);
+    }
+    const touchMatches = params.chapterIntent.matchAll(/(?:foshadowToTouch|触碰伏笔|foreshadowToTouch):\s*([a-zA-Z0-9\-_, ]+)/gi);
+    for (const match of touchMatches) {
+      const ids = match[1].split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+      for (const id of ids) {
+        foreshadowedIds.add(id);
+      }
+    }
+    const agendaMatch = params.chapterIntent.match(/### Must Advance\s*([\s\S]*?)(?:###|$)/i);
+    if (agendaMatch) {
+      const listMatches = agendaMatch[1].matchAll(/-\s*([a-zA-Z0-9\-_]+)/gi);
+      for (const m of listMatches) {
+        foreshadowedIds.add(m[1].trim());
+      }
+    }
+  }
+
+  let createdNewHooksCount = 0;
+
+  const allCandidates: PendingHookCandidate[] = [
+    ...fallbackCandidates,
+    ...(delta.newHookCandidates as PendingHookCandidate[]),
+  ];
+
+  for (const candidate of allCandidates) {
+    if (isStructuralCandidate(candidate)) {
+      decisions.push({
+        action: "rejected",
+        reason: "structural_hook_forbidden",
+        candidate,
+      });
+      continue;
+    }
+
     const activeHooks = workingHooks.filter((hook) => hook.status !== "resolved");
     const admission = evaluateHookAdmission({
       candidate,
@@ -105,6 +198,25 @@ export function arbitrateRuntimeStateDeltaHooks(params: {
       continue;
     }
 
+    const proposedHookId = buildCanonicalHookId(candidate, new Set([
+      ...workingHooks.map((hook) => hook.hookId),
+      ...upsertsById.keys(),
+    ]));
+
+    // Check if the proposed hook ID matches any foreshadowed IDs via substring matching
+    const isForeshadowed = [...foreshadowedIds].some((fid) =>
+      proposedHookId.includes(fid) || fid.includes(proposedHookId) || (candidate.preferredHookId && candidate.preferredHookId.includes(fid))
+    );
+
+    if (!isForeshadowed && createdNewHooksCount >= newHookCap) {
+      decisions.push({
+        action: "rejected",
+        reason: "new_hook_budget_exceeded",
+        candidate,
+      });
+      continue;
+    }
+
     const created = createCanonicalHook({
       candidate,
       chapter: delta.chapter,
@@ -121,6 +233,10 @@ export function arbitrateRuntimeStateDeltaHooks(params: {
       hookId: created.hookId,
       candidate,
     });
+
+    if (!isForeshadowed) {
+      createdNewHooksCount += 1;
+    }
   }
 
   const resolvedDelta = RuntimeStateDeltaSchema.parse({

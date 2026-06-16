@@ -1,16 +1,100 @@
 ---
 name: 恐怖
 id: horror
-chapterTypes: ["氛围章", "事件章", "揭示章", "过渡章", "回收章"]
-fatigueWords: ["毛骨悚然", "不寒而栗", "浑身发冷", "头皮发麻", "鸡皮疙瘩", "心跳加速", "仿佛", "不禁", "宛如", "竟然"]
+chapterTypes:
+  - 氛围章
+  - 事件章
+  - 揭示章
+  - 过渡章
+  - 回收章
+fatigueWords:
+  - 毛骨悚然
+  - 不寒而栗
+  - 浑身发冷
+  - 头皮发麻
+  - 鸡皮疙瘩
+  - 心跳加速
+  - 仿佛
+  - 不禁
+  - 宛如
+  - 竟然
 numericalSystem: false
 powerScaling: false
 eraResearch: false
-pacingRule: "氛围递进：安全感→微妙不适→确认异常→恐惧升级→高潮→喘息，循环推进"
-satisfactionTypes: ["真相揭示", "成功逃脱", "反杀怪物", "谜团解开", "同伴获救", "规则发现"]
-auditDimensions: [1,2,3,6,7,8,9,10,13,14,15,16,17,18,19,24,25,26]
+pacingRule: 氛围递进：安全感→微妙不适→确认异常→恐惧升级→高潮→喘息，循环推进
+satisfactionTypes:
+  - 真相揭示
+  - 成功逃脱
+  - 反杀怪物
+  - 谜团解开
+  - 同伴获救
+  - 规则发现
+auditDimensions:
+  - 1
+  - 2
+  - 3
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 24
+  - 25
+  - 26
+concretePayoffObjects:
+  - 存折
+  - 集资款
+  - 店铺钥匙
+  - 合同
+  - 营业执照
+  - 账本
+  - 批条
+  - 启动资金
+  - 本钱
+  - 车票
+  - 线索
+  - 证据
+  - 文件
+  - 装备
+  - 道具
+styleGovernance:
+  allowedStyleExamples:
+    - 元
+    - 分
+    - 个
+    - 月
+    - 年
+    - 折
+  forbiddenProseKeywords:
+    - 气血
+    - 境界
+    - 面板
+    - 金手指
+    - 升级
+structuralSignals:
+  defaultPayoffActions:
+    - 拿到
+    - 保住
+    - 夺回
+    - 签署
+    - 避开
+    - 买下
+    - 拦下
+    - 激活
+  lowStatusKeywords:
+    - 下岗
+    - 贫困
+    - 负债
+    - 被裁员
+    - 新手
 ---
-
 ## 题材禁忌
 
 - 恐怖源头过早完全暴露（未知才恐怖）

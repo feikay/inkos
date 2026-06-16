@@ -2,13 +2,20 @@
 name: 重生流
 id: rebirth
 chapterTypes: ["布局章", "打脸章", "过渡章", "回收章"]
-fatigueWords: ["冷笑", "倒吸凉气", "不可思议", "仿佛", "不禁", "宛如", "竟然"]
+fatigueWords: ["冷笑", "倒吸凉气", "不可置信", "仿佛", "不禁", "宛如", "竟然"]
 numericalSystem: false
 powerScaling: false
 eraResearch: true
 pacingRule: "每2-3章一个前世信息差兑现：预知事件、避开陷阱、抢占先机"
 satisfactionTypes: ["信息差碾压", "前世预判成功", "仇人自投罗网", "先知先觉布局", "命运逆转", "因果了结"]
 auditDimensions: [1,2,3,6,7,8,9,10,11,12,13,14,15,16,17,18,19,24,25,26]
+concretePayoffObjects: ["存折", "集资款", "店铺钥匙", "合同", "营业执照", "账本", "批条", "启动资金", "本钱", "车票"]
+styleGovernance:
+  allowedStyleExamples: ["元", "分", "个", "成", "半成", "月", "年", "折"]
+  forbiddenProseKeywords: ["气血", "境界", "面板", "金手指", "升级"]
+structuralSignals:
+  defaultPayoffActions: ["拿到", "保住", "夺回", "签署", "避开", "买下", "拦下"]
+  lowStatusKeywords: ["下岗", "贫困", "负债", "倒爷"]
 ---
 
 ## 题材禁忌

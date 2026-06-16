@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ArchitectAgent, type ArchitectOutput } from "../agents/architect.js";
 import {
+  alignPendingHooksWithFirst10Plan,
   buildCharacterMatrixContent,
   validateCharacterMatrix,
   validateFirst10ChapterPlan,
@@ -144,6 +145,50 @@ function completeFoundationOutput(overrides: Partial<ArchitectOutput> = {}): Arc
 describe("ArchitectAgent", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it("aligns pending hooks with hook seeds and earliest mentions in first_10_chapter_plan", () => {
+    const first10Rows = Array.from({ length: 10 }, (_, index) => {
+      const chapter = index + 1;
+      const endingHook = chapter === 1
+        ? "断塔里传来第二声回响"
+        : chapter === 2
+          ? "禁门印记在石壁上浮现"
+        : chapter === 4
+          ? "云岚在旧碑旁出现"
+          : `钩子${chapter}`;
+      return `| ${chapter} | 功能${chapter} | 情绪${chapter} | 目标${chapter} | 阻碍${chapter} | 解决${chapter} | 爽点${chapter} | ${endingHook} |`;
+    }).join("\n");
+    const output = completeFoundationOutput({
+      first10ChapterPlan: [
+        "# 前10章规划",
+        "## 2. 前10章章节表",
+        "| 章数 | 章节功能 | 情绪事件 | 主角目标 | 阻碍困境 | 解决方法 | 爽点/反转 | 结尾钩子 |",
+        "|---|---|---|---|---|---|---|---|",
+        first10Rows,
+        "## 前10章伏笔表",
+        "| 伏笔名 | 埋设章节 | 初始表现 | 真实含义 | 回收章节 |",
+        "|---|---|---|---|---|",
+        "| 断塔回声 | 第1章 | 塔内传来第二声回响 | 塔下还有一层未开启空间 | 第18章 |",
+        "| 禁门印记 | 第2章 | 石壁上浮现旧印 | 禁门需要特定代价才能打开 | 第12章 |",
+        "| 云岚信物 | 第4章 | 云岚在旧碑旁出现但没有解释来意 | 她掌握进入禁门的另一把钥匙 | 第20章 |",
+      ].join("\n"),
+      pendingHooks: [
+        "# Pending Hooks",
+        "| hook_id | 起始章节 | 类型 | 状态 | 最近推进 | 预期回收 | 回收节奏 | 备注 |",
+        "|---|---|---|---|---|---|---|---|",
+        "| HOOK-001 | 1 | 人物伏笔 | open | 0 | 云岚信物关系线 | 中程 | 云岚信物首次出现但未解释来意 |",
+        "| HOOK-002 | 15 | 事件伏笔 | open | 0 | 禁门印记代价 | 中程 | 禁门印记会在第二章浮现 |",
+        "| HOOK-003 | 3 | 事件伏笔 | open | 0 | 旧案尾声 | 中程 | 与前10章规划无直接埋设依据 |",
+      ].join("\n"),
+    });
+
+    const aligned = alignPendingHooksWithFirst10Plan(output, "zh");
+
+    expect(aligned.pendingHooks).toContain("| HOOK-001 | 4 | 人物伏笔 | open | 0 | 云岚信物关系线 | 中程 | 云岚信物首次出现但未解释来意 |");
+    expect(aligned.pendingHooks).toContain("| HOOK-002 | 2 | 事件伏笔 | open | 0 | 禁门印记代价 | 中程 | 禁门印记会在第二章浮现 |");
+    expect(aligned.pendingHooks).toContain("| HOOK-003 | 11 | 事件伏笔 | open | 0 | 旧案尾声 | 中程 | 与前10章规划无直接埋设依据；已顺延：first_10_chapter_plan 未提供前10章埋设依据。 |");
+    expect(aligned.pendingHooks).toContain("| first10-hook-004 | 1 | 事件伏笔 | open | 0 | 塔下还有一层未开启空间 | 第18章 | 断塔回声；塔内传来第二声回响 |");
   });
 
   it("rejects a truncated first-10 chapter plan before it can be written as foundation", async () => {

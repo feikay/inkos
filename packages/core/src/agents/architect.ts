@@ -18,6 +18,7 @@ import {
   buildCurrentFocusContent,
   buildEmotionalArcsContent,
   buildSubplotBoardContent,
+  alignPendingHooksWithFirst10Plan,
   validateFoundationDocuments,
   type FoundationDocumentMeta,
 } from "./foundation-documents.js";
@@ -931,37 +932,38 @@ ${this.buildStorySkeletonPrompt("zh")}`;
   ): Promise<void> {
     const storyDir = join(bookDir, "story");
     await mkdir(storyDir, { recursive: true });
-    this.assertFoundationDocumentsComplete(output, documentMeta, language);
+    const alignedOutput = alignPendingHooksWithFirst10Plan(output, language);
+    this.assertFoundationDocumentsComplete(alignedOutput, documentMeta, language);
 
     const writes: Array<Promise<void>> = [
-      writeFile(join(storyDir, "story_bible.md"), output.storyBible, "utf-8"),
-      writeFile(join(storyDir, "volume_outline.md"), output.volumeOutline, "utf-8"),
-      writeFile(join(storyDir, "book_rules.md"), output.bookRules, "utf-8"),
-      writeFile(join(storyDir, "current_state.md"), output.currentState, "utf-8"),
-      writeFile(join(storyDir, "pending_hooks.md"), output.pendingHooks, "utf-8"),
+      writeFile(join(storyDir, "story_bible.md"), alignedOutput.storyBible, "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), alignedOutput.volumeOutline, "utf-8"),
+      writeFile(join(storyDir, "book_rules.md"), alignedOutput.bookRules, "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), alignedOutput.currentState, "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), alignedOutput.pendingHooks, "utf-8"),
       writeFile(
         join(storyDir, "genre_architecture.md"),
-        this.contentOrFallback(output.genreArchitecture, "genre_architecture", language),
+        this.contentOrFallback(alignedOutput.genreArchitecture, "genre_architecture", language),
         "utf-8",
       ),
       writeFile(
         join(storyDir, "world_engine.md"),
-        this.contentOrFallback(output.worldEngine, "world_engine", language),
+        this.contentOrFallback(alignedOutput.worldEngine, "world_engine", language),
         "utf-8",
       ),
       writeFile(
         join(storyDir, "antagonist_map.md"),
-        this.contentOrFallback(output.antagonistMap, "antagonist_map", language),
+        this.contentOrFallback(alignedOutput.antagonistMap, "antagonist_map", language),
         "utf-8",
       ),
       writeFile(
         join(storyDir, "motivation_matrix.md"),
-        this.contentOrFallback(output.motivationMatrix, "motivation_matrix", language),
+        this.contentOrFallback(alignedOutput.motivationMatrix, "motivation_matrix", language),
         "utf-8",
       ),
       writeFile(
         join(storyDir, "first_10_chapter_plan.md"),
-        this.contentOrFallback(output.first10ChapterPlan, "first_10_chapter_plan", language),
+        this.contentOrFallback(alignedOutput.first10ChapterPlan, "first_10_chapter_plan", language),
         "utf-8",
       ),
     ];
@@ -982,33 +984,33 @@ ${this.buildStorySkeletonPrompt("zh")}`;
     writes.push(
       writeFile(
         join(storyDir, "author_intent.md"),
-        buildAuthorIntentContent(output, documentMeta, language),
+        buildAuthorIntentContent(alignedOutput, documentMeta, language),
         "utf-8",
       ),
       writeFile(
         join(storyDir, "current_focus.md"),
-        buildCurrentFocusContent(output, documentMeta, language),
+        buildCurrentFocusContent(alignedOutput, documentMeta, language),
         "utf-8",
       ),
       writeFile(
         join(storyDir, "subplot_board.md"),
-        buildSubplotBoardContent(output, documentMeta, language),
+        buildSubplotBoardContent(alignedOutput, documentMeta, language),
         "utf-8",
       ),
       writeFile(
         join(storyDir, "emotional_arcs.md"),
-        buildEmotionalArcsContent(output, documentMeta, language),
+        buildEmotionalArcsContent(alignedOutput, documentMeta, language),
         "utf-8",
       ),
       writeFile(
         join(storyDir, "character_matrix.md"),
-        buildCharacterMatrixContent(output, documentMeta, language),
+        buildCharacterMatrixContent(alignedOutput, documentMeta, language),
         "utf-8",
       ),
     );
 
     // Write structure_signals.json from architect output
-    if (!output.structureSignals) {
+    if (!alignedOutput.structureSignals) {
       throw new Error(
         "[architect] structure_signals 生成失败：LLM 输出中缺少 structure_signals section。" +
         "请检查题材 profile 指导是否已更新，或重新建书以重新生成 structure_signals.json。" +
@@ -1016,7 +1018,7 @@ ${this.buildStorySkeletonPrompt("zh")}`;
       );
     }
 
-    const parseResult = parseArchitectStructureSignals(output.structureSignals, documentMeta.id ?? basename(bookDir));
+    const parseResult = parseArchitectStructureSignals(alignedOutput.structureSignals, documentMeta.id ?? basename(bookDir));
     if (parseResult.status === "parse_error") {
       throw new Error(
         `[architect] structure_signals 解析失败：${parseResult.error}。` +

@@ -106,7 +106,7 @@ export const NewHookCandidateSchema = z.object({
   expectedPayoff: z.string().default(""),
   payoffTiming: HookPayoffTimingSchema.optional(),
   notes: z.string().default(""),
-});
+}).passthrough();
 
 export type NewHookCandidate = z.infer<typeof NewHookCandidateSchema>;
 
@@ -127,6 +127,6 @@ export const RuntimeStateDeltaSchema = z.object({
   emotionalArcOps: z.array(LooseOpSchema).default([]),
   characterMatrixOps: z.array(LooseOpSchema).default([]),
   notes: z.array(z.string()).default([]),
-});
+}).passthrough();
 
 export type RuntimeStateDelta = z.infer<typeof RuntimeStateDeltaSchema>;

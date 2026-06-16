@@ -2,16 +2,106 @@
 name: Tower Climbing
 id: tower-climber
 language: en
-chapterTypes: ["Floor Challenge", "Progression", "Setup", "Transition", "Payoff"]
-fatigueWords: ["delve", "tapestry", "testament", "intricate", "pivotal", "vibrant", "comprehensive", "nuanced", "embark", "foster", "underscore", "bolstered", "crucial"]
+chapterTypes:
+  - Floor Challenge
+  - Progression
+  - Setup
+  - Transition
+  - Payoff
+fatigueWords:
+  - delve
+  - tapestry
+  - testament
+  - intricate
+  - pivotal
+  - vibrant
+  - comprehensive
+  - nuanced
+  - embark
+  - foster
+  - underscore
+  - bolstered
+  - crucial
 numericalSystem: false
 powerScaling: true
 eraResearch: false
-pacingRule: "Each floor arc spans 3-8 chapters: introduction, exploration, confrontation, advancement. Difficulty must escalate visibly between floors."
-satisfactionTypes: ["Floor Cleared", "Boss Defeated", "New Ability Gained", "Floor Secret Discovered", "Rival Surpassed", "Summit Progress"]
-auditDimensions: [1,2,3,4,6,7,8,9,10,13,14,15,16,17,18,19,24,25,26]
+pacingRule: >-
+  Each floor arc spans 3-8 chapters: introduction, exploration, confrontation,
+  advancement. Difficulty must escalate visibly between floors.
+satisfactionTypes:
+  - Floor Cleared
+  - Boss Defeated
+  - New Ability Gained
+  - Floor Secret Discovered
+  - Rival Surpassed
+  - Summit Progress
+auditDimensions:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 24
+  - 25
+  - 26
+concretePayoffObjects:
+  - 存折
+  - 集资款
+  - 店铺钥匙
+  - 合同
+  - 营业执照
+  - 账本
+  - 批条
+  - 启动资金
+  - 本钱
+  - 车票
+  - 线索
+  - 证据
+  - 文件
+  - 装备
+  - 道具
+styleGovernance:
+  allowedStyleExamples:
+    - 元
+    - 分
+    - 个
+    - 月
+    - 年
+    - 折
+  forbiddenProseKeywords:
+    - 气血
+    - 境界
+    - 面板
+    - 金手指
+    - 升级
+structuralSignals:
+  defaultPayoffActions:
+    - 拿到
+    - 保住
+    - 夺回
+    - 签署
+    - 避开
+    - 买下
+    - 拦下
+    - 激活
+  lowStatusKeywords:
+    - 下岗
+    - 贫困
+    - 负债
+    - 被裁员
+    - 新手
 ---
-
 ## Genre Prohibitions
 
 - Floors that are cosmetic reskins of each other — each floor must present materially different challenges

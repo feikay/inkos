@@ -404,6 +404,7 @@ export { parseSettlerDeltaOutput, type SettlerDeltaOutput } from "./agents/settl
 export { FanficCanonImporter, type FanficCanonOutput } from "./agents/fanfic-canon-importer.js";
 export { getFanficDimensionConfig, FANFIC_DIMENSIONS, type FanficDimensionConfig } from "./agents/fanfic-dimensions.js";
 export { buildFanficCanonSection, buildCharacterVoiceProfiles, buildFanficModeInstructions } from "./agents/fanfic-prompt-sections.js";
+export { ChapterCompressorAgent } from "./agents/chapter-compressor.js";
 
 // Utils
 export { fetchUrl, searchWeb } from "./utils/web-search.js";
@@ -427,7 +428,7 @@ export {
   type HookAdmissionDecision,
   type HookDisposition,
 } from "./utils/hook-governance.js";
-export { arbitrateRuntimeStateDeltaHooks, type HookArbiterDecision } from "./utils/hook-arbiter.js";
+export { arbitrateRuntimeStateDeltaHooks, type HookArbiterDecision, cleanHooksMarkdown, isStructuralHookId } from "./utils/hook-arbiter.js";
 export { analyzeHookHealth } from "./utils/hook-health.js";
 export {
   readStructureSignals,

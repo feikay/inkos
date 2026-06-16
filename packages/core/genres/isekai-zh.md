@@ -1,16 +1,103 @@
 ---
 name: 穿越/异世界
 id: isekai-zh
-chapterTypes: ["探索章", "适应章", "布局章", "过渡章", "回收章"]
-fatigueWords: ["冷笑", "倒吸凉气", "不可思议", "仿佛", "不禁", "宛如", "竟然", "嘴角微扬", "眼中闪过"]
+chapterTypes:
+  - 探索章
+  - 适应章
+  - 布局章
+  - 过渡章
+  - 回收章
+fatigueWords:
+  - 冷笑
+  - 倒吸凉气
+  - 不可思议
+  - 仿佛
+  - 不禁
+  - 宛如
+  - 竟然
+  - 嘴角微扬
+  - 眼中闪过
 numericalSystem: false
 powerScaling: true
 eraResearch: false
-pacingRule: "前3章建立异世界规则，每2-3章一个文化冲突或水土不服时刻，跳过新手村磨洋工"
-satisfactionTypes: ["规则发现", "文化冲突化解", "现世技能应用", "新能力获得", "关系建立", "异界身份确立"]
-auditDimensions: [1,2,3,4,6,7,8,9,10,13,14,15,16,17,18,19,24,25,26]
+pacingRule: 前3章建立异世界规则，每2-3章一个文化冲突或水土不服时刻，跳过新手村磨洋工
+satisfactionTypes:
+  - 规则发现
+  - 文化冲突化解
+  - 现世技能应用
+  - 新能力获得
+  - 关系建立
+  - 异界身份确立
+auditDimensions:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 24
+  - 25
+  - 26
+concretePayoffObjects:
+  - 地图锁孔
+  - 玉简
+  - 地图
+  - 残图
+  - 锁孔
+  - 机关
+  - 阵纹
+  - 禁纹
+  - 法阵
+  - 腰牌
+  - 令牌
+  - 钥匙
+  - 卷轴
+  - 古卷
+  - 残卷
+  - 残页
+  - 石碑
+  - 古碑
+  - 碑纹
+  - 入口
+  - 门
+  - 祭坛
+styleGovernance:
+  allowedStyleExamples:
+    - 三息
+    - 一炷香
+    - 千年
+    - 聚气九层
+  forbiddenProseKeywords:
+    - 性价比
+    - 打折
+    - 收益
+    - 基础值
+structuralSignals:
+  defaultPayoffActions:
+    - 触发
+    - 打开
+    - 拿到
+    - 夺下
+    - 获得
+    - 压住
+    - 突破
+    - 开启
+  lowStatusKeywords:
+    - 扫地
+    - 杂役
+    - 废材
+    - 废物
 ---
-
 ## 题材禁忌
 
 - "新手村综合症"——50页打小怪刷经验，正事迟迟不开
