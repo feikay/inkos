@@ -3561,3 +3561,100 @@ function extractKeywords(phrase: string): string[] {
 
   return Array.from(new Set(keywords));
 }
+
+// === Mandatory Items Compliance Checker (Plan A+C) ===
+
+export interface MandatoryComplianceIssue {
+  readonly itemIndex: number;
+  readonly description: string;
+  readonly signal: string;
+}
+
+/**
+ * Parse the `=== MANDATORY_ITEMS ===` section from a chapter intent string.
+ * Returns the list of {description, signal} items, or empty if no section found.
+ */
+export function parseMandatoryItemsFromIntent(intentContent: string): Array<{ description: string; signal: string }> {
+  const sectionMatch = intentContent.match(/=== MANDATORY_ITEMS ===\s*\n([\s\S]*?)(?:\n\n|$)/);
+  if (!sectionMatch?.[1]) return [];
+
+  const items: Array<{ description: string; signal: string }> = [];
+  const lines = sectionMatch[1].split("\n");
+  for (const line of lines) {
+    // Match "- [ ] 1. Description text"
+    const itemMatch = line.match(/^\s*- \[ \]\s*\d+\.\s*(.+)$/);
+    if (!itemMatch?.[1]) continue;
+    const description = itemMatch[1].trim();
+    // Reconstruct the signal from the description
+    // The signal is embedded in the intent file; we use keyword extraction as fallback
+    const signal = extractMandatorySignal(description);
+    items.push({ description, signal });
+  }
+  return items;
+}
+
+/** Extract a regex signal from a mandatory item description for content matching. */
+function extractMandatorySignal(description: string): string {
+  // Extract quoted or key terms: names, numbers, specific phrases
+  const names = description.match(/苏晴|陈志强|刘文轩|王胖子|马明远|林建国|周秀兰|林远/g);
+  if (names && names.length > 0) return [...new Set(names)].join("|");
+
+  // Match number patterns for time anchors
+  const timeMatch = description.match(/(\d+)\s*天/);
+  if (timeMatch) return `回归.*${timeMatch[1]}.*天|倒计时.*${timeMatch[1]}|${timeMatch[1]}天`;
+
+  // Match quoted phrases
+  const quoted = description.match(/[""]([^""]{1,10})[""]|「([^」]{1,10})」/);
+  if (quoted) return (quoted[1] ?? quoted[2]!).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  // Fallback: use the first meaningful word group
+  const clean = description.replace(/[——\-—：:，,。.]/g, " ").trim();
+  const words = clean.split(/\s+/).filter((w) => w.length >= 2 && !/^(通过|任一|方式|不展开|不超过|本章|必须|出现|提及)/.test(w));
+  return words.slice(0, 2).join(".*");
+}
+
+/**
+ * Check that all mandatory items from the chapter intent appear in the chapter body.
+ * Returns the list of items that are MISSING from the content.
+ */
+export function evaluateMandatoryItemCompliance(
+  chapterContent: string,
+  mandatoryItems: ReadonlyArray<{ description: string; signal: string }>,
+): MandatoryComplianceIssue[] {
+  if (mandatoryItems.length === 0) return [];
+
+  const missing: MandatoryComplianceIssue[] = [];
+  const cleanContent = chapterContent.replace(/\s+/g, "");
+
+  for (let index = 0; index < mandatoryItems.length; index++) {
+    const item = mandatoryItems[index]!;
+    const pattern = new RegExp(item.signal, "i");
+    if (!pattern.test(cleanContent) && !pattern.test(chapterContent)) {
+      missing.push({
+        itemIndex: index,
+        description: item.description,
+        signal: item.signal,
+      });
+    }
+  }
+
+  return missing;
+}
+
+/**
+ * Build a spot-fix prompt snippet that tells the reviser which mandatory items
+ * are missing and where to insert them.
+ */
+export function buildMandatoryComplianceFixPrompt(
+  missingItems: MandatoryComplianceIssue[],
+  language: "zh" | "en",
+): string {
+  if (missingItems.length === 0) return "";
+
+  const header = language === "zh"
+    ? "!!! 以下硬性条目在正文中缺失，必须补入（1-2句即可，不展开）："
+    : "!!! The following mandatory items are missing from the chapter body. Insert each (1-2 lines max, don't expand):";
+
+  const lines = missingItems.map((item) => `- [ ] ${item.description}`);
+  return [header, ...lines].join("\n");
+}

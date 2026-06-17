@@ -254,7 +254,7 @@ export class PlannerAgent extends BaseAgent {
       ...powerSystem.mustAvoid,
     ]).slice(0, 8);
     const styleEmphasis = this.unique([
-      ...this.collectStyleEmphasis(authorIntent, currentFocus),
+      ...this.collectStyleEmphasis(authorIntent, currentFocus, input.chapterNumber),
       ...genreProfile.styleEmphasis,
     ]).slice(0, 6);
     const conflicts = this.collectConflicts(
@@ -479,6 +479,16 @@ export class PlannerAgent extends BaseAgent {
     const throttleConflicts = this.buildHookDebtThrottleConflicts(hookThrottle, chapterGoal.foreshadowToTouch);
     const cadenceMustAvoid = this.buildCadenceMustAvoid(language, cadence);
 
+    const mandatoryItems = this.collectMandatoryItems({
+      chapterNumber: input.chapterNumber,
+      language,
+      currentFocus,
+      currentState,
+      pendingHooks: memorySelection.hooks,
+      chapterGoal,
+      hookAgenda: sceneBudget.hookAgenda,
+    });
+
     const intent = ChapterIntentSchema.parse({
       chapter: input.chapterNumber,
       goal,
@@ -509,6 +519,7 @@ export class PlannerAgent extends BaseAgent {
       ],
       chapterGoal,
       hookAgenda: sceneBudget.hookAgenda,
+      mandatoryItems,
     });
 
     const runtimePath = join(runtimeDir, `chapter-${String(input.chapterNumber).padStart(4, "0")}.intent.md`);
@@ -1574,11 +1585,112 @@ export class PlannerAgent extends BaseAgent {
     return this.unique([...focusAvoids, ...prohibitions]).slice(0, 6);
   }
 
-  private collectStyleEmphasis(authorIntent: string, currentFocus: string): string[] {
-    return this.unique([
+  private collectStyleEmphasis(authorIntent: string, currentFocus: string, chapterNumber?: number): string[] {
+    const items = this.unique([
       ...this.extractFocusStyleItems(currentFocus),
       ...this.extractListItems(authorIntent, 2),
     ]).slice(0, 4);
+    if (!chapterNumber) return items;
+    return items.filter((item) => {
+      const chapterMatch = item.match(/第(\d+)章/);
+      if (!chapterMatch) return true;
+      return parseInt(chapterMatch[1]!, 10) === chapterNumber;
+    });
+  }
+
+  /**
+   * Build a concrete, verifiable checklist of items that MUST appear in the
+   * chapter body. These are derived from hooks, current_focus chapter blocks,
+   * and character relationships — each item has a human-readable description
+   * for the LLM and a regex signal for the post-write compliance checker.
+   */
+  private collectMandatoryItems(params: {
+    chapterNumber: number;
+    language: "zh" | "en";
+    currentFocus: string;
+    currentState: string;
+    chapterGoal: NonNullable<ChapterIntent["chapterGoal"]>;
+    pendingHooks: ReadonlyArray<StoredHook>;
+    hookAgenda: ChapterIntent["hookAgenda"];
+  }): Array<{ description: string; signal: string }> {
+    const items: Array<{ description: string; signal: string }> = [];
+    const lang = params.language;
+
+    // --- 1. Time anchor from current_focus chapter block ---
+    const focusChapterBlock = this.extractCurrentFocusChapterBlock(params.currentFocus, params.chapterNumber);
+    for (const line of focusChapterBlock) {
+      // Look for time-anchor patterns like "香港回归倒计时15天" or "距…还有…天"
+      const timeMatch = line.match(/(香港回归.*?(\d+)\s*天|距离.{2,8}还有\s*(\d+)\s*天|倒计时\s*(\d+)\s*天)/u);
+      if (timeMatch) {
+        const days = timeMatch[2] ?? timeMatch[3] ?? timeMatch[4];
+        const desc = lang === "zh"
+          ? `香港回归倒计时${days}天——通过收音机/路边标语/日历任一方式`
+          : `Hong Kong handover countdown: ${days} days — via radio, banner, or calendar`;
+        items.push({ description: desc, signal: `回归.*${days}.*天|倒计时.*${days}|handover.*${days}` });
+        break;
+      }
+    }
+
+    // --- 2. Character appearances from hooks that need touching ---
+    const foreshadowIds = new Set(params.chapterGoal.foreshadowToTouch ?? []);
+    for (const hook of params.pendingHooks) {
+      if (!foreshadowIds.has(hook.hookId)) continue;
+      // Extract character name from hook notes or hook id
+      const charMatch = hook.notes?.match(/苏晴|陈志强|刘文轩|王胖子|马明远|林建国|周秀兰/g);
+      if (charMatch) {
+        for (const charName of [...new Set(charMatch)]) {
+          // only add if not already listed
+          if (items.some((item) => item.description.includes(charName))) continue;
+          const desc = lang === "zh"
+            ? `${charName}出场/提及——1句话，不超过15字，不展开`
+            : `${charName} mention — 1 line, no more than 15 words, don't expand`;
+          items.push({ description: desc, signal: charName });
+        }
+      }
+    }
+
+    // --- 3. Hook touch requirements ---
+    for (const hookId of params.hookAgenda.mustAdvance) {
+      const hook = params.pendingHooks.find((h) => h.hookId === hookId);
+      if (!hook) continue;
+      const hookDesc = hook.notes ?? hook.hookId;
+      // Extract key phrases for the signal
+      const signalTerms = this.extractSignalTerms(hookDesc);
+      if (signalTerms.length === 0) {
+        // Fallback: use hook type keywords
+        const typeTerms = (hook.type ?? "").includes("情感") ? "吸烟|抽烟|烟" : "";
+        if (!typeTerms) continue;
+        items.push({
+          description: lang === "zh"
+            ? `${hook.hookId} 推进——${hookDesc.slice(0, 50)}`
+            : `${hook.hookId} advance — ${hookDesc.slice(0, 50)}`,
+          signal: typeTerms,
+        });
+      }
+    }
+
+    // --- 4. Deduplicate by description ---
+    const seen = new Set<string>();
+    return items.filter((item) => {
+      const key = item.description;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, 6); // cap at 6 to avoid dilution
+  }
+
+  /** Extract short signal terms from hook description for regex matching. */
+  private extractSignalTerms(hookDesc: string): string[] {
+    const terms: string[] = [];
+    // Match quoted or parenthesized phrases
+    const quoted = hookDesc.match(/[""]([^""]{1,10})[""]|「([^」]{1,10})」|（([^）]{2,8})）|\(([^)]{2,8})\)/g);
+    if (quoted) {
+      for (const q of quoted) {
+        const clean = q.replace(/[""'「」（）\(\)]/g, "");
+        if (clean.length >= 2) terms.push(clean);
+      }
+    }
+    return terms;
   }
 
   private collectConflicts(
@@ -3754,7 +3866,90 @@ export class PlannerAgent extends BaseAgent {
       "## Chapter Summaries Snapshot",
       chapterSummaries,
       "",
+      this.renderMandatoryItems(intent.mandatoryItems, language, intent.sceneDirective),
     ].join("\n");
+  }
+
+  private renderMandatoryItems(
+    items: ReadonlyArray<{ description: string; signal: string }>,
+    language: "zh" | "en",
+    sceneDirective?: string,
+  ): string {
+    if (items.length === 0) return "";
+    const header = language === "zh"
+      ? "=== MANDATORY_ITEMS ===\n以下条目本章正文必须出现，缺一条则本章不合格："
+      : "=== MANDATORY_ITEMS ===\nThe following items MUST appear in this chapter. Missing any = FAIL:";
+
+    // Scene-bound anchors (Plan B): if scene info available, suggest which scene
+    // each item should appear in. This converts abstract "must remember" tasks into
+    // actionable "do X during scene Y" instructions for the LLM.
+    const scenes = this.parseSceneHints(sceneDirective);
+    const lines = items.map((item, index) => {
+      const sceneHint = this.assignSceneHint(item, scenes, index, items.length);
+      const label = sceneHint
+        ? `${index + 1}. [${sceneHint}] ${item.description}`
+        : `${index + 1}. ${item.description}`;
+      return `- [ ] ${label}`;
+    });
+
+    return [header, ...lines, ""].join("\n");
+  }
+
+  /** Extract scene boundary hints from the scene directive string. */
+  private parseSceneHints(sceneDirective?: string): string[] {
+    if (!sceneDirective) return [];
+    const scenes: string[] = [];
+    // Match patterns like "开场" / "核心场景" / "结尾" / "scene1" / "scene2"
+    const patterns = [
+      /(开场[^，。,\.]{0,15})/gu,
+      /(核心场景[^，。,\.]{0,15})/gu,
+      /(结尾[^，。,\.]{0,15})/gu,
+      /(scene\s*[123][^,\.]{0,15})/giu,
+    ];
+    for (const pattern of patterns) {
+      let match: RegExpExecArray | null;
+      while ((match = pattern.exec(sceneDirective)) !== null) {
+        const clean = match[0].replace(/[：:]/g, "").trim();
+        if (clean.length >= 2 && !scenes.some((s) => s.includes(clean.slice(0, 4)))) {
+          scenes.push(clean);
+        }
+      }
+    }
+    return scenes.slice(0, 4);
+  }
+
+  /** Assign a mandatory item to the most appropriate scene position. */
+  private assignSceneHint(
+    item: { description: string; signal: string },
+    scenes: string[],
+    index: number,
+    total: number,
+  ): string | undefined {
+    if (scenes.length === 0) return undefined;
+
+    // Heuristic assignment based on item position and content
+    const desc = item.description;
+
+    // Time anchors → opening scene
+    if (/倒计时|时间|日历|收音机|标语/.test(desc)) {
+      return scenes.find((s) => /开场|scene\s*1|opening/i.test(s)) ?? scenes[0];
+    }
+
+    // Character appearances → middle scenes (core/transition)
+    if (/出场|提及|路过|默念/.test(desc)) {
+      const mid = scenes.find((s) => /核心|scene\s*2|middle/i.test(s));
+      return mid ?? scenes[Math.min(1, scenes.length - 1)];
+    }
+
+    // Setting/hook details → ending scene or last scene
+    if (/结尾|钩子|下一步|下一章/.test(desc)) {
+      return scenes.find((s) => /结尾|scene\s*3|ending/i.test(s)) ?? scenes[scenes.length - 1];
+    }
+
+    // Proportional distribution for remaining items
+    const fraction = index / Math.max(total - 1, 1);
+    const sceneIndex = Math.min(Math.floor(fraction * scenes.length), scenes.length - 1);
+    return scenes[sceneIndex];
   }
 
   private mapLegacyEndingHookToEndingType(endingHookType: ChapterGoal["endingHookType"]): EndingType {

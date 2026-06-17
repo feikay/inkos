@@ -123,6 +123,7 @@ describe("ComposerAgent", () => {
           staleDebt: [],
           avoidNewHookFamilies: [],
         },
+        mandatoryItems: [],
       },
       intentMarkdown: "# Chapter Intent\n",
       plannerInputs: [

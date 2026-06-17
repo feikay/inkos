@@ -756,6 +756,65 @@ async function chatCompletionViaCustomOpenAICompatible(
 
 // === Simple Chat (used by all agents via BaseAgent.chat()) ===
 
+/** Patterns that indicate a transient error worth retrying. */
+const RETRIABLE_PATTERNS = [
+  /429/i,
+  /rate.?limit/i,
+  /too many requests/i,
+  /request burst/i,
+  /system protection/i,
+  /slow down/i,
+  /server (overloaded|busy|error)/i,
+  /internal server error/i,
+  /bad gateway/i,
+  /service unavailable/i,
+  /503/i,
+  /502/i,
+  /temporarily/i,
+  /ECONNREFUSED/i,
+  /ECONNRESET/i,
+  /ETIMEDOUT/i,
+  /fetch failed/i,
+  /Connection error/i,
+];
+
+function isRetriableError(error: unknown): boolean {
+  const msg = String(error);
+  return RETRIABLE_PATTERNS.some((p) => p.test(msg));
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  opts?: { readonly stage?: string },
+): Promise<T> {
+  const maxRetries = 3;
+  const baseDelayMs = 3000;
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (attempt === maxRetries || !isRetriableError(error)) {
+        throw error;
+      }
+      const delay = baseDelayMs * Math.pow(2, attempt);
+      const stageLabel = opts?.stage ? ` [${opts.stage}]` : "";
+      console.error(
+        `[retry] attempt ${attempt + 1}/${maxRetries} — waiting ${delay / 1000}s before retry${stageLabel}`,
+      );
+      const jitter = Math.random() * 1000;
+      await sleepMs(delay + jitter);
+    }
+  }
+  throw lastError;
+}
+
 export async function chatCompletion(
   client: LLMClient,
   model: string,
@@ -781,6 +840,13 @@ export async function chatCompletion(
     maxTokens: cap !== null ? Math.min(perCallMax, cap) : perCallMax,
     extra: client.defaults.extra,
   };
+
+  // Seed/thinking models consume tokens for internal reasoning before emitting
+  // content. Double the budget so there's enough room for both phases.
+  const modelLower = model.toLowerCase();
+  if (modelLower.includes("seed") || modelLower.includes("doubao-seed")) {
+    resolved.maxTokens = resolved.maxTokens * 2;
+  }
   const onStreamProgress = options?.onStreamProgress;
   const onTextDelta = options?.onTextDelta;
   const errorCtx = { baseUrl: client._piModel?.baseUrl ?? "(unknown)", model };
@@ -794,22 +860,27 @@ export async function chatCompletion(
       projectRoot: options?.projectRoot,
     },
     async () => {
-      try {
-        if (shouldUseNativeCustomTransport(client)) {
-          return await chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta);
-        }
-        return await chatCompletionViaPiAi(client, model, messages, resolved, onStreamProgress, onTextDelta);
-      } catch (error) {
-        // Stream interrupted but partial content is usable — return truncated response
-        if (error instanceof PartialResponseError) {
-          return {
-            content: error.partialContent,
-            usage: zeroUsage(),
-            usageAvailable: false,
-          };
-        }
-        throw wrapLLMError(error, errorCtx);
-      }
+      return withRetry(
+        async () => {
+          try {
+            if (shouldUseNativeCustomTransport(client)) {
+              return await chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta);
+            }
+            return await chatCompletionViaPiAi(client, model, messages, resolved, onStreamProgress, onTextDelta);
+          } catch (error) {
+            // Stream interrupted but partial content is usable — return truncated response
+            if (error instanceof PartialResponseError) {
+              return {
+                content: error.partialContent,
+                usage: zeroUsage(),
+                usageAvailable: false,
+              };
+            }
+            throw wrapLLMError(error, errorCtx);
+          }
+        },
+        { stage: options?.stage },
+      );
     },
     usageFromResponse,
   );
@@ -839,18 +910,23 @@ export async function chatWithTools(
       projectRoot: options?.projectRoot,
     },
     async () => {
-      try {
-        const resolved = {
-          temperature: clampTemperatureForModel(
-            model,
-            options?.temperature ?? client.defaults.temperature,
-          ),
-          maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
-        };
-        return await chatWithToolsViaPiAi(client, model, messages, tools, resolved);
-      } catch (error) {
-        throw wrapLLMError(error);
-      }
+      return withRetry(
+        async () => {
+          try {
+            const resolved = {
+              temperature: clampTemperatureForModel(
+                model,
+                options?.temperature ?? client.defaults.temperature,
+              ),
+              maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
+            };
+            return await chatWithToolsViaPiAi(client, model, messages, tools, resolved);
+          } catch (error) {
+            throw wrapLLMError(error);
+          }
+        },
+        { stage: options?.stage },
+      );
     },
     usageFromResponse,
   );

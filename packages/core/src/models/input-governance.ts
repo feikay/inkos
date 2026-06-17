@@ -204,6 +204,13 @@ export const ChapterIntentSchema = z.object({
     staleDebt: [],
     avoidNewHookFamilies: [],
   }),
+  /** Concrete verifiable items that MUST appear in the chapter body.
+   *  Rendered as a checklist at the end of the intent. The post-write
+   *  compliance checker validates each item against the draft. */
+  mandatoryItems: z.array(z.object({
+    description: z.string().trim().min(1),
+    signal: z.string().trim().min(1),
+  })).default([]),
 });
 
 export type ChapterIntent = z.infer<typeof ChapterIntentSchema>;

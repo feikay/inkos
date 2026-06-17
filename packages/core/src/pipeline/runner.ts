@@ -2183,6 +2183,37 @@ export class PipelineRunner {
       }
     }
 
+    // 4.3 Mandatory items compliance check (Plan A+C)
+    {
+      const {
+        parseMandatoryItemsFromIntent,
+        evaluateMandatoryItemCompliance,
+      } = await import("../agents/post-write-validator.js");
+      const intentPrefix = String(chapterNumber).padStart(4, "0");
+      const intentPath = join(storyDir, "runtime", "chapter-intents", `${intentPrefix}.md`);
+      const intentContent = await readFile(intentPath, "utf-8").catch(() => "");
+      if (intentContent) {
+        const mandatoryItems = parseMandatoryItemsFromIntent(intentContent);
+        const missing = evaluateMandatoryItemCompliance(finalContent, mandatoryItems);
+        if (missing.length > 0) {
+          for (const m of missing) {
+            this.config.logger?.warn(
+              `[mandatory] 缺失硬性条目: ${m.description}`,
+            );
+          }
+          auditResult = {
+            ...auditResult,
+            issues: [...auditResult.issues, ...missing.map((m) => ({
+              severity: "critical" as const,
+              category: "mandatory-item-missing",
+              description: `缺失硬性条目: ${m.description}`,
+              suggestion: `在章节正文中补入: ${m.description}`,
+            }))],
+          };
+        }
+      }
+    }
+
     this.logStage(stageLanguage, { zh: "章节意图一致性审核", en: "reviewing chapter intent alignment" });
     const intentAlignmentReport = await this.runIntentAlignmentReview({
       bookId,

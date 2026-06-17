@@ -1589,7 +1589,28 @@ async function runPublishReadyChapterOnce(params: {
   let qualityCandidate: string | undefined;
   let manualContinuityAcceptance: PublishReadyManualContinuityAcceptance | undefined;
   let chapterIntentContent = "";
- 
+
+  // Idempotency guard: if the previous run already compressed the chapter and
+  // quality was acceptable, re-polishing re-triggers compression → infinite loop.
+  // Return the cleaned-up result directly.
+  {
+    const existingReport = await readPublishReadyReportIfExists(params.bookDir, params.chapter);
+    if (existingReport?.publish_status === "MANUAL_REVIEW") {
+      const hasPostCompression = existingReport.warnings?.some((w) => w.includes("post_compression_review_required"));
+      if (hasPostCompression && (existingReport.quality_score ?? 0) >= (params.qualityAcceptThreshold ?? 75)) {
+        if (!params.json) {
+          log("");
+          log("[publish-ready] Reusing compressed result from previous run — skipping re-polish.");
+        }
+        return writePublishReadyReport(params.bookDir, {
+          ...existingReport,
+          publish_status: "READY_WITH_WARNINGS",
+          warnings: (existingReport.warnings ?? []).filter((w) => !w.includes("post_compression_review_required")),
+        } as PublishReadyResult);
+      }
+    }
+  }
+
   for (let loop = 1; loop <= 2; loop += 1) {
     if (!params.json) {
       log("");
