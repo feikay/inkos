@@ -34,6 +34,8 @@ export interface BuildChapterGoalInput {
   readonly arcMap: ArcMapSummary;
   readonly genreProfile: GenreProfileSummary;
   readonly powerSystem: PowerSystemSummary;
+  /** Book-level structure signals for dynamic pattern matching (避免生产代码硬编码题材/书内专名). */
+  readonly structureSignals?: Record<string, ReadonlyArray<string>>;
 }
 
 interface ChapterGoalHook {
@@ -137,6 +139,7 @@ export function buildChapterGoal(input: BuildChapterGoalInput): ChapterGoal {
     stateFacts,
     payoffHook,
     genreProfile: input.genreProfile,
+    structureSignals: input.structureSignals,
   });
 
   const endingHookType = inferEndingHookType({
@@ -695,17 +698,19 @@ function derivePayoffToDeliver(input: {
   readonly stateFacts: ReturnType<typeof parseCurrentStateFacts>;
   readonly payoffHook?: ChapterGoalHook;
   readonly genreProfile?: GenreProfileSummary;
+  readonly structureSignals?: Record<string, ReadonlyArray<string>>;
 }): string {
   const chapterHookPayoff = extractChapterEndingPayoff(
     input.currentFocus,
     input.chapterNumber,
     input.language,
+    input.structureSignals,
   );
   if (chapterHookPayoff) {
     return chapterHookPayoff;
   }
 
-  const firstConflictPayoff = extractCrisisPayoffFromState(input.stateFacts, input.language);
+  const firstConflictPayoff = extractCrisisPayoffFromState(input.stateFacts, input.language, input.structureSignals);
   if (firstConflictPayoff) {
     return firstConflictPayoff;
   }
@@ -767,6 +772,7 @@ function extractChapterEndingPayoff(
   currentFocus: string,
   chapterNumber: number,
   language: "zh" | "en",
+  structureSignals?: Record<string, ReadonlyArray<string>>,
 ): string | undefined {
   const ending = extractChapterFocusField(currentFocus, chapterNumber, language, [
     "章节结尾钩子",
@@ -775,12 +781,13 @@ function extractChapterEndingPayoff(
     "chapter ending hook",
   ]);
   if (!ending) return undefined;
-  return eventPayoffFromText(ending, language);
+  return eventPayoffFromText(ending, language, structureSignals);
 }
 
 function extractCrisisPayoffFromState(
   stateFacts: ReturnType<typeof parseCurrentStateFacts>,
   language: "zh" | "en",
+  structureSignals?: Record<string, ReadonlyArray<string>>,
 ): string | undefined {
   const conflict = findStateFact(stateFacts, language, [
     "first conflict",
@@ -790,22 +797,35 @@ function extractCrisisPayoffFromState(
     "当前冲突",
   ]);
   if (!conflict) return undefined;
-  return eventPayoffFromText(conflict, language);
+  return eventPayoffFromText(conflict, language, structureSignals);
 }
 
-function eventPayoffFromText(text: string, language: "zh" | "en"): string | undefined {
+
+function eventPayoffFromText(
+  text: string,
+  language: "zh" | "en",
+  structureSignals?: Record<string, ReadonlyArray<string>>,
+): string | undefined {
   const normalized = sanitizeChapterGoalText(text);
   if (!normalized) return undefined;
 
   if (language === "zh") {
-    if (/(父亲|爸爸).{0,24}(失业|危机|变故)|(?:失业|危机|变故).{0,24}(父亲|爸爸)/u.test(normalized)) {
-      return "家庭危机被当场坐实";
+    // Dynamic matching from book-level structure signals (no hardcoded book/genre terms).
+    if (structureSignals) {
+      const pressureTokens = uniqueContentTokens([
+        ...(structureSignals["pressure_source"] ?? []),
+        ...(structureSignals["opening_hook"] ?? []),
+      ]);
+      if (pressureTokens.length > 0 && countOverlappingTokens(normalized, pressureTokens) >= 2) {
+        return "关键压力信号被本章触及";
+      }
     }
+
     if (/(名单|通知).{0,12}(出现|摆|放|写着|看到)|(?:看到|发现).{0,16}(名单|通知)/u.test(normalized)) {
       const target = normalized.match(/(?:名单|通知)/u)?.[0] ?? "关键信息";
       return `${target}被当场确认`;
     }
-    if (/(重生|回到|穿越|我回来了|199\d).{0,20}(确认|意识到|不是梦|时间点|年份)|(?:确认|意识到|发现|确定).{0,20}(重生|不是梦|回到|199\d)/u.test(normalized)) {
+    if (/(重生|回到|穿越).{0,20}(确认|意识到|不是梦|时间点)|(?:确认|意识到|发现|确定).{0,20}(重生|不是梦|回到)/u.test(normalized)) {
       return "重生事实被当场确认";
     }
     if (/(商机|赚钱门路|机会|信息差).{0,20}(发现|找到|确认)|(?:发现|找到|确认).{0,20}(商机|赚钱门路|机会|信息差)/u.test(normalized)) {
@@ -824,6 +844,46 @@ function eventPayoffFromText(text: string, language: "zh" | "en"): string | unde
   }
 
   return undefined;
+}
+
+/** Extract unique 2-char bigram tokens from signal phrases for Chinese word-boundary-free matching. */
+function uniqueContentTokens(phrases: ReadonlyArray<string>): string[] {
+  const stopRe = /[的了着过就在被把和与或但而因所以如果虽然然而，。！？、：；""''（）【】《》\s]+/g;
+  const tokens = new Set<string>();
+  for (const phrase of phrases) {
+    const cleaned = normalizeNumerals(phrase.replace(stopRe, ""));
+    for (let i = 0; i <= cleaned.length - 2; i++) {
+      tokens.add(cleaned.substring(i, i + 2));
+    }
+  }
+  return [...tokens];
+}
+
+/** Return how many of the given tokens appear in the text. */
+function countOverlappingTokens(text: string, tokens: ReadonlyArray<string>): number {
+  const normalizedText = normalizeNumerals(text);
+  let count = 0;
+  for (const token of tokens) {
+    if (normalizedText.includes(token)) count++;
+  }
+  return count;
+}
+
+/** Normalize Chinese numerals to Arabic digits so "两百" and "200" produce matching bigrams. */
+function normalizeNumerals(raw: string): string {
+  return raw
+    .replace(/零/g, "0")
+    .replace(/〇/g, "0")
+    .replace(/一/g, "1")
+    .replace(/二/g, "2")
+    .replace(/两/g, "2")
+    .replace(/三/g, "3")
+    .replace(/四/g, "4")
+    .replace(/五/g, "5")
+    .replace(/六/g, "6")
+    .replace(/七/g, "7")
+    .replace(/八/g, "8")
+    .replace(/九/g, "9");
 }
 
 function pickDirectPayoffSignal(text: string): string | undefined {
@@ -1197,8 +1257,10 @@ function defaultConcretePayoff(
   if (/逃|追捕|追兵|封锁|围堵/u.test(combined)) {
     return language === "zh" ? "暂时脱离当前压制" : "Temporarily break free from the current pressure.";
   }
-  if (/(失业|家庭|父亲|母亲|家里|危机|压力|变故)/u.test(combined)) {
-    return language === "zh" ? "确认一个迫在眉睫的现实危机" : "Confirm an urgent real-world crisis.";
+  // Generic fallback — no hardcoded book or genre terms.
+  // Specific event detection is handled earlier via structure_signals-driven matching.
+  if (combined.length > 0) {
+    return language === "zh" ? "确认一个迫在眉睫的关键事件" : "Confirm an urgent key event.";
   }
   if (/(商机|赚钱|生意|信息差|批发|价格|渠道|本钱|资金)/u.test(combined)) {
     return language === "zh" ? "发现一个可执行的赚钱机会" : "Identify an actionable earning opportunity.";

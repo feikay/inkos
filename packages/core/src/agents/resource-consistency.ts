@@ -357,11 +357,20 @@ export function parseResourceRules(
   currentState = "",
   genreProfile?: GenreProfile,
 ): ResourceRules {
-  const defaultTypes = genreProfile?.resourceSystem?.defaultTypes ?? DEFAULT_RESOURCE_TYPES;
-  const resourceAliases = {
-    ...RESOURCE_ALIASES,
-    ...(genreProfile?.resourceSystem?.aliases ?? {}),
-  };
+  const skipNumericalTracking = genreProfile && !genreProfile.numericalSystem;
+  // Non-numerical genres don't get default resource tracking — their
+  // defaultTypes are genre-level broad categories for generation, not
+  // numerical resources to track. Only explicitly declared book_rules
+  // resourceTypes opt into tracking.
+  const defaultTypes = skipNumericalTracking
+    ? []
+    : (genreProfile?.resourceSystem?.defaultTypes ?? DEFAULT_RESOURCE_TYPES);
+  const resourceAliases = skipNumericalTracking
+    ? { ...(genreProfile?.resourceSystem?.aliases ?? {}) }
+    : {
+        ...RESOURCE_ALIASES,
+        ...(genreProfile?.resourceSystem?.aliases ?? {}),
+      };
   const canonicalWhitelist = new Set<string>([
     ...defaultTypes.map((resource) => resourceAliases[resource] ?? resource),
   ]);
@@ -551,6 +560,7 @@ export function extractResourceEvents(
 ): ResourceEvent[] {
   const rules = parseResourceRules(bookRules, currentLedger, "", genreProfile);
   const resourceTypes = Object.keys(rules.resources);
+  if (resourceTypes.length === 0) return [];
   const resourcePattern = buildResourcePattern(resourceTypes, rules.aliases);
   const events: ResourceEvent[] = [];
 

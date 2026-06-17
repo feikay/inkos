@@ -1735,7 +1735,7 @@ function getPayoffMaterializationPatterns(
 ): ReadonlyArray<RegExp> {
   switch (payoffType) {
     case "reveal":
-      return [/来自|源于|原来是|真正来源|真实来源|缺失三页|revealed|came from|origin|source|truth|identity/i];
+      return [/来自|源于|原来是|真正来源|真实来源|缺失三页|确认|发现|意识到|明白|真的是|revealed|came from|origin|source|truth|identity/i];
     case "resource":
       return [/拿到|获得|夺得|到手|交给|搜出|got|gained|obtained|secured|claimed/i];
     case "breakthrough":
@@ -1763,7 +1763,7 @@ function buildChinesePayoffFragments(phrase: string): string[] {
   if (CHINESE_PAYOFF_STOPWORDS.has(cleaned)) return [];
 
   const fragments = new Set<string>();
-  if (cleaned.length <= 4) {
+  if (cleaned.length < 3) {
     fragments.add(cleaned);
   } else {
     for (let size = 2; size <= 4; size += 1) {

@@ -860,6 +860,7 @@ describe("PlannerAgent", () => {
         language: "zh" | "en";
         currentState: string;
         readonly genreProfile?: any;
+        readonly structureSignals?: Record<string, ReadonlyArray<string>>;
       }) => {
         chapterGoal: {
           payoffToDeliver: string;
@@ -887,10 +888,15 @@ describe("PlannerAgent", () => {
       genreProfile: {
         concretePayoffObjects: [],
       },
+      structureSignals: {
+        pressure_source: ["父亲的下岗通知就在这个月", "家里只剩不到一千块积蓄"],
+        opening_hook: ["父亲把裁员通知拍在桌上"],
+      },
     });
 
-    expect(governed.chapterGoal.payoffToDeliver).toBe("确认重生事实，并得知家庭危机");
-    expect(governed.chapterGoal.payoffDirective?.promisedPayoff).toBe("确认重生事实，并得知家庭危机");
+    // Signal-driven: pressure_source tokens "父亲"+"裁员"+"危机" overlap with source text
+    expect(governed.chapterGoal.payoffToDeliver).toBe("确认重生事实，并得知关键危机信号");
+    expect(governed.chapterGoal.payoffDirective?.promisedPayoff).toBe("确认重生事实，并得知关键危机信号");
     expect(governed.chapterGoal.payoffToDeliver).not.toBe("一条关键线索被当场揭开");
     expect(governed.conflict?.detail).toContain("阶段性揭示");
   });

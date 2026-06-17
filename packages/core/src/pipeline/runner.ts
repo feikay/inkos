@@ -4431,15 +4431,22 @@ ${matrix}`,
       .filter((event) => event.kind === "unlock" && event.label)
       .map((event) => event.label!);
     const hasRequiredSkills = requiredSkills.every((skill) => validation.unlockedSkills.includes(skill));
-    const openingFederalCoins = validation.openingBalances["联邦币"] ?? 0;
-    const closingFederalCoins = validation.closingBalances["联邦币"] ?? openingFederalCoins;
-    const closingReputation = validation.closingBalances["民望值"] ?? 0;
+    // Resource consistency: use genre-profile-driven resource types, not hardcoded currency names.
+    const resourceTypes = params.genreProfile?.numericalSystem
+      ? (params.genreProfile?.resourceSystem?.defaultTypes ?? [])
+      : [];
+    const currenciesBalanced = params.genreProfile?.numericalSystem
+      ? resourceTypes.every((currency) => {
+          const open = validation.openingBalances[currency] ?? 0;
+          const close = validation.closingBalances[currency] ?? open;
+          return close <= open;
+        })
+      : true;
     const validationPassed = !forbidden
       && validation.issues.length === 0
       && !classification.blocking
       && hasRequiredSkills
-      && closingFederalCoins <= openingFederalCoins
-      && closingReputation >= 0;
+      && currenciesBalanced;
     return {
       attempted: true,
       applied: true,
@@ -5632,7 +5639,7 @@ function buildResourceRepairSuggestions(validation: ResourceValidationResult): s
     suggestions.push("若资源余额不足，延后兑换、补足合理获得事件，或降低本章收益/消耗，不要发明透支规则。");
   }
   if (validation.issues.some((issue) => issue.code === "exchange-rate-mismatch" || issue.code === "exchange-ratio-mismatch")) {
-    suggestions.push("按 book_rules 中的兑换比例修正消耗与收益，例如 1点民望值=10联邦币 时，1000联邦币必须消耗100民望值。");
+    suggestions.push("按 book_rules 中的资源兑换比例修正消耗与收益，确保资源产出与消耗匹配。");
   }
   if (validation.issues.some((issue) => issue.code === "unauthorized-resource-rule")) {
     suggestions.push("删除正文中的透支/负债/信用额度设定；除非 book_rules 显式声明 allowNegative 或 creditLimit。");

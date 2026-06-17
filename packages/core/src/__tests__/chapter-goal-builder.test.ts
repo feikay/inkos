@@ -325,14 +325,20 @@ describe("buildChapterGoal — payoff complexity cap", () => {
         concretePayoffObjects: ["存折", "集资款", "店铺钥匙", "合同", "营业执照"],
         defaultPayoffActions: ["拿到", "保住", "夺回"],
       },
+      structureSignals: {
+        pressure_source: ["父亲的下岗通知就在这个月", "家里只剩不到一千块积蓄"],
+        opening_hook: ["父亲把失业通知拍在桌上"],
+      },
     };
 
     const result = buildChapterGoal(input);
 
     expect(result.mainConflict).toContain("父亲在失业通知上");
     expect(result.mainConflict).not.toContain("前500字冲突");
-    expect(result.payoffToDeliver).toBe("家庭危机被当场坐实");
-    expect(result.payoffDirective?.payoffType).toBe("reveal");
+    // Signal-driven: pressure_source tokens "父亲"+"通知" overlap with ending hook text
+    expect(result.payoffToDeliver).toBe("关键压力信号被本章触及");
+    // Signal-driven generic payoff no longer matches hardcoded type heuristics
+    expect(result.payoffDirective?.payoffType).toBe("reversal");
     expect(result.payoffToDeliver).not.toContain("存折");
   });
 });

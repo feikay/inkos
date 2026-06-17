@@ -24,6 +24,7 @@ import { parseCurrentStateFacts, parsePendingHooksMarkdown } from "../utils/stor
 import { analyzeChapterCadence } from "../utils/chapter-cadence.js";
 import { buildPlannerHookAgenda } from "../utils/hook-agenda.js";
 import { buildChapterGoal } from "../utils/chapter-goal-builder.js";
+import { readStructureSignals } from "../utils/structure-signals.js";
 import {
   summarizeArcMap,
   summarizeGenreProfile,
@@ -103,6 +104,23 @@ interface GoalArbitrationResult {
   readonly conflict?: ChapterConflict;
 }
 
+/** Normalize Chinese numerals to Arabic digits so "两百" and "200" produce matching bigrams. */
+function normalizeNumerals(raw: string): string {
+  return raw
+    .replace(/零/g, "0")
+    .replace(/〇/g, "0")
+    .replace(/一/g, "1")
+    .replace(/二/g, "2")
+    .replace(/两/g, "2")
+    .replace(/三/g, "3")
+    .replace(/四/g, "4")
+    .replace(/五/g, "5")
+    .replace(/六/g, "6")
+    .replace(/七/g, "7")
+    .replace(/八/g, "8")
+    .replace(/九/g, "9");
+}
+
 export class PlannerAgent extends BaseAgent {
   get name(): string {
     return "planner";
@@ -156,6 +174,8 @@ export class PlannerAgent extends BaseAgent {
       this.readFileOrDefault(sourcePaths.powerSystem),
     ]);
     const language = this.isChineseLanguage(input.book.language) ? "zh" : "en";
+    const structureSignalResult = await readStructureSignals(storyDir);
+    const structureSignals = structureSignalResult.status === "ok" ? structureSignalResult.signals.signals : undefined;
     const resolvedCurrentState = await this.resolveCurrentStateForPlanning({
       storyDir,
       chapterNumber: input.chapterNumber,
@@ -353,6 +373,7 @@ export class PlannerAgent extends BaseAgent {
       arcMap,
       genreProfile,
       powerSystem,
+      structureSignals,
     });
     const cadenceAdjustedChapterGoal = this.applyCadenceChapterGoalOverrides(rawChapterGoal, cadence, genreProfileMeta);
     const resilientChapterGoal = this.ensureChapterGoalFallback({
@@ -377,6 +398,7 @@ export class PlannerAgent extends BaseAgent {
       chapterNumber: input.chapterNumber,
       parsedRules,
       genreProfile: genreProfileMeta,
+      structureSignals,
     });
     const revealExecutablePayoffGovernance = this.enforceExecutableRevealPayoff({
       chapterGoal: concreteEventPayoffGovernance.chapterGoal,
@@ -406,6 +428,7 @@ export class PlannerAgent extends BaseAgent {
       chapterNumber: input.chapterNumber,
       language,
       moodDirective: directives.moodDirective,
+      structureSignals,
     });
     const payoffHookGovernance = this.applyPayoffHookGovernance({
       chapterGoal,
@@ -1247,12 +1270,13 @@ export class PlannerAgent extends BaseAgent {
     readonly chapterNumber: number;
     readonly language: "zh" | "en";
     readonly moodDirective?: MoodDirective;
+    readonly structureSignals?: Record<string, ReadonlyArray<string>>;
   }): ChapterGoal {
-    const payoffConflict = this.deriveConflictFromPayoff(input.chapterGoal.payoffToDeliver);
+    const payoffConflict = this.deriveConflictFromPayoff(input.chapterGoal.payoffToDeliver, input.structureSignals);
     if (
       payoffConflict
       && (this.isChapterPlanControlText(input.chapterGoal.mainConflict)
-        || !this.hasConflictPayoffOverlap(input.chapterGoal.mainConflict, input.chapterGoal.payoffToDeliver))
+        || !this.hasConflictPayoffOverlap(input.chapterGoal.mainConflict, input.chapterGoal.payoffToDeliver, input.structureSignals))
     ) {
       return {
         ...input.chapterGoal,
@@ -1269,23 +1293,67 @@ export class PlannerAgent extends BaseAgent {
     };
   }
 
-  private hasConflictPayoffOverlap(conflict: string | undefined, payoff: string | undefined): boolean {
+  private hasConflictPayoffOverlap(
+    conflict: string | undefined,
+    payoff: string | undefined,
+    structureSignals?: Record<string, ReadonlyArray<string>>,
+  ): boolean {
     const combined = `${conflict ?? ""} ${payoff ?? ""}`;
-    // Generic family-crisis overlap detection — uses abstract role/event categories only.
-    if (/(父亲|爸爸|母亲|妈妈|家人|家庭).{0,24}(失业|危机|变故|困难|经济压力)/u.test(combined)) {
-      return /(父亲|爸爸|母亲|妈妈|家人|家庭).{0,24}(失业|危机|变故|困难|经济压力)/u.test(conflict ?? "");
+    // Signal-driven overlap: check if both conflict and payoff share tokens from the same signal dimension.
+    if (structureSignals) {
+      const crisisTokens = this.uniqueSignalTokens([
+        ...(structureSignals["pressure_source"] ?? []),
+        ...(structureSignals["opening_hook"] ?? []),
+      ]);
+      if (crisisTokens.length > 0) {
+        const conflictHits = this.countTokenOverlaps(conflict ?? "", crisisTokens);
+        const payoffHits = this.countTokenOverlaps(payoff ?? "", crisisTokens);
+        if (conflictHits >= 1 && payoffHits >= 1) return true;
+        return false;
+      }
     }
     return true;
   }
 
-  private deriveConflictFromPayoff(payoff: string | undefined): string | undefined {
+  private deriveConflictFromPayoff(
+    payoff: string | undefined,
+    structureSignals?: Record<string, ReadonlyArray<string>>,
+  ): string | undefined {
     const normalized = this.normalizeMeaningfulText(payoff);
     if (!normalized) return undefined;
-    // Generic family-economic-crisis derivation — no hardcoded book/character names.
-    if (/(父亲|爸爸|母亲|妈妈|家人|家庭).{0,16}(失业|危机|变故|困难|经济)/u.test(normalized)) {
-      return "家庭经济危机被确认，主角必须寻找出路。";
+    // Signal-driven derivation: if payoff tokens overlap with crisis signals, derive a generic conflict.
+    if (structureSignals) {
+      const crisisTokens = this.uniqueSignalTokens([
+        ...(structureSignals["pressure_source"] ?? []),
+        ...(structureSignals["opening_hook"] ?? []),
+      ]);
+      if (crisisTokens.length > 0 && this.countTokenOverlaps(normalized, crisisTokens) >= 2) {
+        return "关键压力信号被本章触及";
+      }
     }
     return undefined;
+  }
+
+  /** Extract unique 2-char bigram tokens from signal phrases for Chinese word-boundary-free matching. */
+  private uniqueSignalTokens(phrases: ReadonlyArray<string>): string[] {
+    const stopRe = /[的了着过就在被把和与或但而因所以如果虽然然而，。！？、：；""''（）【】《》\s]+/g;
+    const tokens = new Set<string>();
+    for (const phrase of phrases) {
+      const cleaned = normalizeNumerals(phrase.replace(stopRe, ""));
+      for (let i = 0; i <= cleaned.length - 2; i++) {
+        tokens.add(cleaned.substring(i, i + 2));
+      }
+    }
+    return [...tokens];
+  }
+
+  private countTokenOverlaps(text: string, tokens: ReadonlyArray<string>): number {
+    const normalizedText = normalizeNumerals(text);
+    let count = 0;
+    for (const token of tokens) {
+      if (normalizedText.includes(token)) count++;
+    }
+    return count;
   }
 
   private findPrimaryHookConflict(
@@ -1882,6 +1950,7 @@ export class PlannerAgent extends BaseAgent {
     readonly chapterNumber?: number;
     readonly parsedRules?: ReturnType<typeof parseBookRules>;
     readonly genreProfile?: any;
+    readonly structureSignals?: Record<string, ReadonlyArray<string>>;
   }): {
     readonly chapterGoal: ChapterGoal;
     readonly directiveNote?: string;
@@ -1900,6 +1969,7 @@ export class PlannerAgent extends BaseAgent {
       language: input.language,
       parsedRules: input.parsedRules,
       genreProfile: input.genreProfile,
+      structureSignals: input.structureSignals,
     });
     if (!rewrittenPayoff || rewrittenPayoff === payoff) {
       return {
@@ -2271,6 +2341,7 @@ export class PlannerAgent extends BaseAgent {
     readonly language: "zh" | "en";
     readonly parsedRules?: ReturnType<typeof parseBookRules>;
     readonly genreProfile?: any;
+    readonly structureSignals?: Record<string, ReadonlyArray<string>>;
   }): string {
     const source = [
       input.chapterGoal.protagonistGoal,
@@ -2281,7 +2352,7 @@ export class PlannerAgent extends BaseAgent {
 
     const payoff = this.normalizeMeaningfulText(input.chapterGoal.payoffToDeliver);
     if (payoff && this.isAwakeningPayoff(payoff)) {
-      return this.deriveRevealEventPayoff(source, input.language);
+      return this.deriveRevealEventPayoff(source, input.language, input.structureSignals);
     }
     if (payoff && this.isExploratoryPayoff(payoff)) {
       return this.deriveExploratoryPayoff(source, input.language);
@@ -2297,7 +2368,7 @@ export class PlannerAgent extends BaseAgent {
     const systemResourceName = customResources.find((res: string) => /(积分|点数|能量|试用期|权限)/.test(res));
 
     if (inferredType === "reveal") {
-      return this.deriveRevealEventPayoff(source, input.language);
+      return this.deriveRevealEventPayoff(source, input.language, input.structureSignals);
     }
 
     if (matchedObject) {
@@ -2328,13 +2399,14 @@ export class PlannerAgent extends BaseAgent {
     }
   }
 
-  private deriveRevealEventPayoff(source: string, language: "zh" | "en"): string {
+  private deriveRevealEventPayoff(
+    source: string,
+    language: "zh" | "en",
+    structureSignals?: Record<string, ReadonlyArray<string>>,
+  ): string {
     if (language !== "zh") {
       if (/(return|back).{0,20}(year|past|timeline)|reborn|reincarnat/i.test(source)) {
         return "the protagonist confirms the return to the past timeline";
-      }
-      if (/(father|dad).{0,30}(layoff|laid off|job loss|factory cut)/i.test(source)) {
-        return "the father's layoff crisis is confirmed";
       }
       const revealMatch = source.match(/(?:discovers?|confirms?|learns?|realizes?)\s+[^.;!?]{4,80}/i);
       return revealMatch?.[0]?.trim() ?? "a key clue is revealed on the spot";
@@ -2342,18 +2414,27 @@ export class PlannerAgent extends BaseAgent {
 
     const rebirthConfirmed = /(?:发现|确认|验证|意识到|确定|醒来发现|猛然惊醒).{0,20}(?:重生|回到|回了|时空|199\d|20\d{2}|时间点|年份)/u.test(source)
       || /(?:重生|回到|回了|时空|199\d|20\d{2}|时间点|年份).{0,20}(?:确认|验证|坐实|确定|发现)/u.test(source);
-    const familyCrisisConfirmed = /(?:父亲|爸爸).{0,20}(?:透露|说出|提到|失业|危机|变故|工厂).{0,12}(?:失业|危机)?/u.test(source)
-      || /(?:失业|危机|变故|工厂).{0,20}(?:父亲|爸爸)/u.test(source);
+
+    // Signal-driven family-crisis detection — no hardcoded family role or crisis-type terms.
+    let signalCrisisConfirmed = false;
+    if (structureSignals) {
+      const crisisTokens = this.uniqueSignalTokens([
+        ...(structureSignals["pressure_source"] ?? []),
+        ...(structureSignals["opening_hook"] ?? []),
+      ]);
+      signalCrisisConfirmed = crisisTokens.length > 0 && this.countTokenOverlaps(source, crisisTokens) >= 2;
+    }
+
     const antagonistThreat = /(?:有人|来人|对方|那人|债主|仇家).{0,20}(?:堵门|警告|威胁|上门|逼迫)|(?:堵门|警告|威胁|上门|逼迫).{0,20}(?:有人|来人|对方|那人|债主|仇家)/u.test(source);
 
-    if (rebirthConfirmed && familyCrisisConfirmed) {
-      return "确认重生事实，并得知家庭危机";
+    if (rebirthConfirmed && signalCrisisConfirmed) {
+      return "确认重生事实，并得知关键危机信号";
     }
     if (rebirthConfirmed) {
       return "确认重生/穿越事实";
     }
-    if (familyCrisisConfirmed) {
-      return "家庭经济危机被确认";
+    if (signalCrisisConfirmed) {
+      return "关键危机信号被触及";
     }
     if (antagonistThreat) {
       return "外部威胁被正面引爆";
