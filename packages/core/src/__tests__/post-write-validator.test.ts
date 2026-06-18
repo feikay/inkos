@@ -160,7 +160,7 @@ describe("validatePostWrite", () => {
   });
 
   it("detects world-exposition as a hard fail", () => {
-    const content = "按照这个世界的战力规则，三转之后才能压过二转，这意味着他现在绝无胜算。";
+    const content = "按照这个世界的规则，弱者难以正面抗衡强者，这意味着他现在绝无胜算。";
     const result = validatePostWrite(content, baseProfile, null);
     expect(findRule(result, "world-exposition")).toBeDefined();
     expect(findRule(result, "world-exposition")?.severity).toBe("error");
@@ -801,11 +801,11 @@ describe("validatePostWrite", () => {
 
   it("flags payoff-impact-missing when payoff has only result without sensory/cost layers", () => {
     const check = evaluatePayoffImpact(
-      "楚夜拿到了黑市腰牌，局势暂时稳住。",
+      "他拿到了关键情报，局势暂时稳住。",
       {
-        payoffToDeliver: "拿到黑市腰牌",
+        payoffToDeliver: "拿到关键情报",
         payoffDirective: {
-          promisedPayoff: "拿到黑市腰牌",
+          promisedPayoff: "拿到关键情报",
           payoffType: "resource",
           mandatoryByFinalAct: true,
         },
@@ -822,11 +822,11 @@ describe("validatePostWrite", () => {
 
   it("flags payoff-impact-missing when payoff has result + sensory but still lacks cost", () => {
     const check = evaluatePayoffImpact(
-      "楚夜掌心一阵灼痛，终于拿到黑市腰牌，局势立刻逆转。",
+      "他掌心一阵灼痛，终于拿到关键情报，局势立刻逆转。",
       {
-        payoffToDeliver: "拿到黑市腰牌",
+        payoffToDeliver: "拿到关键情报",
         payoffDirective: {
-          promisedPayoff: "拿到黑市腰牌",
+          promisedPayoff: "拿到关键情报",
           payoffType: "resource",
           mandatoryByFinalAct: true,
         },
@@ -843,11 +843,11 @@ describe("validatePostWrite", () => {
 
   it("flags payoff-impact-missing.sensory when payoff has result + cost but no sensory layer", () => {
     const check = evaluatePayoffImpact(
-      "楚夜强行催动煞气付出寿元折损的代价，终于拿到黑市腰牌，封锁当场松动。",
+      "他拼尽全力付出身体透支的代价，终于拿到关键情报，封锁当场松动。",
       {
-        payoffToDeliver: "拿到黑市腰牌",
+        payoffToDeliver: "拿到关键情报",
         payoffDirective: {
-          promisedPayoff: "拿到黑市腰牌",
+          promisedPayoff: "拿到关键情报",
           payoffType: "resource",
           mandatoryByFinalAct: true,
         },
@@ -864,11 +864,11 @@ describe("validatePostWrite", () => {
 
   it("flags payoff-impact-missing.moment when payoff has sensory/cost/result but no sharp turning instant", () => {
     const check = evaluatePayoffImpact(
-      "楚夜喉间泛起血腥味，强行催动煞气付出寿元折损的代价，终于拿到黑市腰牌，封锁当场松动。",
+      "他喉间泛起血腥味，拼尽全力付出身体透支的代价，终于拿到关键情报，封锁当场松动。",
       {
-        payoffToDeliver: "拿到黑市腰牌",
+        payoffToDeliver: "拿到关键情报",
         payoffDirective: {
-          promisedPayoff: "拿到黑市腰牌",
+          promisedPayoff: "拿到关键情报",
           payoffType: "resource",
           mandatoryByFinalAct: true,
         },
@@ -886,11 +886,11 @@ describe("validatePostWrite", () => {
 
   it("flags payoff-ending-overlap when MOMENT lands at the tail without post-moment resolution", () => {
     const check = evaluatePayoffImpact(
-      "楚夜喉间泛起血腥味，强行催动煞气付出经脉刺痛的代价，终于拿到黑市腰牌。就在这一刻，封锁突然崩裂。",
+      "他喉间泛起血腥味，拼尽全力付出身体刺痛的代价，终于拿到关键情报。就在这一刻，封锁突然崩裂。",
       {
-        payoffToDeliver: "拿到黑市腰牌",
+        payoffToDeliver: "拿到关键情报",
         payoffDirective: {
-          promisedPayoff: "拿到黑市腰牌",
+          promisedPayoff: "拿到关键情报",
           payoffType: "resource",
           mandatoryByFinalAct: true,
         },
@@ -907,11 +907,11 @@ describe("validatePostWrite", () => {
 
   it("passes payoff impact when sensory/cost/impact are all present", () => {
     const check = evaluatePayoffImpact(
-      "楚夜喉间泛起血腥味，强行催动煞气付出经脉刺痛的代价。就在这一刻，黑市腰牌在他掌心骤然发烫，追兵封锁当场松动。楚夜立刻压住翻涌气息，局势暂时稳住。",
+      "他喉间泛起血腥味，拼尽全力付出身体刺痛的代价。就在这一刻，他猛地扯开情报封条，关键情报在他掌心骤然发烫，追兵封锁当场松动。他立刻压住翻涌气息，局势暂时稳住。",
       {
-        payoffToDeliver: "拿到黑市腰牌",
+        payoffToDeliver: "拿到关键情报",
         payoffDirective: {
-          promisedPayoff: "拿到黑市腰牌",
+          promisedPayoff: "拿到关键情报",
           payoffType: "resource",
           mandatoryByFinalAct: true,
         },
@@ -931,7 +931,7 @@ describe("validatePostWrite", () => {
 
   it("flags payoff-resource-flat when a resource payoff is written as a smooth result instead of an acquisition event", () => {
     const check = evaluatePayoffImpact(
-      "楚夜掌心发麻，寿元被硬生生削去一截。就在这一刻，地图信息出现在脑海里。楚夜勉强稳住气息。",
+      "他掌心发麻，体力被硬生生削去一截。就在这一刻，地图信息出现在脑海里。他勉强稳住气息。",
       {
         payoffToDeliver: "获得地图信息",
         payoffDirective: {
@@ -952,7 +952,7 @@ describe("validatePostWrite", () => {
 
   it("passes resource payoff when acquisition is written as a sharp triggered event", () => {
     const check = evaluatePayoffImpact(
-      "楚夜掌心刺痛，强行灌入煞气付出经脉撕裂的代价。就在这一刻，他猛地扯开残图封蜡，地图信息随着燃亮的纹路骤然炸开，整条逃生路线被逼了出来。楚夜立刻压住翻涌气息，局势暂时稳住。",
+      "他掌心刺痛，拼尽全力付出身体撕裂的代价。就在这一刻，他猛地扯开封蜡，地图信息随着燃亮的纹路骤然炸开，整条逃生路线被逼了出来。他立刻压住翻涌气息，局势暂时稳住。",
       {
         payoffToDeliver: "获得地图信息",
         payoffDirective: {
@@ -972,11 +972,11 @@ describe("validatePostWrite", () => {
 
   it("warns when consumption and backlash appear in prose but state and ledger stay unchanged", () => {
     const check = evaluateResourceLedgerDiscipline({
-      content: "秦枭强行催动煞气，气血骤降，反噬之下经脉刺痛，五脏六腑都像被火灼过。",
+      content: "秦枭体力骤降，反噬之下五脏六腑都像被火灼过，伤口也崩裂加重。",
       currentState: "# 当前状态\n\n- 秦枭仍在逃亡。\n",
       updatedState: "# 当前状态\n\n- 秦枭仍在逃亡。\n",
-      originalLedger: "# 资源账本\n\n- 煞气：稳定\n",
-      updatedLedger: "# 资源账本\n\n- 煞气：稳定\n",
+      originalLedger: "# 资源账本\n\n- 体力：稳定\n",
+      updatedLedger: "# 资源账本\n\n- 体力：稳定\n",
       language: "zh",
     });
 
@@ -989,11 +989,11 @@ describe("validatePostWrite", () => {
 
   it("flags numeric mismatch when prose gives a concrete resource amount that ledger does not carry forward", () => {
     const check = evaluateResourceLedgerDiscipline({
-      content: "他一口气吞下十五缕煞气，伤口止血，体力也回升了几分。",
+      content: "他伤口止血，体力从十成恢复到十五成，状态明显回升。",
       currentState: "# 当前状态\n",
-      updatedState: "# 当前状态\n\n- 伤口止血，体力回升。\n",
-      originalLedger: "# 资源账本\n\n- 煞气：十缕\n",
-      updatedLedger: "# 资源账本\n\n- 煞气：十缕\n",
+      updatedState: "# 当前状态\n\n- 伤口止血，体力恢复。\n",
+      originalLedger: "# 资源账本\n\n- 体力：十成\n",
+      updatedLedger: "# 资源账本\n\n- 体力：十成\n",
       language: "zh",
     });
 

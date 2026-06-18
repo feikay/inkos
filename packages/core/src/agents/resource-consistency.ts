@@ -167,70 +167,19 @@ export interface ResourceRules {
   readonly skills: ReadonlyArray<ResourceSkillRule>;
 }
 
-const DEFAULT_RESOURCE_TYPES = [
-  "民望值",
-  "联邦币",
-  "现金",
-  "竞选资金",
-  "固定支持者数",
-  "技能",
-  "技能点",
-  "系统积分",
-  "灵石",
-  "金币",
-  "银两",
-  "经验值",
-  "气血",
-  "灵力",
-  "修为",
-  "功德",
-  "好感度",
-] as const;
+// Default resource types: intentionally minimal universal set.
+// Genre-specific types come from genre template resourceSystem.defaultTypes.
+const DEFAULT_RESOURCE_TYPES: readonly string[] = ["现金", "好感度"];
 
 const RESOURCE_ALIASES: Record<string, string> = {
-  民望: "民望值",
-  民望值: "民望值",
-  声望: "民望值",
-  民望点: "民望值",
-  联邦币: "联邦币",
-  现金: "联邦币",
-  联邦现金: "联邦币",
-  钱: "联邦币",
-  技能: "技能",
-  技能点: "技能点",
-  竞选资金: "竞选资金",
-  固定支持者数: "固定支持者数",
-  系统积分: "系统积分",
-  系统资源: "系统积分",
-  灵石: "灵石",
-  积分: "系统积分",
-  经验值: "经验值",
-  金币: "金币",
-  银两: "银两",
-  功德: "功德",
-  气血: "气血",
-  灵力: "灵力",
-  修为: "修为",
+  现金: "现金",
+  钱: "现金",
   好感度: "好感度",
 };
 
-const CANONICAL_RESOURCE_WHITELIST = new Set<string>([
-  ...DEFAULT_RESOURCE_TYPES.map((resource) => RESOURCE_ALIASES[resource] ?? resource),
-]);
+const CORE_RESOURCE_SET = new Set<string>(["现金", "好感度"]);
 
-const CORE_RESOURCE_SET = new Set<string>([
-  "民望值",
-  "联邦币",
-  "现金",
-  "技能",
-  "技能点",
-  "系统积分",
-  "经验值",
-  "气血",
-  "灵石",
-  "金币",
-  "银两",
-]);
+const CANONICAL_RESOURCE_WHITELIST = new Set<string>(["现金", "钱", "好感度"]);
 
 export class ResourceConsistencyReviserAgent extends BaseAgent {
   get name(): string {
@@ -502,11 +451,11 @@ export function parseResourceRules(
   }
 
   const resourcesBlock = bookRules.match(/resources\s*:\s*\n([\s\S]*?)(?:\n\S|$)/iu)?.[1] ?? "";
-  for (const match of resourcesBlock.matchAll(/^\s{2}([^:\n]+):\s*$/gmu)) {
+  for (const match of resourcesBlock.matchAll(/^  ([^\s:][^:\n]*):\s*$/gmu)) {
     const name = normalizeResourceName(match[1] ?? "", resourceAliases);
     if (!isAllowedResource(name) && !declaredResourceNames.has(name)) continue;
     const start = (match.index ?? 0) + match[0].length;
-    const next = resourcesBlock.slice(start).search(/^\s{2}[^:\n]+:\s*$/mu);
+    const next = resourcesBlock.slice(start).search(/^  [^\s:][^:\n]*:\s*$/mu);
     const body = next >= 0 ? resourcesBlock.slice(start, start + next) : resourcesBlock.slice(start);
     const initial = body.match(/initial\s*:\s*(-?\d+)/iu)?.[1];
     const min = body.match(/min\s*:\s*(-?\d+)/iu)?.[1];

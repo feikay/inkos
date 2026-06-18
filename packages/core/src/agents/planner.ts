@@ -1620,13 +1620,15 @@ export class PlannerAgent extends BaseAgent {
     const focusChapterBlock = this.extractCurrentFocusChapterBlock(params.currentFocus, params.chapterNumber);
     for (const line of focusChapterBlock) {
       // Look for time-anchor patterns like "香港回归倒计时15天" or "距…还有…天"
-      const timeMatch = line.match(/(香港回归.*?(\d+)\s*天|距离.{2,8}还有\s*(\d+)\s*天|倒计时\s*(\d+)\s*天)/u);
+      // Universal time anchor pattern: "距离X还有N天" / "倒计时N天"
+      const timeMatch = line.match(/(距离.{2,10}还有\s*(\d+)\s*天|倒计时\s*(\d+)\s*天|还有\s*(\d+)\s*天.{2,6}(?:回归|开幕|开始|启动|截止|到来))/u);
       if (timeMatch) {
         const days = timeMatch[2] ?? timeMatch[3] ?? timeMatch[4];
+        const eventText = line.match(/(?:距离|倒计时)?(.{0,6})(?:还有\s*\d+\s*天|倒计时\s*\d+\s*天)/u)?.[1]?.trim() ?? "";
         const desc = lang === "zh"
-          ? `香港回归倒计时${days}天——通过收音机/路边标语/日历任一方式`
-          : `Hong Kong handover countdown: ${days} days — via radio, banner, or calendar`;
-        items.push({ description: desc, signal: `回归.*${days}.*天|倒计时.*${days}|handover.*${days}` });
+          ? `时间锚点：${eventText ? eventText + "倒计时" : ""}${days}天——通过收音机/标语/日历任一方式`
+          : `Time anchor: ${days} day countdown — via radio, banner, or calendar`;
+        items.push({ description: desc, signal: `\\d+.*天|倒计时.*${days}|countdown.*${days}` });
         break;
       }
     }
@@ -1635,8 +1637,8 @@ export class PlannerAgent extends BaseAgent {
     const foreshadowIds = new Set(params.chapterGoal.foreshadowToTouch ?? []);
     for (const hook of params.pendingHooks) {
       if (!foreshadowIds.has(hook.hookId)) continue;
-      // Extract character name from hook notes or hook id
-      const charMatch = hook.notes?.match(/苏晴|陈志强|刘文轩|王胖子|马明远|林建国|周秀兰/g);
+      // Extract Chinese 2-3 character proper names from hook notes (generic pattern).
+      const charMatch = hook.notes?.match(/[一-鿿]{2,3}(?=[^，。；！？\n]{0,8}(?:出场|露面|出现|提及|碰面|相遇|遇见|见到|路过|找到))/gu);
       if (charMatch) {
         for (const charName of [...new Set(charMatch)]) {
           // only add if not already listed
@@ -2317,55 +2319,18 @@ export class PlannerAgent extends BaseAgent {
     readonly currentState: string;
     readonly language: "zh" | "en";
   }): string {
-    const source = [
-      input.chapterGoal.payoffToDeliver,
-      input.chapterGoal.mainConflict,
-      input.chapterGoal.protagonistGoal,
-      input.chapterGoal.nextChapterPull,
-      input.currentState,
-    ].join(" ");
-
-    if (/(阵纹|法阵|禁纹|规则)/u.test(source)) {
-      return input.language === "zh"
-        ? "阵纹微弱波动，尚未完全激活"
-        : "the formation lines faintly stir without fully activating";
-    }
-    if (/(风暴|暴风|风眼)/u.test(source)) {
-      return input.language === "zh"
-        ? "风暴远处传来第一声低鸣"
-        : "the storm gives its first distant low rumble";
-    }
-    if (/(追杀|追兵|围杀|尾随)/u.test(source)) {
-      return input.language === "zh"
-        ? "远处追踪痕迹第一次显现"
-        : "the first distant trace of pursuit appears";
-    }
-    if (/(伤|血|反噬|经脉|气血)/u.test(source)) {
-      return input.language === "zh"
-        ? "伤势被暂时稳住"
-        : "the injury is temporarily stabilized";
-    }
-    if (/(云岚|关系|信任|同伴|结盟)/u.test(source)) {
-      return input.language === "zh"
-        ? "与关键人物建立一次低声信任"
-        : "a quiet trust beat forms with a key character";
-    }
-    if (/(地图|玉简|腰牌|令牌|资源|补给)/u.test(source)) {
-      return input.language === "zh"
-        ? "一份可立刻使用的小资源被确认"
-        : "a small usable resource is confirmed";
-    }
-
+    // Generic low-pressure payoff — no genre-specific terms.
+    // Genre-specific breath payoffs come from structure_signals driven matching.
     return input.language === "zh"
-      ? "一条轻微线索被发现"
-      : "a minor clue is discovered";
+      ? "一个低烈度的正向推进被触发"
+      : "a low-intensity positive advance is triggered";
   }
 
   private inferLowPressurePayoffType(payoff: string): NonNullable<ChapterGoal["payoffDirective"]>["payoffType"] {
     if (/(信任|关系|结盟|同伴|trust|relationship|alliance)/iu.test(payoff)) {
       return "relationship";
     }
-    if (/(资源|补给|地图|玉简|腰牌|令牌|resource|supply|map|token)/iu.test(payoff)) {
+    if (/(资源|补给|resource|supply)/iu.test(payoff)) {
       return "resource";
     }
     return "reveal";
@@ -2389,13 +2354,19 @@ export class PlannerAgent extends BaseAgent {
       return false;
     }
 
-    const defaultActions = genreProfile?.structuralSignals?.defaultPayoffActions ?? [
-      "触发", "打开", "拿到", "夺下", "获得", "压住", "觉醒", "突破", "点亮", "揭开", "解开", "发现", "找到", "锁定", "启动", "扯开", "击碎", "稳住", "显现", "亮起", "拿回", "取到", "激活", "开启",
-      "awaken", "breakthrough", "get", "gain", "discover", "find", "open", "unlock", "trigger", "stabilize", "ignite", "activate"
+    // Universal completion/transaction verbs — always present regardless of genre profile overrides.
+    const UNIVERSAL_CONCRETE_ACTIONS = [
+      "卖出", "赚到", "赚了", "入手", "到货", "成交", "进到", "买到",
+      "sell", "earn", "close", "acquire", "procure",
     ];
-    const customObjects = genreProfile?.concretePayoffObjects ?? [
-      "目标", "道具", "钥匙", "门", "线索", "奖励", "文件", "凭证", "物品", "材料", "设备"
+    const defaultActions = [
+      ...(genreProfile?.structuralSignals?.defaultPayoffActions ?? [
+        "拿到", "获得", "发现", "找到", "打开",
+        "get", "gain", "discover", "find", "open",
+      ]),
+      ...UNIVERSAL_CONCRETE_ACTIONS,
     ];
+    const customObjects = genreProfile?.concretePayoffObjects ?? [];
 
 
     const customPattern = customObjects.length > 0
@@ -2403,14 +2374,10 @@ export class PlannerAgent extends BaseAgent {
       : null;
 
     if (
-      /(关键线索|明确线索|逃生线索|具体线索|第一条线索|first concrete clue|clear escape clue|key clue|concrete clue)/i.test(trimmed)
+      /(关键线索|明确线索|具体线索|first concrete clue|key clue|concrete clue)/i.test(trimmed)
       || this.isExploratoryPayoff(trimmed)
       || this.isPassiveConfirmationPayoff(trimmed)
-      || /(?:发现|确认|意识到|确定).{0,12}(?:重生|回到|回了|时间点|年份|199\d|20\d{2})/u.test(trimmed)
-      || /(?:重生|回到|回了|时间点|年份|199\d|20\d{2}).{0,12}(?:被)?(?:当场)?(?:确认|坐实)/u.test(trimmed)
-      || /(危机|事实|名单|通知|裁员).{0,12}(被)?(?:当场)?(坐实|确认)|(?:坐实|确认).{0,12}(危机|事实|名单|通知|裁员)/u.test(trimmed)
       || (customPattern !== null && customPattern.test(trimmed))
-      || /(?:获得|拿到|揭开|发现|显现).{0,10}(关键线索|明确线索|逃生线索|地图信息)/u.test(trimmed)
     ) {
       return true;
     }
@@ -2471,7 +2438,11 @@ export class PlannerAgent extends BaseAgent {
     }
 
     const matchedObject = this.extractPayoffEventObject(source, input.genreProfile);
-    const defaultActions = input.genreProfile?.structuralSignals?.defaultPayoffActions ?? (input.language === "zh" ? ["拿到", "保住", "夺回"] : ["secure", "protect", "reclaim"]);
+    const defaultActions = [
+      ...(input.genreProfile?.structuralSignals?.defaultPayoffActions ?? (input.language === "zh" ? ["拿到", "保住", "夺回"] : ["secure", "protect", "reclaim"])),
+      "卖出", "赚到", "赚了", "入手", "到货", "成交", "进到", "买到",
+      "sell", "earn", "close", "acquire", "procure",
+    ];
     const actionsPattern = new RegExp(`(${defaultActions.map((a: string) => this.escapeRegex(a)).join('|')})`, 'iu');
     const matchedAction = source.match(actionsPattern)?.[1] ?? defaultActions[0];
 
@@ -2524,10 +2495,7 @@ export class PlannerAgent extends BaseAgent {
       return revealMatch?.[0]?.trim() ?? "a key clue is revealed on the spot";
     }
 
-    const rebirthConfirmed = /(?:发现|确认|验证|意识到|确定|醒来发现|猛然惊醒).{0,20}(?:重生|回到|回了|时空|199\d|20\d{2}|时间点|年份)/u.test(source)
-      || /(?:重生|回到|回了|时空|199\d|20\d{2}|时间点|年份).{0,20}(?:确认|验证|坐实|确定|发现)/u.test(source);
-
-    // Signal-driven family-crisis detection — no hardcoded family role or crisis-type terms.
+    // Signal-driven reveal detection — no hardcoded genre-specific patterns.
     let signalCrisisConfirmed = false;
     if (structureSignals) {
       const crisisTokens = this.uniqueSignalTokens([
@@ -2537,37 +2505,26 @@ export class PlannerAgent extends BaseAgent {
       signalCrisisConfirmed = crisisTokens.length > 0 && this.countTokenOverlaps(source, crisisTokens) >= 2;
     }
 
-    const antagonistThreat = /(?:有人|来人|对方|那人|债主|仇家).{0,20}(?:堵门|警告|威胁|上门|逼迫)|(?:堵门|警告|威胁|上门|逼迫).{0,20}(?:有人|来人|对方|那人|债主|仇家)/u.test(source);
-
-    if (rebirthConfirmed && signalCrisisConfirmed) {
-      return "确认重生事实，并得知关键危机信号";
-    }
-    if (rebirthConfirmed) {
-      return "确认重生/穿越事实";
-    }
     if (signalCrisisConfirmed) {
-      return "关键危机信号被触及";
-    }
-    if (antagonistThreat) {
-      return "外部威胁被正面引爆";
+      return "关键压力信号被本章触及";
     }
 
     const revealMatch = source.match(/(?:发现|得知|透露|看到|意识到|确认|确定)[^，。；！？,.!?]{2,28}/u);
-    return revealMatch?.[0]?.trim() ?? "一条关键线索被当场揭开";
+    return revealMatch?.[0]?.trim() ?? (language === "zh" ? "一条关键线索被当场揭开" : "a key clue is revealed on the spot");
   }
 
   private isAwakeningPayoff(payoff: string): boolean {
     const normalized = payoff.trim();
     if (!normalized) return false;
-    return /^(?:觉醒|苏醒|醒来|重生觉醒|确认时空|验证重生|确认重生|确认新现实)$/u.test(normalized)
-      || /\b(?:awakening|awaken|wake up|confirm reality|confirm the new reality|confirm rebirth)\b/i.test(normalized);
+    return /^(?:觉醒|苏醒|醒来|确认新现实)$/u.test(normalized)
+      || /\b(?:awakening|awaken|wake up|confirm the new reality)\b/i.test(normalized);
   }
 
   private isExploratoryPayoff(payoff: string): boolean {
     const normalized = payoff.trim();
     if (!normalized) return false;
-    return /(?:找到|锁定|确认|发现|明确|识别|摸清|看清).{0,12}(?:机会|方向|路径|来源|入口|办法|方案|线索|突破口|可行性|信息差|赚钱门路|商机)/u.test(normalized)
-      || /\b(?:find|identify|lock|confirm|discover|locate|pin down).{0,32}(?:opportunity|path|source|route|lead|opening|plan|way|approach|angle|clue)\b/i.test(normalized);
+    return /(?:找到|锁定|确认|发现|明确).{0,12}(?:机会|方向|路径|来源|入口|办法|方案|线索|突破口|可行性)/u.test(normalized)
+      || /\b(?:find|identify|lock|confirm|discover|locate).{0,32}(?:opportunity|path|source|route|lead|opening|plan|way|approach|clue)\b/i.test(normalized);
   }
 
   private isPassiveConfirmationPayoff(payoff: string): boolean {
@@ -2601,13 +2558,6 @@ export class PlannerAgent extends BaseAgent {
       return "confirm one actionable next-step path";
     }
 
-    if (/(启动资金|本钱|借钱|筹钱|筹措|资金来源|五毛钱|五毛|100块|100元)/u.test(source)
-      && /(?:需要|无|没有|缺|至少|想办法|借|筹|来源|路径|从哪|怎么)/u.test(source)) {
-      return "找到启动资金来源";
-    }
-    if (/(商机|赚钱|生意|信息差|碟片|倒卖|市场|价格|批发|差价|门槛最低)/u.test(source)) {
-      return "锁定第一个可执行赚钱方向";
-    }
     if (/(线索|调查|真相|疑点|证据|谜团|踪迹)/u.test(source)) {
       return "锁定下一条可执行线索";
     }
@@ -2628,14 +2578,8 @@ export class PlannerAgent extends BaseAgent {
       return "a concrete practical opening is identified";
     }
 
-    if (/(资金|本钱|现金|钱|筹|借|元|预算)/u.test(source)) {
-      return "找到筹措启动资金的现实路径";
-    }
-    if (/(合作|合伙|老周|人脉|关系|渠道|供应|档口|批发)/u.test(source)) {
-      return "锁定一个可执行的合作突破口";
-    }
-    if (/(线索|信息|报价|价格|批发价|消息)/u.test(source)) {
-      return "确认一条可立刻利用的信息差";
+    if (/(线索|信息|消息)/u.test(source)) {
+      return "确认一条可立刻利用的关键信息";
     }
     return "找到一个可执行的现实突破口";
   }
@@ -2734,9 +2678,7 @@ export class PlannerAgent extends BaseAgent {
   }
 
   private extractPayoffEventObject(source: string, genreProfile?: any): string | undefined {
-    const customObjects = genreProfile?.concretePayoffObjects ?? [
-      "目标", "道具", "钥匙", "门", "线索", "奖励", "文件", "凭证", "物品", "材料", "设备"
-    ];
+    const customObjects = genreProfile?.concretePayoffObjects ?? [];
     const patterns = customObjects.map((o: string) => new RegExp(`(${this.escapeRegex(o)})`, 'u'));
     return patterns
       .map((pattern: RegExp) => source.match(pattern)?.[1])
@@ -2749,12 +2691,16 @@ export class PlannerAgent extends BaseAgent {
     const beforeObject = new RegExp(`(?:无|没有|没|缺|缺少|需要|至少|想办法|尚未|还没|未能|无法|不能|得|要|筹|借)[^，。；！？,.!?]{0,16}${escaped}`, "u");
     const afterObject = new RegExp(`${escaped}[^，。；！？,.!?]{0,16}(?:来源|路径|从哪|怎么|还没|尚未|不足|不够|缺口|需求)`, "u");
     const backgroundObject = new RegExp(`(?:身上|口袋里|枕头下|桌上|包里|状态|背景|随身)[^，。；！？,.!?]{0,16}(?:有|带着|压着|放着)[^，。；！？,.!?]{0,16}${escaped}`, "u");
+    // Already-acquired state: the object was obtained in a previous chapter.
+    // 已/已经/早已 + 有/拿到/获得/攒/借到/筹集 + object = unavailable for reuse.
+    const alreadyAcquired = new RegExp(`(?:已|已经|早已|早就|手头|目前|现有)[^，。；！？,.!?]{0,20}(?:有|拿到|获得|攒|凑|借到|筹集|得到|持有|握有|到手)[^，。；！？,.!?]{0,12}${escaped}`, "u");
     const englishBefore = new RegExp(`(?:no|without|lack|lacks|need|needs|needed|must raise|must find|source of|path to)[^.;!?]{0,32}${escaped}`, "i");
     const englishAfter = new RegExp(`${escaped}[^.;!?]{0,32}(?:source|path|needed|required|shortfall|gap|not enough|missing)`, "i");
     const englishBackground = new RegExp(`(?:has|carries|keeps|lies|sits)[^.;!?]{0,32}${escaped}[^.;!?]{0,32}(?:background|identity|state|status)`, "i");
     return beforeObject.test(source)
       || afterObject.test(source)
       || backgroundObject.test(source)
+      || alreadyAcquired.test(source)
       || englishBefore.test(source)
       || englishAfter.test(source)
       || englishBackground.test(source);
@@ -2945,14 +2891,14 @@ export class PlannerAgent extends BaseAgent {
       }
     }
 
-    if (payoffType === "reversal" && has(/觉醒|突破|破境|晋阶|血脉苏醒|awaken|breakthrough|advance realm/iu)) {
+    if (payoffType === "reversal" && has(/觉醒|突破|awaken|breakthrough/iu)) {
       signals.push("breakthrough");
     }
 
-    if (has(/多重人格|人格变化|第二人格|人格切换|personality shift|second persona/iu)) {
+    if (has(/人格变化|personality shift|second persona/iu)) {
       signals.push("personality shift");
     }
-    if (has(/世界规则改变|天地规则|世界变化|world change|rule of the world changes/iu)) {
+    if (has(/规则改变|world change|rule change/iu)) {
       signals.push("world-change");
     }
 
@@ -3091,10 +3037,10 @@ export class PlannerAgent extends BaseAgent {
   private scorePayoffSegment(segment: string): number {
     let score = 0;
 
-    if (/(觉醒|突破|拿到|获得|发现|找到|压住|掌握|逃离|摆脱|恢复|reveal|awaken|breakthrough|get|gain|find|stabilize|escape)/i.test(segment)) {
+    if (/(拿到|获得|发现|找到|摆脱|恢复|get|gain|find|stabilize|escape)/i.test(segment)) {
       score += 3;
     }
-    if (/(压制|威胁|追兵|阴影|危机|危险|追杀|threat|pressure|danger|pursuit|shadow)/i.test(segment)) {
+    if (/(压制|威胁|危机|危险|threat|pressure|danger)/i.test(segment)) {
       score -= 2;
     }
     if (segment.length <= 12) {

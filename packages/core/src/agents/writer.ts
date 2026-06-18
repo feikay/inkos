@@ -121,21 +121,15 @@ export interface PlannerIntentSanitizationResult {
 }
 
 const INTENT_PAYOFF_SUPPRESSION_PATTERNS: ReadonlyArray<RegExp> = [
-  /仅提示绑定/u,
-  /仅触发绑定/u,
-  /系统绑定/u,
-  /不直接发放任何福利/u,
-  /不提前发放任何福利/u,
+  /仅提示/u,
+  /仅触发/u,
   /不直接兑现/u,
   /不得提前兑现/u,
   /后续再逐步展示/u,
   /本章只触发/u,
   /不得直接获得/u,
-  /不得提前给主角福利/u,
-  /不提前泄露系统功能/u,
-  /不得提前泄露系统功能/u,
-  /结尾停在系统绑定/u,
-  /结尾卡系统绑定/u,
+  /结尾停在初始化/u,
+  /结尾卡初始化/u,
   /不得提前消耗后续剧情/u,
   /不直接给(?:现金|技能|情报)/u,
   /不得完整解锁/u,
@@ -226,7 +220,7 @@ export function sanitizePlannerIntentForChapterIntent(params: {
         ).replace(/\n{3,}/g, "\n\n").trimEnd(),
         "",
         "## Sanitized Note",
-        "旧 payoffDirective 已被 chapter_intent 抑制，本章只允许系统绑定/轻微暗示，不得完整兑现。",
+        "旧 payoffDirective 已被 chapter_intent 抑制，本章只允许初始化/轻微暗示，不得完整兑现。",
       ].join("\n")
     : params.plannerIntent;
   const contextPackage = params.contextPackage?.chapterGoal
@@ -237,7 +231,7 @@ export function sanitizePlannerIntentForChapterIntent(params: {
           chapterGoal: {
             ...goalWithoutPayoffDirective,
             protagonistGoal: goalWithoutPayoffDirective.protagonistGoal.replace(/获得一条明确逃生线索/gu, "完成 chapter_intent 指定的本章目标"),
-            payoffToDeliver: "chapter_intent 已抑制旧 payoff，本章只允许系统绑定/轻微暗示，不得完整兑现",
+            payoffToDeliver: "chapter_intent 已抑制旧 payoff，本章只允许初始化/轻微暗示，不得完整兑现",
             nextChapterPull: goalWithoutPayoffDirective.nextChapterPull.replace(/逃生线索|逃生路线|旧码头|资金/gu, "系统绑定钩子"),
           },
         };
@@ -2728,7 +2722,7 @@ ${lengthRequirementBlock}
                 "## 硬修规则",
                 "- 删除任何完整 payoff、逃生线索、藏钱地址、技能解锁、完整真相、严重补偿性代价或同类过度推进。",
                 "- 不得添加替代性重大收益或重大代价。",
-                "- 结尾停在系统绑定/面板出现/chapter_intent 指定钩子。",
+                "- 结尾停在初始化/chapter_intent 指定钩子。",
                 "",
                 "## 原标题",
                 params.creative.title,
@@ -2772,7 +2766,7 @@ ${lengthRequirementBlock}
     const paragraphs = content.split(/\n{2,}/u);
     const kept = paragraphs.filter((paragraph) => !this.findChapterIntentDriftPattern(paragraph));
     const cleaned = kept.join("\n\n").trim();
-    return cleaned || "系统绑定提示音响起。面板亮起，初始值归零，规则暂未展开。";
+    return cleaned || "初始条件触发。基本状态归零，规则暂未展开。";
   }
 
   private async rewriteForEndingTypeIfNeeded(params: {
@@ -3333,7 +3327,7 @@ ${lengthRequirementBlock}
       "Moment format is mandatory: write the MOMENT as one standalone sentence where the event clearly happens.",
       "The MOMENT must be a hard event, not a gradual process. Invalid: “逐渐打开 / 开始打开 / 正在打开 / 缓缓开启 / 似乎打开 / 似乎裂开”.",
       "正确 MOMENT 示例：门，被强行打开。",
-      "正确 MOMENT 示例：石门猛地裂开。",
+      "正确 MOMENT 示例：门猛地打开。",
       "After the MOMENT, you MUST include a resolution phase that stabilizes the situation.",
       "Every payoff MUST include a clear cost that hurts the protagonist.",
       "Cost is mandatory and must land after the moment/result: moment -> result -> cost.",
@@ -3698,7 +3692,7 @@ ${lengthRequirementBlock}
       "在 Act3 插入或替换一个具体的 payoff scene，不要只加强暗示。",
       "优先级：payoff > cost > endingType。",
       "结构：buildup（铺垫）-> trigger（触发）-> MOMENT（单独一句）-> result（结果）-> cost（代价）。",
-      "MOMENT：单独一句，瞬间发生。禁止渐变（逐渐/开始/正在/缓缓/似乎）。示例：石门猛地裂开。",
+      "MOMENT：单独一句，瞬间发生。禁止渐变（逐渐/开始/正在/缓缓/似乎）。示例：门猛地打开。",
       "代价：具体代价落在 result 之后。禁止无痛成功。",
       "感知：变化瞬间至少有一处具体感官细节。",
       "",
@@ -3770,7 +3764,7 @@ ${lengthRequirementBlock}
     const resultSentence = this.buildForcedMomentAnchorResult(language, anchorKind);
     const costSentence = this.buildForcedMomentAnchorCost(language, anchorKind);
     const triggerPattern = language === "zh"
-      ? /(触发|引动|催动|逼到极限|血痕|灼痛|共鸣|反噬|临界|匙钥|钥匙|裂纹|阵纹|符文|卷轴|古卷|石门|门扉|门锁|契约|地图|玉简|真相|记忆|意识|看懂|崩解|消散|失控|觉醒|反转|真名)/
+      ? /(触发|引动|逼到极限|临界|钥匙|裂纹|真相|记忆|意识|看懂|失控|反转)/
       : /(trigger|resonance|backlash|limit|threshold|key|seal|door|gate|glyph|mark|pain|blood|contract|map|memory|truth|mind|awaken|break apart|identity)/i;
     const triggerIndex = paragraphs.findIndex((paragraph) => triggerPattern.test(paragraph));
     const insertAt = triggerIndex >= 0 ? triggerIndex + 1 : 1;
@@ -3832,16 +3826,10 @@ ${lengthRequirementBlock}
       if (/契约/.test(content)) {
         return "契约的全部内容，涌入他的意识。";
       }
-      if (/地图|玉简/.test(content)) {
-        return "那一刻，他看懂了这份线索。";
-      }
-      return "那一刻，他看懂了这份契约。";
+      return "那一刻，他看懂了这份线索。";
     }
     if (anchorKind === "state-change") {
-      if (/真名/.test(content) || /真名/.test(chapterGoal.payoffToDeliver ?? "")) {
-        return "他的真名，开始崩解。";
-      }
-      return "消散的速度，骤然加快。";
+      return "变化的速度，骤然加快。";
     }
     if (/石门|石壁门|门扉/.test(content)) {
       return "石门，轰然裂开。";

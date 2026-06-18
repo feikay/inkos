@@ -5,23 +5,20 @@ describe("analyzePatternBreaker", () => {
   it("extracts ordered structure tags from a chapter", () => {
     const analysis = analyzeChapterPattern("石门裂开，楚夜拔剑迎战。妖兽倒下后，尸体旁散落灵气结晶，一块玉牌滚到水边。");
 
-    expect(analysis.tags).toEqual(["异象", "战斗", "掉落", "资源", "玉牌"]);
-    expect(analysis.signature).toBe("战斗 → 掉落 → 玉牌");
+    expect(analysis.tags).toEqual(["冲突"]);
+    expect(analysis.signature).toBe("冲突");
   });
 
-  it("detects repeated combat-loot-jade patterns in recent chapters", () => {
+  it("detects repeated conflict-only patterns with universal tags", () => {
     const result = analyzePatternBreaker([
       "楚夜拔剑迎战，妖兽倒下。尸体旁散落药材，最后露出一块玉牌。",
-      "云岚出手血战，黑影被击杀。石阶上滚落灵气结晶和一块玉牌。",
+      "云岚与强敌对抗，黑影被阻止。石阶上滚落灵气结晶。",
       "雾气发烫，石壁浮出血字。",
     ]);
 
     expect(result.repeated).toBe(true);
     expect(result.issues[0]).toContain("最近章节叙事流程重复");
     expect(result.directive).toContain("## 剧情模式打断器");
-    expect(result.directive).toContain("再出现战斗开局");
-    expect(result.directive).toContain("再掉落玉牌/卷轴");
-    expect(result.directive).toContain("必须选择不同推进方式");
   });
 
   it("does not trigger when the last three chapters use varied drivers", () => {
@@ -38,12 +35,11 @@ describe("analyzePatternBreaker", () => {
 
   it("can emit an English directive for English books", () => {
     const result = analyzePatternBreaker([
-      "楚夜拔剑迎战，妖兽倒下。尸体旁散落药材，最后露出一块玉牌。",
-      "云岚出手血战，黑影被击杀。石阶上滚落灵气结晶和一块玉牌。",
+      "楚夜拔剑迎战，妖兽倒下。尸体旁散落药材。",
+      "云岚出手对抗，黑影被阻止。石阶上滚落灵气结晶。",
     ], "en");
 
     expect(result.repeated).toBe(true);
     expect(result.directive).toContain("## Pattern Breaker");
-    expect(result.directive).toContain("Do not open with combat");
   });
 });

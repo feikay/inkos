@@ -319,13 +319,15 @@ function inferPayoffType(payoff: string, genreProfile?: GenreProfileSummary): Pa
   ) {
     return "reveal";
   }
-  if (/获得|拿到|夺得|资源|地图|腰牌|卷轴|残卷|药材|灵石|resource|obtain|gain|map|token|scroll/i.test(payoff)) {
+  // Concrete resource objects come from genre profile, not hardcoded here.
+  // Match universal resource indicators only.
+  if (/获得|拿到|资源|获得|拿到|resource|obtain|gain/i.test(payoff) && genreProfile?.concretePayoffObjects?.some((o) => payoff.includes(o))) {
     return "resource";
   }
   if (!allowsPowerBreakthrough && /突破口|缺口|切入口|现实路径|合作入口|practical opening|path/i.test(payoff)) {
     return "reveal";
   }
-  if (allowsPowerBreakthrough && /突破|晋阶|掌握|觉醒|学会|压住|稳住|新能力|breakthrough|master|awaken|stabilize|new ability/i.test(payoff)) {
+  if (allowsPowerBreakthrough && /突破|掌握|学会|新能力|breakthrough|master|new ability/i.test(payoff)) {
     return "breakthrough";
   }
   if (/信任|和解|关系|告白|结盟|relationship|trust|bond|reconcile|alliance/i.test(payoff)) {
@@ -627,7 +629,8 @@ function splitCharacterField(value: string): string[] {
 
 function extractChineseCharacterCandidates(texts: ReadonlyArray<string | undefined>): string[] {
   const results: string[] = [];
-  const stableRoleTitles = ["主角", "碑灵", "守卫", "追兵", "守门人", "掌柜", "长老", "师父", "师兄", "师姐", "族老"];
+  // Universal fallback only — genre-specific role titles come from genre profile.
+  const stableRoleTitles = ["主角"];
 
   for (const text of texts) {
     if (!text) continue;
@@ -821,26 +824,11 @@ function eventPayoffFromText(
       }
     }
 
-    if (/(名单|通知).{0,12}(出现|摆|放|写着|看到)|(?:看到|发现).{0,16}(名单|通知)/u.test(normalized)) {
-      const target = normalized.match(/(?:名单|通知)/u)?.[0] ?? "关键信息";
-      return `${target}被当场确认`;
+    // Transaction/completion payoffs — generic completion events (universal verbs).
+    if (/(?:卖出|售出|进到|买到|赚到|赚了|入手|到货|出掉|脱手|交割|成交|入账)[^，。；！？]{0,24}/u.test(normalized)) {
+      const match = normalized.match(/(?:卖出|售出|进到|买到|赚到|赚了|入手|到货|出掉|脱手|交割|成交|入账)[^，。；！？]{0,24}/u);
+      return compactSpecificPayoff(match?.[0] ?? normalized);
     }
-    if (/(重生|回到|穿越).{0,20}(确认|意识到|不是梦|时间点)|(?:确认|意识到|发现|确定).{0,20}(重生|不是梦|回到)/u.test(normalized)) {
-      return "重生事实被当场确认";
-    }
-    if (/(商机|赚钱门路|机会|信息差).{0,20}(发现|找到|确认)|(?:发现|找到|确认).{0,20}(商机|赚钱门路|机会|信息差)/u.test(normalized)) {
-      return "第一个赚钱机会被确认";
-    }
-  }
-
-  if (/layoff|laid off|redundancy/i.test(normalized)) {
-    return "the family layoff crisis is confirmed";
-  }
-  if (/reborn|returned to|time travel|not a dream/i.test(normalized)) {
-    return "the rebirth is confirmed as real";
-  }
-  if (/opportunity|business lead|information gap/i.test(normalized)) {
-    return "the first actionable opportunity is confirmed";
   }
 
   return undefined;
@@ -1038,7 +1026,7 @@ function inferEndingHookType(input: {
     input.payoffToDeliver,
   ].filter(Boolean).join(" ");
 
-  if (input.genreProfile?.powerScaling !== false && /突破|晋阶|破境|觉醒|掌握|realm|breakthrough|ascend/i.test(combined)) {
+  if (input.genreProfile?.powerScaling !== false && /突破|觉醒|掌握|breakthrough|awaken|master/i.test(combined)) {
     return "breakthrough";
   }
   if (/真相|身份|秘密|来历|揭开|发现|reveal|truth|secret|identity/i.test(combined)) {
@@ -1216,14 +1204,21 @@ function isTimingMetadataText(value: string): boolean {
   );
 }
 
-function isAbstractPayoff(value: string): boolean {
-  return (
+function isAbstractPayoff(value: string, genreProfile?: GenreProfileSummary): boolean {
+  if (
     /^(获得收益|得到线索|有所推进|形成优势|获得战术优势|获得资源或线索|争取喘息空间|可见收益|即时收益|本章收益|进展|推进主线)$/u.test(value)
     || /^(gain a benefit|get a clue|make progress|create an advantage|gain a tactical advantage)$/i.test(value)
-    || (/收益|线索|资源|优势|进展|推进/u.test(value)
-      && !/(腰牌|残卷|刻痕|追兵|追捕|反噬|封锁|逃离|逃出|甩开|地图|徽记|毒囊|符印|石碑|名册|令牌|洞口|黑市|血焰录)/u.test(value)
-      && value.length <= 10)
-  );
+  ) {
+    return true;
+  }
+  if (/收益|线索|资源|优势|进展|推进/u.test(value) && value.length <= 10) {
+    // Concrete objects come from genre profile; fallback is empty (no genre-specific defaults).
+    const concreteObjects = genreProfile?.concretePayoffObjects ?? [];
+    if (concreteObjects.length === 0) return true;
+    const hasConcreteObject = new RegExp(concreteObjects.map((o) => o.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "u").test(value);
+    return !hasConcreteObject;
+  }
+  return false;
 }
 
 function compactSpecificPayoff(text: string): string {
@@ -1232,8 +1227,8 @@ function compactSpecificPayoff(text: string): string {
     return "";
   }
 
-  const payoffPattern = /(?:获得|拿到|夺得|掌握|学会|压住|稳住|逃离|逃出|摆脱|反杀|突破|觉醒|发现|查明|找到|止血|恢复|修复|补充)[^，。；！？,.!?]{0,24}/u;
-  const englishPattern = /(?:gain|obtain|secure|escape|break free|stabilize|suppress|master|learn|reveal|find|recover|heal)[^,.;!?]{0,40}/i;
+  const payoffPattern = /(?:获得|拿到|发现|找到|补充|卖出|赚到|赚了|入手|到货|成交|进到|买到)[^，。；！？,.!?]{0,24}/u;
+  const englishPattern = /(?:gain|obtain|find|discover|get|sell|earn|acquire|receive|close|procure)[^,.;!?]{0,40}/i;
   const match = sanitized.match(payoffPattern) ?? sanitized.match(englishPattern);
   return match?.[0]?.trim() ?? sanitized;
 }
@@ -1254,16 +1249,10 @@ function defaultConcretePayoff(
     return language === "zh" ? `${matchedAction}${matchedObject}` : `${matchedAction} the ${matchedObject}`;
   }
 
-  if (/逃|追捕|追兵|封锁|围堵/u.test(combined)) {
-    return language === "zh" ? "暂时脱离当前压制" : "Temporarily break free from the current pressure.";
-  }
   // Generic fallback — no hardcoded book or genre terms.
-  // Specific event detection is handled earlier via structure_signals-driven matching.
+  // Concrete payoff detection is handled earlier via structure_signals and genre profile.
   if (combined.length > 0) {
-    return language === "zh" ? "确认一个迫在眉睫的关键事件" : "Confirm an urgent key event.";
-  }
-  if (/(商机|赚钱|生意|信息差|批发|价格|渠道|本钱|资金)/u.test(combined)) {
-    return language === "zh" ? "发现一个可执行的赚钱机会" : "Identify an actionable earning opportunity.";
+    return language === "zh" ? "本章承诺的关键推进点" : "A key advancement point promised this chapter.";
   }
 
   return language === "zh"
@@ -1367,32 +1356,17 @@ function sanitizeChineseCharacterCandidate(candidate: string | undefined): strin
   if (/^[我你他她它咱俺][不也会想要能再已正将]/u.test(normalized)) return undefined;
   if (/^(?:我们|你们|他们|她们|它们|自己)/u.test(normalized)) return undefined;
 
+  // Minimal universal blocked substrings that could be confused with character names.
+  // Genre-specific blocked terms come from genre profile styleGovernance.
   const blockedSubstrings = [
     "地点",
-    "山洞",
-    "尸坑",
-    "暗河",
-    "洞口",
-    "黑市",
-    "营地",
-    "符文",
-    "石片",
-    "腰牌",
-    "毒囊",
     "地图",
-    "刻痕",
-    "骸骨",
     "真相",
     "线索",
     "资源",
-    "机缘",
     "力量",
-    "反噬",
-    "突破",
     "进入",
-    "到骸",
     "看守",
-    "追兵的",
   ];
   if (blockedSubstrings.some((fragment) => normalized.includes(fragment))) return undefined;
   if (/[到去进从的了着]/u.test(normalized)) return undefined;

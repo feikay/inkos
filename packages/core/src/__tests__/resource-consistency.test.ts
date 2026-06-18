@@ -352,10 +352,9 @@ describe("parseResourceRules schema gate", () => {
       "",
       "",
     );
-    // With no resourceTypes block, all DEFAULT_RESOURCE_TYPES should be present
-    expect(Object.keys(rules.resources)).toContain("民望值");
-    expect(Object.keys(rules.resources)).toContain("灵石");
-    expect(Object.keys(rules.resources)).toContain("金币");
+    // With no resourceTypes block, DEFAULT_RESOURCE_TYPES should be present (minimal universal set)
+    expect(Object.keys(rules.resources)).toContain("现金");
+    expect(Object.keys(rules.resources)).toContain("好感度");
   });
 
   it("should still inject resources from book_rules resources block even when not in DEFAULT_RESOURCE_TYPES", () => {
@@ -463,9 +462,10 @@ describe("parseResourceRules inline/nested resourceTypes detection", () => {
       "",
       "",
     );
-    expect(Object.keys(rules.resources)).toContain("民望值");
-    expect(Object.keys(rules.resources)).toContain("灵石");
-    expect(Object.keys(rules.resources)).toContain("金币");
+    expect(Object.keys(rules.resources)).toContain("现金");
+    expect(Object.keys(rules.resources)).toContain("好感度");
+    // Genre-specific terms not declared in resourceTypes are NOT injected
+    expect(Object.keys(rules.resources)).not.toContain("民望值");
   });
 
   it("custom resources declared in resourceTypes should survive the full chain: resources -> pattern -> event extraction", () => {
@@ -706,11 +706,11 @@ describe("system_bootstrap and resource_rule_reveal modes", () => {
   });
 
   it("should degrade safely with only context-relevant resources in system_bootstrap", () => {
-    // A book with no resourceTypes declaration but some resources in context
+    // A book with explicit resourceTypes but some resources in context
     // should not crash and should only include those context-relevant resources.
     const plan = buildChapterResourcePlan({
       chapter: 1,
-      bookRules: "protagonist:\n  name: 测试\n",
+      bookRules: "resourceTypes:\n  - 经验值\n\nprotagonist:\n  name: 测试\n",
       particleLedger: "| 经验值 | 50 |\n",
       currentState: "系统刚刚激活。",
       chapterGoal: "系统激活",

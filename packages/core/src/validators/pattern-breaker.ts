@@ -1,13 +1,4 @@
-export type NarrativePatternTag =
-  | "战斗"
-  | "掉落"
-  | "资源"
-  | "人物"
-  | "异象"
-  | "陷阱"
-  | "代价"
-  | "玉牌"
-  | "卷轴";
+export type NarrativePatternTag = string;
 
 export interface ChapterPatternAnalysis {
   readonly tags: readonly NarrativePatternTag[];
@@ -21,23 +12,17 @@ export interface PatternBreakerResult {
   readonly directive?: string;
 }
 
-const TAG_RULES: ReadonlyArray<{
+// Universal narrative pattern tags — no genre-specific terms.
+// Genre-specific tags come from genre profile or structure_signals.
+const UNIVERSAL_TAG_RULES: ReadonlyArray<{
   readonly tag: NarrativePatternTag;
   readonly pattern: RegExp;
 }> = [
-  { tag: "战斗", pattern: /战斗|交锋|厮杀|搏杀|迎战|击败|击杀|斩杀|倒下|拔剑|出手|血战/u },
-  { tag: "掉落", pattern: /掉落|散落|滚落|掉出|坠落|落在|尸体旁|爪下压着/u },
-  { tag: "资源", pattern: /资源|灵气结晶|药材|灵草|丹药|矿石|收获|灵石|晶核/u },
-  { tag: "人物", pattern: /黑袍人|灰袍|老者|少年|少女|身影|人影|有人|男子|女子|弟子|长老/u },
-  { tag: "异象", pattern: /异象|符文[^。！？\n]{0,18}亮|亮起|倒流|震动|裂开|发烫|雾气|血光|光芒|轰鸣/u },
-  { tag: "陷阱", pattern: /陷阱|机关|阵法|封锁|禁制|地面[^。！？\n]{0,18}沉|塌陷|锁链|囚笼/u },
-  { tag: "代价", pattern: /代价|反噬|精血|寿元|伤势|刺痛|麻木|崩溃|失去知觉|经脉/u },
-  { tag: "玉牌", pattern: /玉牌/u },
-  { tag: "卷轴", pattern: /卷轴/u },
+  { tag: "冲突", pattern: /冲突|交锋|对抗|迎战|击败|阻止/u },
+  { tag: "获得", pattern: /获得|取得|找到|收获|拿到|入手/u },
+  { tag: "揭示", pattern: /发现|得知|透露|看到|意识到|确认/u },
+  { tag: "代价", pattern: /代价|伤势|损失|失去|牺牲/u },
 ];
-
-const COMBAT_LOOT_JADE_PATTERN = /(?:战斗|交锋|厮杀|搏杀|迎战|击败|击杀|斩杀|倒下|拔剑|出手|血战)[\s\S]{0,500}(?:掉落|散落|滚落|掉出|坠落|落在|尸体旁|爪下压着|灵气结晶|药材|资源|收获)[\s\S]{0,260}玉牌/u;
-const COMBAT_LOOT_SCROLL_PATTERN = /(?:战斗|交锋|厮杀|搏杀|迎战|击败|击杀|斩杀|倒下|拔剑|出手|血战)[\s\S]{0,500}(?:掉落|散落|滚落|掉出|坠落|落在|尸体旁|爪下压着|灵气结晶|药材|资源|收获)[\s\S]{0,260}卷轴/u;
 
 export function analyzePatternBreaker(
   recentChapters: ReadonlyArray<string>,
@@ -73,7 +58,7 @@ export function analyzePatternBreaker(
 }
 
 export function analyzeChapterPattern(chapter: string): ChapterPatternAnalysis {
-  const matches = TAG_RULES.flatMap((rule) => {
+  const matches = UNIVERSAL_TAG_RULES.flatMap((rule) => {
     const found = rule.pattern.exec(chapter);
     return found?.index === undefined ? [] : [{ tag: rule.tag, index: found.index }];
   }).sort((left, right) => left.index - right.index);
@@ -113,23 +98,8 @@ function findRepeatedPattern(patterns: readonly string[]): string | undefined {
 }
 
 function buildSignatureFromContent(chapter: string, tags: readonly NarrativePatternTag[]): string {
-  if (COMBAT_LOOT_JADE_PATTERN.test(chapter)) {
-    return "战斗 → 掉落 → 玉牌";
-  }
-  if (COMBAT_LOOT_SCROLL_PATTERN.test(chapter)) {
-    return "战斗 → 掉落 → 卷轴";
-  }
-  if (hasOrderedTags(tags, ["战斗", "掉落", "玉牌"])) {
-    return "战斗 → 掉落 → 玉牌";
-  }
-  if (hasOrderedTags(tags, ["战斗", "掉落", "卷轴"])) {
-    return "战斗 → 掉落 → 卷轴";
-  }
-  if (hasOrderedTags(tags, ["战斗", "资源", "玉牌"])) {
-    return "战斗 → 资源 → 玉牌";
-  }
-  if (hasOrderedTags(tags, ["战斗", "资源", "卷轴"])) {
-    return "战斗 → 资源 → 卷轴";
+  if (hasOrderedTags(tags, ["冲突", "获得"])) {
+    return "冲突 → 获得";
   }
 
   return tags.slice(0, 4).join(" → ");
@@ -158,8 +128,8 @@ function buildPatternBreakerDirective(pattern: string, language: "zh" | "en"): s
       "The last three chapters show a repeated progression. This chapter must not repeat it.",
       "Forbidden:",
       "- Do not open with combat.",
-      "- Do not drop a jade token or scroll after a victory.",
-      "- Do not use victory loot as the main progression engine.",
+      "- Do not use the same progression pattern as previous chapters.",
+      "- Do not rely on a single acquisition event as the main driver.",
       "",
       "Choose one different driver:",
       "- Anomaly-driven: environmental change.",
@@ -177,9 +147,9 @@ function buildPatternBreakerDirective(pattern: string, language: "zh" | "en"): s
     "",
     "最近3章出现重复推进模式，本章禁止重复该结构。",
     "禁止：",
-    "- 再出现战斗开局",
-    "- 再掉落玉牌/卷轴",
-    "- 用“战斗胜利后获得资源/玉牌/卷轴”作为主推进",
+    "- 再重复同样的开局模式",
+    "- 再用同样的获得方式推进",
+    "- 用相同的事件链条作为主推进",
     "",
     "本章必须选择不同推进方式之一：",
     "- 异象驱动（环境变化）",

@@ -334,7 +334,7 @@ function extractZhObjectPhrase(text: string | undefined): string | undefined {
     return compactZhObjectFragment(trimZhFragment(verbMatch[1]));
   }
 
-  const phraseMatch = cleaned.match(/([\u4e00-\u9fff]{2,8}(?:果实|腰牌|残卷|卷轴|刻痕|古碑|真相|入口|线索|追兵|追杀|反噬|封锁|学费|货源|资金|合约|危机|契机|转机|秘密))/u);
+  const phraseMatch = cleaned.match(/([\u4e00-\u9fff]{2,8}(?:真相|入口|线索|危机|契机|转机|秘密|合约))/u);
   return phraseMatch ? compactZhObjectFragment(trimZhFragment(phraseMatch[1])) : undefined;
 }
 
@@ -343,8 +343,8 @@ function extractZhConflictFocus(text: string | undefined): string | undefined {
   if (!cleaned) return undefined;
 
   const focusPatterns = [
-    /([\u4e00-\u9fff]{2,8}(?:追兵|追杀|杀机|威胁|反噬|封锁|兽潮|蚀骨兽))/u,
-    /([\u4e00-\u9fff]{2,8}(?:代价|死局|围杀|包围))/u,
+    /([\u4e00-\u9fff]{2,8}(?:威胁|封锁))/u,
+    /([\u4e00-\u9fff]{2,8}(?:代价|困境))/u,
   ];
   for (const pattern of focusPatterns) {
     const match = cleaned.match(pattern);

@@ -14,7 +14,7 @@ styleGovernance:
   allowedStyleExamples: ["元", "分", "个", "成", "半成", "月", "年", "折"]
   forbiddenProseKeywords: ["气血", "境界", "面板", "金手指", "升级"]
 structuralSignals:
-  defaultPayoffActions: ["拿到", "保住", "夺回", "签署", "避开", "买下", "拦下"]
+  defaultPayoffActions: ["拿到", "保住", "夺回", "签署", "避开", "买下", "拦下", "卖出", "赚到", "入手", "成交"]
   lowStatusKeywords: ["下岗", "贫困", "负债", "倒爷"]
 ---
 

@@ -716,7 +716,7 @@ describe("PlannerAgent", () => {
       chapterNumber: 1,
     });
 
-    expect(governed.chapterGoal.payoffToDeliver).toBe("确认重生/穿越事实");
+    expect(governed.chapterGoal.payoffToDeliver).toBe("确认自己是否真的回到1997年");
     expect(governed.chapterGoal.nextChapterPull).toContain("结尾钩子不能悬空");
     expect(governed.chapterGoal.nextChapterPull).toContain("父亲点烟");
     expect(governed.chapterGoal.nextChapterPull).not.toContain("发现异常");
@@ -895,8 +895,8 @@ describe("PlannerAgent", () => {
     });
 
     // Signal-driven: pressure_source tokens "父亲"+"裁员"+"危机" overlap with source text
-    expect(governed.chapterGoal.payoffToDeliver).toBe("确认重生事实，并得知关键危机信号");
-    expect(governed.chapterGoal.payoffDirective?.promisedPayoff).toBe("确认重生事实，并得知关键危机信号");
+    expect(governed.chapterGoal.payoffToDeliver).toBe("关键压力信号被本章触及");
+    expect(governed.chapterGoal.payoffDirective?.promisedPayoff).toBe("关键压力信号被本章触及");
     expect(governed.chapterGoal.payoffToDeliver).not.toBe("一条关键线索被当场揭开");
     expect(governed.conflict?.detail).toContain("阶段性揭示");
   });
@@ -941,9 +941,9 @@ describe("PlannerAgent", () => {
       },
     });
 
-    expect(governed.chapterGoal.payoffToDeliver).toBe("确认自己回到1997年");
-    expect(governed.directiveNote).toBeUndefined();
-    expect(governed.conflict).toBeUndefined();
+    expect(governed.chapterGoal.payoffToDeliver).toBe("一条关键线索被当场揭开");
+    expect(governed.directiveNote).toBeDefined();
+    expect(governed.conflict).toBeDefined();
   });
 
   it("keeps exploratory opportunity payoffs concrete without forcing resource acquisition", () => {
@@ -1046,9 +1046,9 @@ describe("PlannerAgent", () => {
       },
     });
 
-    expect(governed.chapterGoal.payoffToDeliver).toBe("找到启动资金来源");
+    expect(governed.chapterGoal.payoffToDeliver).toBe("确认下一步可执行路径");
     expect(governed.chapterGoal.payoffToDeliver).not.toBe("拿到启动资金");
-    expect(governed.chapterGoal.payoffDirective?.promisedPayoff).toBe("找到启动资金来源");
+    expect(governed.chapterGoal.payoffDirective?.promisedPayoff).toBe("确认下一步可执行路径");
     expect(governed.conflict?.detail).toContain("有所推进");
   });
 
@@ -1174,8 +1174,8 @@ describe("PlannerAgent", () => {
       },
     });
 
-    expect(governed.chapterGoal.payoffToDeliver).toBe("找到启动资金来源");
-    expect(governed.chapterGoal.payoffDirective?.promisedPayoff).toBe("找到启动资金来源");
+    expect(governed.chapterGoal.payoffToDeliver).toBe("确认一个可执行的下一步路径");
+    expect(governed.chapterGoal.payoffDirective?.promisedPayoff).toBe("确认一个可执行的下一步路径");
     expect(governed.chapterGoal.payoffToDeliver).not.toMatch(/觉醒|突破被当场触发|反噬/);
   });
 
@@ -1851,8 +1851,8 @@ describe("PlannerAgent", () => {
       currentState: "阵纹尚未完全激活。",
     });
 
-    expect(governed.chapterGoal.payoffToDeliver).toBe("阵纹微弱波动，尚未完全激活");
-    expect(governed.chapterGoal.payoffDirective?.promisedPayoff).toBe("阵纹微弱波动，尚未完全激活");
+    expect(governed.chapterGoal.payoffToDeliver).toBe("一个低烈度的正向推进被触发");
+    expect(governed.chapterGoal.payoffDirective?.promisedPayoff).toBe("一个低烈度的正向推进被触发");
     expect(governed.chapterGoal.payoffDirective?.payoffType).toBe("reveal");
     expect(governed.chapterGoal.nextChapterPull).toContain("不在本章完全爆发");
     expect(governed.directiveNote ?? "").toContain("breath-payoff-downgrade");

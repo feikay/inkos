@@ -2282,7 +2282,7 @@ describe("PipelineRunner", () => {
     const { root, runner, state, bookId } = await createRunnerFixture({ inputGovernanceMode: "legacy" });
     const storyDir = join(state.bookDir(bookId), "story");
     await Promise.all([
-      writeFile(join(storyDir, "book_rules.md"), "resourceTypes:\n  - 民望值\n  - 联邦币\n\n1点民望=10联邦币\n", "utf-8"),
+      writeFile(join(storyDir, "book_rules.md"), "resourceTypes:\n  - 民望值\n  - 联邦币\n\nresources:\n  民望值:\n    aliases:\n      - 民望\n\n1点民望=10联邦币\n", "utf-8"),
       writeFile(join(storyDir, "current_state.md"), "# 当前状态\n\n| 字段 | 值 |\n|---|---|\n| 当前资源 | 民望值=0；联邦币=200 |\n", "utf-8"),
       writeFile(join(storyDir, "particle_ledger.md"), "# 资源账本\n\n| 资源 | 当前值 | 最近更新章节 | 备注 |\n|---|---:|---:|---|\n| 民望值 | 0 | 0 | 初始 |\n| 联邦币 | 200 | 0 | 初始现金 |\n", "utf-8"),
     ]);
@@ -2342,7 +2342,7 @@ describe("PipelineRunner", () => {
     const { root, runner, state, bookId } = await createRunnerFixture({ inputGovernanceMode: "legacy" });
     const storyDir = join(state.bookDir(bookId), "story");
     await Promise.all([
-      writeFile(join(storyDir, "book_rules.md"), "resourceTypes:\n  - 民望值\n  - 联邦币\n\n1点民望=10联邦币\n", "utf-8"),
+      writeFile(join(storyDir, "book_rules.md"), "resourceTypes:\n  - 民望值\n  - 联邦币\n\nresources:\n  民望值:\n    aliases:\n      - 民望\n\n1点民望=10联邦币\n", "utf-8"),
       writeFile(join(storyDir, "current_state.md"), "| 当前资源 | 民望值=0；联邦币=0 |\n", "utf-8"),
       writeFile(join(storyDir, "particle_ledger.md"), "| 民望值 | 0 |\n| 联邦币 | 0 |\n", "utf-8"),
     ]);
@@ -2406,7 +2406,7 @@ describe("PipelineRunner", () => {
     const { root, runner, state, bookId } = await createRunnerFixture({ inputGovernanceMode: "legacy" });
     const storyDir = join(state.bookDir(bookId), "story");
     await Promise.all([
-      writeFile(join(storyDir, "book_rules.md"), "resourceTypes:\n  - 民望值\n  - 联邦币\n\n1点民望=10联邦币\n初级辩论技能消耗10点民望\n", "utf-8"),
+      writeFile(join(storyDir, "book_rules.md"), "resourceTypes:\n  - 民望值\n  - 联邦币\n\nresources:\n  民望值:\n    aliases:\n      - 民望\n\n1点民望=10联邦币\n初级辩论技能消耗10点民望\n", "utf-8"),
       writeFile(join(storyDir, "current_state.md"), "| 当前资源 | 民望值=0；联邦币=200 |\n", "utf-8"),
       writeFile(join(storyDir, "particle_ledger.md"), "| 民望值 | 0 |\n| 联邦币 | 200 |\n", "utf-8"),
     ]);
@@ -2478,7 +2478,7 @@ describe("PipelineRunner", () => {
     const { root, runner, state, bookId } = await createRunnerFixture({ inputGovernanceMode: "legacy" });
     const storyDir = join(state.bookDir(bookId), "story");
     await Promise.all([
-      writeFile(join(storyDir, "book_rules.md"), "resourceTypes:\n  - 民望值\n  - 联邦币\n\n1点民望=10联邦币\n初级辩论技能消耗10点民望\n", "utf-8"),
+      writeFile(join(storyDir, "book_rules.md"), "resourceTypes:\n  - 民望值\n  - 联邦币\n\nresources:\n  民望值:\n    aliases:\n      - 民望\n\n1点民望=10联邦币\n初级辩论技能消耗10点民望\n", "utf-8"),
       writeFile(join(storyDir, "current_state.md"), "| 当前资源 | 民望值=0；联邦币=200 |\n", "utf-8"),
       writeFile(join(storyDir, "particle_ledger.md"), "| 民望值 | 0 |\n| 联邦币 | 200 |\n", "utf-8"),
     ]);
@@ -2572,7 +2572,7 @@ describe("PipelineRunner", () => {
     const { root, runner, state, bookId } = await createRunnerFixture({ inputGovernanceMode: "legacy" });
     const storyDir = join(state.bookDir(bookId), "story");
     await Promise.all([
-      writeFile(join(storyDir, "book_rules.md"), "resourceTypes:\n  - 民望值\n  - 联邦币\n\n1点民望=10联邦币\n初级辩论技能消耗10点民望\n", "utf-8"),
+      writeFile(join(storyDir, "book_rules.md"), "resourceTypes:\n  - 民望值\n  - 联邦币\n\nresources:\n  民望值:\n    aliases:\n      - 民望\n\n1点民望=10联邦币\n初级辩论技能消耗10点民望\n", "utf-8"),
       writeFile(join(storyDir, "current_state.md"), "| 当前资源 | 民望值=0；联邦币=200 |\n", "utf-8"),
       writeFile(join(storyDir, "particle_ledger.md"), "| 民望值 | 0 |\n| 联邦币 | 200 |\n", "utf-8"),
     ]);
@@ -2670,7 +2670,7 @@ describe("PipelineRunner", () => {
     const { root, runner, state, bookId } = await createRunnerFixture({ inputGovernanceMode: "legacy" });
     const storyDir = join(state.bookDir(bookId), "story");
     await Promise.all([
-      writeFile(join(storyDir, "book_rules.md"), "resourceTypes:\n  - 民望值\n  - 联邦币\n\n1点民望=10联邦币\n初级辩论技能消耗10点民望\n", "utf-8"),
+      writeFile(join(storyDir, "book_rules.md"), "resourceTypes:\n  - 民望值\n  - 联邦币\n\nresources:\n  民望值:\n    aliases:\n      - 民望\n\n1点民望=10联邦币\n初级辩论技能消耗10点民望\n", "utf-8"),
       writeFile(join(storyDir, "current_state.md"), "| 当前资源 | 民望值=0；联邦币=200 |\n", "utf-8"),
       writeFile(join(storyDir, "particle_ledger.md"), "| 民望值 | 0 |\n| 联邦币 | 200 |\n", "utf-8"),
     ]);

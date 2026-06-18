@@ -156,7 +156,7 @@ const ENDING_HOOK_PATTERNS: Record<EndingHookType, ReadonlyArray<RegExp>> = {
     /choice|decision|must choose|either .* or|forced to decide|dilemma/i,
   ],
   breakthrough: [
-    /突破|破境|晋阶|觉醒|掌握|领悟|蜕变|提升|新能力/u,
+    /突破|觉醒|掌握|领悟|蜕变|提升|新能力/u,
     /breakthrough|ascend|advanced|awakened|mastered|new ability|leveled up/i,
   ],
 };
@@ -167,12 +167,12 @@ const MOOD_CALM_PATTERNS = [
 ] as const;
 
 const MOOD_COMBAT_PATTERNS = [
-  /交锋|厮杀|搏杀|刀光|剑光|轰击|爆开|追兵扑来|封锁|围杀|杀机|血战|对轰/u,
+  /交锋|厮杀|搏杀|轰击|爆开|追兵扑来|封锁|杀机|血战|激战|猛攻|冲击|夹击/u,
   /clash|combat|battle|lunged|struck|ambush|sealed|fight|trading blows|blood fight/i,
 ] as const;
 
 const SCENE1_ESCALATION_PATTERNS = [
-  /杀|斩|砍|轰|爆发|突袭|冲杀|厮杀|交锋|血战|对轰|追兵扑来|封锁升级|危机升级|冲突升级/u,
+  /杀|斩|砍|轰|爆发|突袭|冲杀|厮杀|交锋|血战|猛攻|进逼|追兵扑来|封锁升级|危机升级|冲突升级/u,
   /kill|slash|strike|detonate|ambush|charge|battle|clash|fight|escalat(?:e|ed|ing)|new threat/i,
 ] as const;
 
@@ -187,7 +187,7 @@ const SCENE2_INTERACTION_PATTERNS = [
 ] as const;
 
 const SCENE1_FORBIDDEN_PRESSURE_PATTERNS = [
-  /威胁|规则压力|规则压制|追杀|追兵|围杀|风暴|杀机|危机升级|冲突升级|爆发|崩裂|濒死|封锁升级/u,
+  /威胁|规则压力|追杀|杀机|危机升级|冲突升级|爆发|崩裂|濒死|封锁升级|危险逼近|压力骤增|包围收紧|局势恶化/u,
   /threat|rule pressure|pursuit|chase|storm|kill intent|danger|conflict escalat(?:e|ed|ion)|explod(?:e|ed|ing)|collapse|dying/i,
 ] as const;
 
@@ -285,7 +285,7 @@ const PAYOFF_RESOURCE_TRIGGER_PATTERNS = [
 ] as const;
 
 const PAYOFF_RESOURCE_FLAT_PATTERNS = [
-  /(?:他|她|楚夜|主角).{0,8}(获得了|拿到了|得到了).{0,16}(地图|情报|线索|腰牌|钥匙|令牌|卷轴|残图|信息)/u,
+  /(?:他|她|主角).{0,8}(获得了|拿到了|得到了).{0,16}(地图|情报|线索|信息|物品|资源|工具)/u,
   /(?:地图|情报|线索|记忆|信息).{0,12}(出现在脑海|涌入脑海|浮现在脑海|映入脑海)/u,
   /(?:he|she|the protagonist).{0,12}(got|gained|received|obtained).{0,24}(map|intel|clue|token|key|scroll|information)/i,
   /(?:information|memory|map details?).{0,24}(appeared in (?:his|her|the protagonist's) mind|flooded into (?:his|her|the protagonist's) mind)/i,
@@ -302,8 +302,8 @@ const PAYOFF_IMPACT_SENSORY_PATTERNS: ReadonlyArray<RegExp> = [
 ];
 
 const PAYOFF_IMPACT_COST_PATTERNS: ReadonlyArray<RegExp> = [
-  /代价|反噬|消耗|耗尽|折损|亏空|受损|伤口|旧伤|经脉|寿元|牺牲|付出|崩裂|失血|吐血|断裂|失控|精血|灵力.{0,4}骤降|结晶化|残缺|污染|暴露身份|牺牲他人/u,
-  /cost|backlash|consume|deplete|drain|price paid|injur(?:y|ed)|wound|meridian|lifespan|sacrifice|spent|vomit(?:ed)? blood|fracture|lost control|blood essence|spirit power drop|crystalliz(?:e|ed)|maimed|corrupt(?:ed|ion)|identity exposed/i,
+  /代价|反噬|消耗|耗尽|折损|亏空|受损|伤口|旧伤|牺牲|付出|崩裂|失血|吐血|断裂|失控|残缺|污染|暴露身份|牺牲他人|虚弱|脱力|透支|濒危/u,
+  /cost|backlash|consume|deplete|drain|price paid|injur(?:y|ed)|wound|sacrifice|spent|fracture|lost control|maimed|corrupt(?:ed|ion)|identity exposed|weakness|exhaustion|overdraft|near death/i,
 ];
 
 const PAYOFF_IMPACT_RESULT_PATTERNS: ReadonlyArray<RegExp> = [
@@ -365,42 +365,31 @@ const RESOURCE_SIGNAL_RULES: ReadonlyArray<{
   };
 }> = [
   {
-    kind: "consumption",
-    signal: "qi-blood-consumption",
-    patterns: [/气血.{0,8}(下降|减少|亏空|亏损|耗尽|消耗|骤降|暴跌)/u, /blood.*(drain|loss|spent|depleted|drop|plunge)/i],
-    statePatterns: [/气血|血气|亏空|耗损|不足/u, /blood|vitality|drain|depleted/i],
-    warningRule: "resource-ledger-missing-consumption",
-    expectedUpdate: {
-      zh: "需要在当前状态或资源账本中记录气血消耗/亏空。",
-      en: "Record qi-blood loss or depletion in current state or resource ledger.",
-    },
-  },
-  {
-    kind: "consumption",
-    signal: "shaqi-consumption",
-    patterns: [/煞气.{0,8}(消耗|耗尽|减少|抽空|亏空)|强行催动.{0,8}煞气/u, /sha qi.*(spent|drain|depleted|reduced)|force.*sha qi/i],
-    statePatterns: [/煞气|消耗|抽空|亏空/u, /sha qi|depleted|spent|drain/i],
-    warningRule: "resource-ledger-missing-consumption",
-    expectedUpdate: {
-      zh: "需要在资源账本或状态中记录煞气消耗。",
-      en: "Record sha-qi expenditure in the ledger or current state.",
-    },
-  },
-  {
     kind: "injury",
     signal: "backlash-or-injury",
-    patterns: [/强行催动|反噬|噬心之痛|五脏六腑受损|经脉.{0,6}(刺痛|震伤)|伤口.{0,6}(恶化|崩裂|加重)/u, /backlash|heart-rending pain|organs? damaged|meridians?.*(hurt|shaken)|wound.*(worsen|split|reopen)/i],
-    statePatterns: [/伤势|伤口|经脉|反噬|受损|刺痛|震伤/u, /injury|wound|meridian|backlash|damaged|pain/i],
+    patterns: [/反噬|噬心之痛|五脏六腑受损|伤口.{0,6}(恶化|崩裂|加重)/u, /backlash|heart-rending pain|organs? damaged|wound.*(worsen|split|reopen)/i],
+    statePatterns: [/伤势|伤口|反噬|受损|刺痛|震伤/u, /injury|wound|backlash|damaged|pain/i],
     warningRule: "resource-ledger-missing-injury-update",
     expectedUpdate: {
-      zh: "需要在当前状态中同步伤势、反噬或经脉受损。",
-      en: "Reflect injury, backlash, or meridian damage in current state.",
+      zh: "需要在当前状态中同步伤势、反噬或身体受损。",
+      en: "Reflect injury, backlash, or physical damage in current state.",
+    },
+  },
+  {
+    kind: "consumption",
+    signal: "stamina-consumption",
+    patterns: [/体力.{0,8}(下降|减少|亏空|耗尽|消耗|骤降|不支)/u, /stamina.*(drain|loss|spent|depleted|drop|failing)/i],
+    statePatterns: [/体力|亏空|耗损|不足/u, /stamina|drain|depleted/i],
+    warningRule: "resource-ledger-missing-consumption",
+    expectedUpdate: {
+      zh: "需要在当前状态或资源账本中记录体力消耗/亏空。",
+      en: "Record stamina loss or depletion in current state or resource ledger.",
     },
   },
   {
     kind: "recovery",
     signal: "recovery",
-    patterns: [/气血.{0,8}(恢复|回升)|煞气.{0,8}(补充|恢复|回升)|伤口.{0,8}(止血|愈合)|修复伤势|经脉.{0,8}恢复|体力.{0,8}回升/u, /blood.*recover|sha qi.*recover|wound.*(closed|stopped bleeding|healed)|recover(ed)? strength|meridians?.*recover/i],
+    patterns: [/伤口.{0,8}(止血|愈合)|修复伤势|体力.{0,8}回升/u, /wound.*(closed|stopped bleeding|healed)|recover(ed)? strength/i],
     statePatterns: [/恢复|回升|止血|愈合|修复/u, /recover|restored|healed|stopped bleeding/i],
     warningRule: "resource-ledger-missing-recovery",
     expectedUpdate: {
@@ -411,7 +400,7 @@ const RESOURCE_SIGNAL_RULES: ReadonlyArray<{
   {
     kind: "growth",
     signal: "growth",
-    patterns: [/煞气.{0,8}(增加|暴涨|更盛)|境界.{0,8}(提升|突破)|掌握.{0,8}(新手段|新能力)|临时突破/u, /sha qi.*(increase|surge)|realm.*(advance|breakthrough)|mastered.*(ability|method)|temporary breakthrough/i],
+    patterns: [/掌握.{0,8}(新手段|新能力)|临时突破/u, /mastered.*(ability|method)|temporary breakthrough/i],
     statePatterns: [/提升|突破|掌握|增加|更盛/u, /advance|breakthrough|mastered|increase|surge/i],
     warningRule: "resource-ledger-missing-growth-update",
     expectedUpdate: {
@@ -453,12 +442,12 @@ const COLLECTIVE_SHOCK_PATTERNS = [
 ];
 
 const CHARACTER_EXPOSITION_PATTERNS = [
-  /他意识到|她意识到|楚夜意识到|他明白|她明白|楚夜明白|这意味着|显然/u,
+  /他意识到|她意识到|他明白|她明白|这意味着|显然/u,
   /he realized|she realized|he understood|she understood|this meant|obviously/i,
 ] as const;
 
 const EMOTION_TELLING_PATTERNS = [
-  /他很(?:愤怒|紧张|疲惫|害怕|悲伤|恼火|焦虑)|她很(?:愤怒|紧张|疲惫|害怕|悲伤|恼火|焦虑)|楚夜很(?:愤怒|紧张|疲惫|害怕|悲伤|恼火|焦虑)/u,
+  /他很(?:愤怒|紧张|疲惫|害怕|悲伤|恼火|焦虑)|她很(?:愤怒|紧张|疲惫|害怕|悲伤|恼火|焦虑)/u,
   /he was (?:angry|nervous|tense|afraid|sad|furious|exhausted)|she was (?:angry|nervous|tense|afraid|sad|furious|exhausted)/i,
 ] as const;
 
@@ -468,13 +457,13 @@ const PERFECT_DECISION_PATTERNS = [
 ] as const;
 
 const WORLD_EXPOSITION_PATTERNS = [
-  /按照(?:这个世界|此界|本界)?(?:的)?(?:战力规则|修炼规则|境界规则)|所谓(?:战力|修炼|境界)规则|这个世界的(?:修炼体系|战力体系|规则是)|在这个世界里(?:修炼|力量|境界)/u,
-  /这意味着.{0,16}(战力|境界|规则|体系)|(?:世界观|设定|修炼体系|战力体系)(?:说明|解释)/u,
-  /according to (?:the world's )?(?:power rules|cultivation rules)|the world(?:building)? explains|in this world, (?:cultivation|power) works|battle power rules/i,
+  /按照(?:这个世界|此界|本界).{0,4}规则|所谓.{0,3}规则|这个世界的.{0,4}(?:规则|是)|在这个世界里/u,
+  /这意味着.{0,16}(规则|体系)|(?:世界观|设定)(?:说明|解释)/u,
+  /according to (?:the world's )?.{0,8}rules|the world(?:building)? explains|in this world, (?:rules|power) works/i,
 ] as const;
 
 const COGNITIVE_JUMP_PATTERNS = [
-  /他意识到|她意识到|楚夜意识到|他明白|她明白|楚夜明白|这说明/u,
+  /他意识到|她意识到|他明白|她明白|这说明/u,
   /he realized|she realized|he understood|she understood|this showed|this meant/i,
 ] as const;
 
@@ -1739,7 +1728,7 @@ function getPayoffMaterializationPatterns(
     case "resource":
       return [/拿到|获得|夺得|到手|交给|搜出|got|gained|obtained|secured|claimed/i];
     case "breakthrough":
-      return [/突破|晋阶|掌握|学会|压住|稳住|觉醒|broke through|mastered|awakened|stabilized/i];
+      return [/掌握|学会|压住|稳住|觉醒|关键进展|能力提升|broke through|mastered|awakened|stabilized/i];
     case "relationship":
       return [/信任|和解|结盟|坦白|承认|trust|reconcile|alliance|confessed|bond/i];
     case "reversal":
@@ -2706,10 +2695,10 @@ function inferPayoffTypeFromPromise(payoff: string): PayoffDirective["payoffType
   if (/真相|来历|来源|身份|揭开|揭示|发现|查明|线索|秘密|origin|source|truth|reveal|identity|clue/i.test(payoff)) {
     return "reveal";
   }
-  if (/获得|拿到|夺得|资源|地图|腰牌|卷轴|残卷|药材|灵石|resource|obtain|gain|map|token|scroll/i.test(payoff)) {
+  if (/获得|拿到|夺得|资源|地图|物资|补给|工具|resource|obtain|gain|map|supplies/i.test(payoff)) {
     return "resource";
   }
-  if (/突破|晋阶|掌握|觉醒|学会|压住|稳住|新能力|breakthrough|master|awaken|stabilize|new ability/i.test(payoff)) {
+  if (/掌握|觉醒|学会|压住|稳住|新能力|关键进展|breakthrough|master|awaken|stabilize|new ability/i.test(payoff)) {
     return "breakthrough";
   }
   if (/信任|和解|关系|告白|结盟|relationship|trust|bond|reconcile|alliance/i.test(payoff)) {
@@ -3518,8 +3507,11 @@ function matchesExceptionAt(content: string, term: string, index: number, except
 }
 
 function extractKeywords(phrase: string): string[] {
+  // Strip positive-requirement clauses — words after "必须出现/必须有/必须包含"
+  // describe what the story SHOULD include, not what it should avoid.
+  const safePhrase = phrase.replace(/[，,]\s*(?:关键细节|本章)?\s*(?:必须|应该|应当)(?:出现|有|包含|体现|具备|存在)[^，,。.!?\n]*/gu, "").trim();
   const chineseStopWords = /任何时候|时候|不得|不能|不许|严禁|禁止|出现|使用|进行|相关|剧情|内容|元素|任何|[的了在是着与和或及以由于为之而也得但且将被从去往到时使]/gu;
-  const normalized = phrase.replace(chineseStopWords, " ");
+  const normalized = safePhrase.replace(chineseStopWords, " ");
   const chineseStopTokens = new Set([
     "主角",
     "角色",
@@ -3596,7 +3588,10 @@ export function parseMandatoryItemsFromIntent(intentContent: string): Array<{ de
 /** Extract a regex signal from a mandatory item description for content matching. */
 function extractMandatorySignal(description: string): string {
   // Extract quoted or key terms: names, numbers, specific phrases
-  const names = description.match(/苏晴|陈志强|刘文轩|王胖子|马明远|林建国|周秀兰|林远/g);
+  // Extract potential Chinese names (2-3 char sequences, filtering stop words)
+  const nameCandidates = description.match(/[一-鿿]{2,3}/g);
+  const nameStops = new Set(["本章", "必须", "出现", "提及", "通过", "任一", "方式", "不展开", "不超过", "关键", "细节", "角色", "事件", "信息", "内容", "剧情", "需要", "应该", "可以", "能够", "已经", "没有", "进行", "使用"]);
+  const names = nameCandidates?.filter(n => !nameStops.has(n));
   if (names && names.length > 0) return [...new Set(names)].join("|");
 
   // Match number patterns for time anchors
